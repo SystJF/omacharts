@@ -177,7 +177,7 @@ See `omacharts skill --help`, or
 
 Rough order, and nothing here is a promise.
 
-- [ ] **Beautiful annotations.** Trendlines, levels and notes that stay where
+- [x] **Beautiful drawings.** Trendlines, levels and notes that stay where
       you put them, and look like they belong on the chart rather than on top
       of it.
 - [ ] **More data feeds.** Yahoo is one provider behind one interface. Others
