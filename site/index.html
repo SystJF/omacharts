@@ -97,6 +97,26 @@
     text-shadow: 0 .02em .1em rgba(0, 0, 0, .65);
   }
 
+  /* Omarchy keeps the line's colour and takes an underline, so it reads as
+     a link without breaking the sentence apart. */
+  .tagline a {
+    color: inherit;
+    text-decoration: underline;
+    text-decoration-color: rgba(243, 236, 220, .4);
+    text-underline-offset: .14em;
+    text-decoration-thickness: .045em;
+    transition: text-decoration-color .18s ease, color .18s ease;
+  }
+  .tagline a:hover {
+    color: var(--bright);
+    text-decoration-color: var(--amber);
+  }
+  .tagline a:focus-visible {
+    outline: 2px solid var(--amber);
+    outline-offset: 4px;
+    border-radius: 2px;
+  }
+
   .repo {
     margin-top: clamp(1.6rem, 3.4vw, 4rem);
     padding: .72em 1.5em;
@@ -124,6 +144,7 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
+    .tagline a { transition: none; }
     .repo { transition: none; }
     .repo:hover { transform: none; }
   }
@@ -132,7 +153,7 @@
 <body>
   <main>
     <h1>Omacharts</h1>
-    <p class="tagline">Beautiful charting software for Omarchy</p>
+    <p class="tagline">Beautiful charting software for <a href="https://omarchy.org">Omarchy</a></p>
     <a class="repo" href="https://github.com/jorgemanrubia/omacharts">View on GitHub</a>
   </main>
 </body>
