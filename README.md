@@ -44,6 +44,7 @@ Fast, beautiful charting software for [Omarchy](https://omarchy.org).
   fills rather than fixed colours, held clear of the candles, so a drawing
   reads on any theme. Any figure takes a label, bold and italic included, and
   what you draw is on every chart of that symbol.
+  [See how it works](https://www.youtube.com/watch?v=wwMnxI0watk).
 - **Omarchy plugin.** Your watchlist in the bar, with sparklines, live, still
   there after the window closes. It installs itself the first time you run
   Omacharts on an Omarchy desktop, and `omacharts plugin` puts it back, brings
