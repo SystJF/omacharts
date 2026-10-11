@@ -287,13 +287,27 @@ reasoning:
   running window. These run on the GTK main loop, where anything slow is
   felt directly as lag rather than measured as a number.
 
+CI measures all three on every pull request — `bin/perf-compare` runs
+`examples/perf.rs` against the merge-base on the same runner and fails on
+allocation counts, which are byte-identical run to run, while wall clock
+only fails at a doubling. So the first question is whether its job went
+green, and the second is whether this change is one the existing scenarios
+actually cover. If it is not, the review's own numbers are the evidence, and
+a scenario added to `examples/perf.rs` is how the next reviewer gets them
+for free.
+
 For any of the three, get numbers on `main` and on the branch, measured the
 same way on the same data:
 
-- Time the work itself over a synthetic series at 10k and 100k bars, the way
-  the indicator rules above ask for, and quote both sides. An `#[ignore]`d
-  test that prints a duration is enough; it does not have to be a benchmark
-  harness.
+- Run `bin/perf-compare` yourself for the covered paths rather than
+  reinventing the measurement. For anything it does not reach, time the work
+  over a synthetic series at 10k and 100k bars, the way the indicator rules
+  above ask for, and quote both sides — an `#[ignore]`d test that prints a
+  duration is enough.
+- Prefer a count to a clock wherever one exists. Allocations, redraws
+  queued, work items per frame: these do not drift with what else the
+  machine is doing, and a regression that moved a clock by 0.7% has moved an
+  allocation count by 1230%.
 - Watch for the shapes that cause it: work per bar that could be done once
   per redraw, work per redraw that only changes when the bars do, a fresh
   allocation inside the loop, a window recomputed for every bar instead of
