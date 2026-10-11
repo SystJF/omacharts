@@ -178,18 +178,7 @@ omacharts skill install
 See `omacharts skill --help`, or
 [doc/cli.md](doc/cli.md#teaching-an-agent-about-this-app).
 
-## Roadmap
-
-Rough order, and nothing here is a promise.
-
-- [x] **Beautiful drawings.** Trendlines, levels and notes that stay where
-      you put them, and look like they belong on the chart rather than on top
-      of it.
-- [ ] **More data feeds.** Yahoo is one provider behind one interface. Others
-      can sit behind the same one, including the paid ones with real-time
-      prices.
-- [ ] **More indicators.** MACD and Bollinger bands are the obvious gaps.
-- [ ] ...
+## Contributing
 
 Pull requests are welcome.
 
