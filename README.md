@@ -39,11 +39,9 @@ Fast, beautiful charting software for [Omarchy](https://omarchy.org).
 - **Indicators.** Moving averages, VWAP with bands, volume, volume profile,
   RSI, ATR and stochastic, each in its own resizable strip. More coming.
 - **Drawings.** Trendlines, levels, arrows, zig-zags, boxes, circles and text,
-  each one key away (`Alt+L`, `H`, `A`, `Z`, `R`, `C`, `T`), with nine
-  configurations per kind on `Alt+1` to `Alt+9`. Those are roles your theme
-  fills rather than fixed colours, held clear of the candles, so a drawing
-  reads on any theme. Any figure takes a label, bold and italic included, and
-  what you draw is on every chart of that symbol.
+  a keystroke each. Their colours are roles your theme fills, held clear of
+  the candles, so a drawing reads on any theme. Figures take labels, and what
+  you draw is on every chart of that symbol.
   [See how it works](https://www.youtube.com/watch?v=wwMnxI0watk).
 - **Omarchy plugin.** Your watchlist in the bar, with sparklines, live, still
   there after the window closes. It installs itself the first time you run
