@@ -192,6 +192,38 @@ and offer to merge the documentation hunk alone. That is the real fix.
   before and after rather than guessing, and say the numbers.
 - **No gratuitous reformatting** of code the PR did not otherwise touch.
 
+## A change in the draw path gets measured
+
+Standing instruction from the owner: do not let a performance regression in
+so quietly that nobody notices until the app feels slow. Rendering, the draw
+callbacks, bar geometry, gridlines, the indicator strips, the hit-testing
+that runs on pointer motion — anything on that path runs for every bar of
+every chart on every frame, so a cost that looks trivial per bar is the
+frame budget at 100k bars.
+
+A PR that touches any of it gets numbers, on `main` and on the branch,
+measured the same way on the same data:
+
+- Time the work itself over a synthetic series at 10k and 100k bars, the way
+  the indicator rules above ask for, and quote both sides. An `#[ignore]`d
+  test that prints a duration is enough; it does not have to be a benchmark
+  harness.
+- Watch for the shapes that cause it: work per bar that could be done once
+  per redraw, work per redraw that only changes when the bars do, a fresh
+  allocation inside the loop, a window recomputed for every bar instead of
+  rolled, a sort or a map rebuilt in the callback.
+- Count the redraws too, not just their cost. A change that queues a second
+  `queue_draw` per event doubles the work while every individual frame still
+  looks fast.
+- Scroll and zoom a long series in the real window and say whether it still
+  feels immediate. A number that got worse but stays under a millisecond is
+  worth a line in the report, not a blocker.
+
+A regression that is real and intended — the feature cannot be had any
+cheaper — is the owner's call, so report it with the measurement rather
+than deciding alone. A regression nobody measured is the thing this rule
+exists to prevent.
+
 ## When the PR adds or changes an indicator
 
 An indicator is maths that runs on every bar of every chart that shows it,
