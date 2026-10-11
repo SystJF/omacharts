@@ -155,6 +155,15 @@ XDG_DATA_HOME=$(mktemp -d) DBUS_SESSION_BUS_ADDRESS= ./target/debug/omacharts �
 nothing and will write to the real profile. Blanking the bus address keeps
 the command local instead of forwarding it to a running window.
 
+**Kill only what you launched, by pid.** `pkill omacharts` matches the
+owner's own window, which is open on his real profile while he works — an
+agent tidying up its test processes that way killed his live app and every
+other agent's test window with it. Keep the pids you started and kill
+those. The same goes for closing his instance to launch your own build:
+single-instance over D-Bus means a launch otherwise just raises the old
+binary, so sometimes it has to happen — but it is his app disappearing from
+his screen, so say in the report that you did it.
+
 Driving the window itself, when a claim needs it: launch with
 `GDK_BACKEND=x11` so `xdotool` can reach it, find it with `xdotool search
 --pid <pid> --onlyvisible | tail -1`, and capture its own pixels with
