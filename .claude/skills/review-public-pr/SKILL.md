@@ -28,7 +28,12 @@ it.
 One PR per agent, each in its own worktree, so several can run at once
 without fighting over a checkout. Give each agent its own build directory
 too — two agents sharing a scratchpad binary have overwritten each other
-mid-run and produced contradictory results. Asked to review several, run
+mid-run and produced contradictory results. "Somewhere in your scratchpad"
+is not enough: the scratchpad belongs to the session, not to the agent, so
+every agent told that picks `scratchpad/target` and they collide. Name the
+directory after the PR — `CARGO_TARGET_DIR=…/scratchpad/target-pr45` — and
+an agent that finds a binary it did not build moves and rebuilds rather
+than trusting it. Asked to review several, run
 them in batches of three: three agents at once, the next three when those
 report. More than that and the builds starve each other and the reports
 arrive faster than anyone can read them.
