@@ -1582,6 +1582,24 @@ impl ChartView {
         busy
     }
 
+    /// Drop a drawing half laid down, keeping the tool that was laying it
+    /// down in hand. Says whether there was one to drop.
+    fn drop_placing(&self) -> bool {
+        {
+            let mut s = self.state.borrow_mut();
+            if s.placing.take().is_none() {
+                return false;
+            }
+            // The drag the gesture is still in ends with nothing to commit.
+            if matches!(s.drag, Some(Drag::Place { .. })) {
+                s.drag = None;
+            }
+        }
+        // The drawing in hand is on the pointer layer.
+        self.pointer.queue_draw();
+        true
+    }
+
     /// The drawing most recently taken into the selection, if any has the
     /// grips: the one a single-drawing question is about.
     pub fn selected_drawing(&self) -> Option<Drawing> {
@@ -3631,21 +3649,27 @@ impl ChartView {
         let view = Rc::downgrade(self);
         click.connect_pressed(move |_, _, x, y| {
             let (width, height) = (area.width() as f64, area.height() as f64);
+            // A drawing half laid down: the right button drops it and keeps
+            // the tool for another go, and that is all it does. A menu then
+            // is a menu nobody reached for. With nothing laid down the menus
+            // are what they always are, and the tool stays in hand either
+            // way: Escape is what puts it down.
+            if let Some(view) = view.upgrade()
+                && view.drop_placing()
+            {
+                return;
+            }
             if region_at(x, y, width, height) != Region::PriceAxis {
                 // The menu is about what is under the pointer: a drawing
                 // there is selected and gets a menu of its own, about the
-                // drawing and nothing else. A right-click while a tool is
-                // armed puts it down.
-                if let Some(view) = view.upgrade() {
-                    if view.armed().is_some() {
-                        view.arm(None);
+                // drawing and nothing else.
+                if let Some(view) = view.upgrade()
+                    && view.select_at(x, y)
+                {
+                    if let Some(handler) = view.on_drawing_menu.borrow().as_ref() {
+                        handler(x, y);
                     }
-                    if view.select_at(x, y) {
-                        if let Some(handler) = view.on_drawing_menu.borrow().as_ref() {
-                            handler(x, y);
-                        }
-                        return;
-                    }
+                    return;
                 }
                 // The chart's own menu belongs to whoever owns the chart.
                 if let Some(handler) = on_context_menu.borrow().as_ref() {
@@ -6284,6 +6308,33 @@ mod tests {
             .compute_point(&view.area, &gtk::graphene::Point::new(0.0, 0.0))
             .expect("the two layers are in the same window");
         assert_eq!((at.x(), at.y()), (0.0, 0.0), "the layer is offset from the chart");
+    }
+
+    /// A right-click with a drawing half laid down drops it and keeps the
+    /// tool in hand, for another go.
+    #[test]
+    fn a_drawing_half_laid_down_is_dropped_and_the_tool_kept() {
+        if !crate::ui::gtk_ready() {
+            return;
+        }
+        let theme = omacharts_engine::theme::builtin_themes()
+            .into_iter()
+            .next()
+            .expect("a built-in theme");
+        let scheme = omacharts_engine::theme::theme_bars(&theme);
+        let view = ChartView::new(theme, scheme);
+        view.arm(Some(DrawingKind::Line));
+        assert!(!view.drop_placing(), "nothing laid down yet");
+        {
+            let mut s = view.state.borrow_mut();
+            let at = Anchor::new(1, 1.0);
+            s.placing = Some(Drawing::new(DrawingKind::Line, at, at));
+            s.drag = Some(Drag::Place { moved: true });
+        }
+        assert!(view.drop_placing());
+        let s = view.state.borrow();
+        assert!(s.placing.is_none() && s.drag.is_none(), "the drawing is gone");
+        assert_eq!(s.tool, Some(DrawingKind::Line), "the tool is still in hand");
     }
 
     /// The chart wears one tooltip — the trouble dot's — and GTK opens it by
