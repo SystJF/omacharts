@@ -433,6 +433,22 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
   background: @view_bg_color;
   border-bottom-left-radius: 12px;
 }
+/* The drawing tools' corner on the left, the mirror of the one on the right:
+   centred over the bar it opens, which is as wide as one of its tools. Two
+   pixels higher than the right one, the same height overall: beside the
+   chart's name, it centres on the name. */
+.window-corner.start {
+  padding: 8px 7px 5px 7px;
+}
+.window-corner.start.over-chart {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 12px;
+}
+/* Beside a chart's name it is one more glyph in the row, and the name is
+   what that corner is for: so it stays well under the name until the
+   pointer comes to it. */
+.window-corner.start.over-chart button { opacity: 0.25; }
+.window-corner.start.over-chart:hover button { opacity: 1; }
 /* Quiet until the pointer is near: on the buttons rather than the box, which
    is what leaves the ground at its own strength. */
 .window-corner button {
@@ -447,18 +463,6 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 /* The drawing tools, down the left edge: a column of two, quiet until one is
    in hand, which lights it in the accent the way a pressed tool should. */
 .drawing-bar { padding: 0; }
-/* The tools' handle in the bottom-left corner: faint enough to be
-   furniture until the pointer is on it or the bar is out, the accent
-   under the pointer, so it reads as a thing that does something. */
-.drawing-handle { color: @window_fg_color; opacity: 0.45; transition: opacity 120ms ease-out, color 120ms ease-out; }
-.drawing-handle.open { opacity: 0.9; }
-.drawing-handle:hover { color: @accent_bg_color; opacity: 1; }
-/* Floating over the chart, with no strip to sit in: the window's own
-   ground under it and a shadow, so the frame reads as a frame and not
-   as part of the indicator beneath. */
-.drawing-handle.floating { background: @window_bg_color; border-radius: 0 8px 8px 0; box-shadow: 0 1px 3px alpha(black, 0.35); opacity: 0.7; }
-.drawing-handle.floating.open { opacity: 1; }
-.drawing-handle.floating:hover { opacity: 1; }
 /* The rules between the bands of tools: present, and no louder than that. */
 .drawing-tool-rule { background: alpha(@window_fg_color, 0.14); min-height: 1px; margin: 3px 7px; }
 .drawing-tool { padding: 2px; border-radius: 8px; opacity: 0.8; }
@@ -765,6 +769,17 @@ paned.chart-split > separator:active {{ background-color: @omacharts_gutter_hove
   border: {ring}px solid transparent;
 }}
 .chart-split .chart-pane.focused {{ border-color: @omacharts_focus; }}
+.chart-split .chart-pane.focused .ring-cut {{ background: @omacharts_focus; }}
+/* The drawing tools lie flush over the charts' left edge, so they bring
+   their own ground, with the ring's width of it before the tools, so the
+   tools sit where they did when the bar stood inside the ring. Their edge
+   against the charts is the rail's against them: Adwaita's paned separator,
+   a sixth of the text colour over the window's ground. */
+.drawing-tools {{
+  background: @window_bg_color;
+  padding: {ring}px 0 0 {ring}px;
+  box-shadow: inset -1px 0 alpha(@window_fg_color, 0.15);
+}}
 ",
         gutter = GUTTER_WIDTH,
         ring = RING_WIDTH,
