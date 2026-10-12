@@ -4844,6 +4844,7 @@ impl Window {
         // Escape in a search box is otherwise dead; here it means the same
         // thing it means everywhere else in the sheet.
         crate::ui::dialogs::close_on_search_escape(&search, &dialog);
+        crate::ui::dialogs::close_on_click_outside(&dialog);
 
         // The keyboard lands in the box, so the first thing typed is the
         // search. Asked of the dialog rather than grabbed here, because the
