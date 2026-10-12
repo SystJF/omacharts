@@ -121,24 +121,6 @@ fn format_timeframes(listed: &[Timeframe]) -> String {
     listed.iter().map(|t| t.key()).collect::<Vec<_>>().join(",")
 }
 
-/// What Ctrl+B should do next.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum WatchlistAction {
-    Open,
-    Focus,
-    Close,
-}
-
-/// The whole of the Ctrl+B decision, kept separate from the widgets so it can
-/// be read — and tested — without one.
-fn watchlist_action(open: bool, focused: bool) -> WatchlistAction {
-    match (open, focused) {
-        (false, _) => WatchlistAction::Open,
-        (true, false) => WatchlistAction::Focus,
-        (true, true) => WatchlistAction::Close,
-    }
-}
-
 /// Every shortcut the sheet lists, grouped the way it lists them.
 ///
 /// Out here rather than inside the sheet so that the filtering the box at
@@ -176,10 +158,10 @@ const SHORTCUT_SECTIONS: &[(&str, &[(&str, &str)])] = &[
     (
         "Watchlist",
         &[
-            ("Ctrl+B", "Open, focus, then close"),
+            ("Ctrl+B", "Show or hide the watchlist"),
             ("↑ ↓", "Next or previous symbol"),
             ("Ctrl+↑ ↓", "Next or previous section"),
-            ("← → Enter", "Fold or unfold a section"),
+            ("Enter", "Fold or unfold a section"),
             // The one binding in this grid that is not global, so the
             // row says where it works: pressed over a chart it does
             // nothing, and nothing is hard to ask a question about.
@@ -206,7 +188,7 @@ const SHORTCUT_SECTIONS: &[(&str, &[(&str, &str)])] = &[
         "Chart",
         &[
             ("Ctrl+Shift+← →", "Previous or next resolution"),
-            ("Ctrl+Alt+↑ ↓", "Previous or next symbol"),
+            ("↑ ↓ · Ctrl+Alt+↑ ↓", "Previous or next symbol"),
             ("← →", "Pan"),
             ("+ −", "Zoom"),
             ("End", "Jump to the latest bar"),
@@ -395,44 +377,6 @@ mod tests {
         // "60" and "1h" are the same resolution.
         assert_eq!(listed.iter().map(|t| t.key()).collect::<Vec<_>>(), vec!["3m", "1h"]);
         assert_eq!(parse_timeframes(Some(&format_timeframes(&listed))), listed);
-    }
-
-    #[test]
-    fn one_key_walks_the_watchlist_open_focused_closed() {
-        // Closed: open it.
-        assert_eq!(watchlist_action(false, false), WatchlistAction::Open);
-        // Open, keyboard elsewhere: bring the keyboard here.
-        assert_eq!(watchlist_action(true, false), WatchlistAction::Focus);
-        // Open and focused: you are done with it.
-        assert_eq!(watchlist_action(true, true), WatchlistAction::Close);
-    }
-
-    #[test]
-    fn pressing_it_repeatedly_cycles_rather_than_sticking() {
-        // Starting closed and unfocused, three presses return to the start.
-        let mut open = false;
-        let mut focused = false;
-        let mut seen = Vec::new();
-        for _ in 0..3 {
-            let action = watchlist_action(open, focused);
-            seen.push(action);
-            match action {
-                WatchlistAction::Open => {
-                    open = true;
-                    focused = true;
-                }
-                WatchlistAction::Focus => focused = true,
-                WatchlistAction::Close => {
-                    open = false;
-                    focused = false;
-                }
-            }
-        }
-        assert_eq!(
-            seen,
-            vec![WatchlistAction::Open, WatchlistAction::Close, WatchlistAction::Open],
-        );
-        assert!(open && focused, "back where we started");
     }
 
     /// What the setting held before there were chartbooks: one arrangement,
@@ -2183,9 +2127,8 @@ impl Window {
         // The keyboard has to come with it, and GTK does not move it for a
         // drawing area the way it would for a button. Without this the ring
         // moved to the chart you clicked while the keyboard stayed wherever
-        // it was — which made Ctrl+B close the rail you had just clicked
-        // away from, because the rail still held the keyboard and Ctrl+B
-        // reads that to decide between focusing and closing.
+        // it was — so the next key went to the rail you had just clicked
+        // away from, not to the chart the ring was on.
         //
         // Except on the text editor. This runs on the way *down*, before the
         // widget under the pointer sees the press at all, so a click meant
@@ -3920,10 +3863,10 @@ impl Window {
         action.connect_activate(move |_, _| this.toggle_drawing_tools());
         self.window.add_action(&action);
 
-        // Ctrl+B is not a toggle. A rail you can see but cannot drive with the
-        // arrow keys is a rail you still have to reach for the mouse to use, so
-        // the first press puts the keyboard in it and only the second puts it
-        // away. `toggle_watchlist` holds that decision.
+        // Ctrl+B shows the rail with the keyboard in it, and hides it with the
+        // keyboard back on the chart. A plain toggle: it used to focus a rail
+        // that was open but not focused, so after a click on a chart it took
+        // two presses to close what was plainly open.
         let action = gio::SimpleAction::new("watchlist", None);
         let this = self.clone();
         action.connect_activate(move |_, _| this.toggle_watchlist());
@@ -4394,12 +4337,27 @@ impl Window {
                     this.open_search();
                     glib::Propagation::Stop
                 }
-                (Key::Left, false) if !on_watchlist => {
+                // Left and right are the chart's wherever the keyboard is: the
+                // rail has nothing sideways to move through that is worth
+                // taking them from the chart for.
+                (Key::Left, false) => {
                     this.focused_pane().view.pan_bars(-5);
                     glib::Propagation::Stop
                 }
-                (Key::Right, false) if !on_watchlist => {
+                (Key::Right, false) => {
                     this.focused_pane().view.pan_bars(5);
+                    glib::Propagation::Stop
+                }
+                // Up and down walk the watchlist from the chart, the way they
+                // do on the rail, so a list can be read without going to it.
+                // A selected drawing has had them first, as its nudge, and a
+                // box being typed in keeps them for itself.
+                (Key::Up, false) if !on_watchlist && !this.is_typing() => {
+                    this.step_symbol(-1);
+                    glib::Propagation::Stop
+                }
+                (Key::Down, false) if !on_watchlist && !this.is_typing() => {
+                    this.step_symbol(1);
                     glib::Propagation::Stop
                 }
                 (Key::plus | Key::equal | Key::KP_Add, false) => {
@@ -7348,31 +7306,16 @@ impl Window {
     }
 
     pub fn toggle_watchlist(self: &Rc<Self>) {
-        let focused = self
-            .watchlist
-            .borrow()
-            .as_ref()
-            .map(|w| w.has_focus())
-            .unwrap_or(false);
-
-        match watchlist_action(self.shows_sidebar(), focused) {
-            WatchlistAction::Open => {
-                self.set_rail_shown(true);
-                if let Some(watchlist) = self.watchlist.borrow().as_ref().cloned() {
-                    // The sidebar is not realised until the frame after it is
-                    // revealed, so focus has to wait for it.
-                    glib::idle_add_local_once(move || watchlist.grab_focus());
-                }
-            }
-            WatchlistAction::Focus => {
-                if let Some(watchlist) = self.watchlist.borrow().as_ref() {
-                    watchlist.grab_focus();
-                }
-            }
-            WatchlistAction::Close => {
-                self.set_rail_shown(false);
-                self.focused_pane().view.area.grab_focus();
-            }
+        if self.shows_sidebar() {
+            self.set_rail_shown(false);
+            self.focused_pane().view.area.grab_focus();
+            return;
+        }
+        self.set_rail_shown(true);
+        if let Some(watchlist) = self.watchlist.borrow().as_ref().cloned() {
+            // The sidebar is not realised until the frame after it is
+            // revealed, so focus has to wait for it.
+            glib::idle_add_local_once(move || watchlist.grab_focus());
         }
     }
 
