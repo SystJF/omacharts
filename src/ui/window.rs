@@ -166,6 +166,7 @@ const SHORTCUT_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             // row says where it works: pressed over a chart it does
             // nothing, and nothing is hard to ask a question about.
             ("Ctrl+Alt+Shift+↑ ↓", "Previous or next watchlist, in the sidebar"),
+            ("Ctrl+1 … 9", "Watchlist N, in the switcher's order"),
             ("Ctrl+N", "Add a symbol, in the sidebar"),
             ("Ctrl+Shift+N", "Add a section, in the sidebar"),
             ("Delete", "Remove the symbol"),
@@ -4167,6 +4168,21 @@ impl Window {
             let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
             let alt = state.contains(gtk::gdk::ModifierType::ALT_MASK);
             let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+
+            // Ctrl and a digit shows that watchlist, counting down the
+            // switcher from 1. From anywhere, rail open or not: nothing is
+            // typed with Ctrl held, and bare digits are the resolution's and
+            // Alt with one a drawing configuration's, so this is the one
+            // modifier a digit had left.
+            if ctrl
+                && !alt
+                && !shift
+                && let Some(n) = key.to_unicode().and_then(|c| c.to_digit(10))
+                && let Some(rail) = this.watchlist.borrow().clone()
+                && rail.show_numbered(n as usize)
+            {
+                return glib::Propagation::Stop;
+            }
 
             match key {
                 // Ctrl+L: follow the rail, or stop following it.

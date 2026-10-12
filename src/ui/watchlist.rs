@@ -77,6 +77,14 @@ fn next_in_rotation(ids: &[i64], current: i64, delta: i32) -> Option<i64> {
     Some(ids[next])
 }
 
+/// The watchlist a number key names: 1 is the first the switcher lists.
+///
+/// `None` for zero, which names nothing, and past the last list, which a
+/// keystroke should leave alone rather than clamp to the end.
+fn numbered(ids: &[i64], n: usize) -> Option<i64> {
+    ids.get(n.checked_sub(1)?).copied()
+}
+
 /// The last close and the move onto it, when the cache holds enough to say.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Quote {
@@ -1001,6 +1009,17 @@ impl Watchlist {
         if let Some(next) = next_in_rotation(&ids, self.active.get(), delta) {
             self.set_active_watchlist(next);
         }
+    }
+
+    /// Show the `n`th watchlist, counting from 1 in the switcher's order.
+    ///
+    /// False when there is no such list, so the key is left for somebody
+    /// else. Through `set_active_watchlist`, like the rotation above.
+    pub fn show_numbered(self: &Rc<Self>, n: usize) -> bool {
+        let ids: Vec<i64> = self.watchlists().into_iter().map(|(id, _)| id).collect();
+        let Some(id) = numbered(&ids, n) else { return false };
+        self.set_active_watchlist(id);
+        true
     }
 
     /// Every watchlist, in display order, as id and name.
@@ -3535,6 +3554,18 @@ mod tests {
             seen.push(at);
         }
         assert_eq!(seen, ids.to_vec(), "display order, not sorted order");
+    }
+
+    /// Ctrl+1 is the first list the switcher shows, not the lowest id, and a
+    /// number with no list behind it is nobody's.
+    #[test]
+    fn a_number_key_counts_down_the_switcher_from_one() {
+        let ids = [3, 1, 2];
+        assert_eq!(numbered(&ids, 1), Some(3), "display order, not sorted order");
+        assert_eq!(numbered(&ids, 3), Some(2));
+        assert_eq!(numbered(&ids, 4), None, "past the last list");
+        assert_eq!(numbered(&ids, 0), None, "zero names nothing");
+        assert_eq!(numbered(&[], 1), None);
     }
 
     /// A section as the store hands one over, for the drop rules that only
