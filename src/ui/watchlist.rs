@@ -351,23 +351,12 @@ pub fn store_sort(store: &Store, watchlist: i64, sort: Option<Sort>) {
     store.set_setting(&sort_setting(watchlist), &sort.map(Sort::key).unwrap_or_default());
 }
 
-/// A key that folds sections.
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Fold {
-    Close,
-    Open,
-    Toggle,
-}
-
-/// The section a folding key acts on from this row, and whether it ends up
-/// folded; `None` leaves the key to the list.
-fn fold_target(on: &RowKind, key: Fold) -> Option<(i64, bool)> {
-    match (on, key) {
-        (RowKind::Header { section_id, .. }, Fold::Close) => Some((*section_id, true)),
-        (RowKind::Header { section_id, .. }, Fold::Open) => Some((*section_id, false)),
-        (RowKind::Header { section_id, collapsed }, Fold::Toggle) => Some((*section_id, !collapsed)),
-        (RowKind::Entry { section_id, .. }, Fold::Close) => Some((*section_id, true)),
-        _ => None,
+/// The section Enter or Space folds or unfolds from this row, and whether it
+/// ends up folded; `None` leaves the key to the list.
+fn fold_target(on: &RowKind) -> Option<(i64, bool)> {
+    match on {
+        RowKind::Header { section_id, collapsed } => Some((*section_id, !collapsed)),
+        RowKind::Entry { .. } => None,
     }
 }
 
@@ -1225,8 +1214,9 @@ impl Watchlist {
         });
     }
 
-    /// Plain arrows move a symbol at a time — the list does that itself.
-    /// Ctrl with an arrow jumps a whole section, for a long rail.
+    /// Plain arrows move a symbol at a time, past open sections' headers —
+    /// `step_row`, below. Ctrl with an arrow jumps a whole section, for a
+    /// long rail.
     fn wire_keys(self: &Rc<Self>) {
         let keys = gtk::EventControllerKey::new();
         let this = self.clone();
@@ -1245,9 +1235,9 @@ impl Watchlist {
         });
         self.list.add_controller(keys);
 
-        // ← folds and → unfolds the section header the keyboard is on, and
-        // Enter or Space flips it; ← on a symbol folds the section it is in,
-        // the way a tree folds the branch a leaf is on. Caught on the way down,
+        // ↑ and ↓ step over the headers of open sections, and Enter or Space
+        // flips the section header the keyboard is on. ← and → are left to
+        // pass: they pan the chart wherever the keyboard is. Caught on the way down,
         // before the list's own Enter and Space, which would otherwise spend the
         // key activating a header that does nothing when activated.
         let keys = gtk::EventControllerKey::new();
@@ -1262,13 +1252,14 @@ impl Watchlist {
             if state.intersects(held) {
                 return glib::Propagation::Proceed;
             }
-            let fold = match key {
-                Key::Left | Key::KP_Left => Fold::Close,
-                Key::Right | Key::KP_Right => Fold::Open,
-                Key::Return | Key::KP_Enter | Key::space => Fold::Toggle,
-                _ => return glib::Propagation::Proceed,
-            };
-            glib::Propagation::from(this.fold_from_keyboard(fold))
+            match key {
+                Key::Up | Key::KP_Up => glib::Propagation::from(this.step_row(false)),
+                Key::Down | Key::KP_Down => glib::Propagation::from(this.step_row(true)),
+                Key::Return | Key::KP_Enter | Key::space => {
+                    glib::Propagation::from(this.fold_from_keyboard())
+                }
+                _ => glib::Propagation::Proceed,
+            }
         });
         self.list.add_controller(keys);
 
@@ -1309,22 +1300,51 @@ impl Watchlist {
         self.widget.add_controller(keys);
     }
 
+    /// Up or down a row, past the header of a section that is open: its
+    /// symbols are what the arrows are for, and the header would be a stop
+    /// that charts nothing. A folded section's header is still a stop,
+    /// because it is the only row the section has, and the one Enter unfolds.
+    fn step_row(self: &Rc<Self>, forward: bool) -> bool {
+        // Only when a row itself has the keyboard, as with folding.
+        let Some(row) = self.list.root().and_then(|root| root.focus()).and_downcast::<gtk::ListBoxRow>()
+        else {
+            return false;
+        };
+        let at = row.index().max(0) as usize;
+        let rows = self.rows.borrow();
+        let stop = |i: &usize| {
+            let shown = self.list.row_at_index(*i as i32).is_some_and(|row| row.get_visible());
+            let header = matches!(rows.get(*i), Some(RowKind::Header { collapsed: false, .. }));
+            shown && !header
+        };
+        let target = if forward {
+            (at + 1..rows.len()).find(stop)
+        } else {
+            (0..at).rev().find(stop)
+        };
+        drop(rows);
+        // At either end the key is still the rail's: past the last symbol is
+        // nowhere, not the next widget over.
+        let Some(row) = target.and_then(|at| self.list.row_at_index(at as i32)) else { return true };
+        if row.is_selectable() {
+            self.list.select_row(Some(&row));
+        }
+        row.grab_focus();
+        true
+    }
+
     /// Fold or unfold the section where the keyboard is, and leave the
     /// keyboard on its header. A rebuild makes every row new, so without that
     /// the next arrow key would start from nowhere.
-    fn fold_from_keyboard(self: &Rc<Self>, key: Fold) -> bool {
+    fn fold_from_keyboard(self: &Rc<Self>) -> bool {
         // Only when a row itself has the keyboard: a key in the box renaming a
         // section, or on a button in a header, is that widget's.
         let Some(row) = self.list.root().and_then(|root| root.focus()).and_downcast::<gtk::ListBoxRow>()
         else {
             return false;
         };
-        let on = self.rows.borrow().get(row.index().max(0) as usize).cloned();
-        let Some((id, folded)) = on.and_then(|on| fold_target(&on, key)) else { return false };
-        // The symbols outside any section have no header to fold to.
-        if self.header_row(id).is_none() {
-            return false;
-        }
+        let on = self.rows.borrow().get(row.index().max(0) as usize).and_then(fold_target);
+        let Some((id, folded)) = on else { return false };
         self.fold_section(id, folded);
         if let Some(header) = self.header_row(id) {
             header.grab_focus();
@@ -1620,7 +1640,7 @@ impl Watchlist {
         let row = gtk::ListBoxRow::new();
         row.set_child(Some(&header));
         // A header takes the keyboard but never the selection: an arrow key
-        // stops on one without loading anything, and ← → Enter fold it.
+        // stops on one without loading anything, and Enter folds it.
         row.set_selectable(false);
         row.set_activatable(false);
         // Named like the symbols for the same reason: the line says where
@@ -3453,13 +3473,11 @@ mod tests {
     /// Everything but the folding keys is the list's, so arrows still walk
     /// the rail and Enter on a symbol is still the symbol's.
     #[test]
-    fn folding_keys_act_on_the_header_or_the_section_a_symbol_is_in() {
+    fn folding_keys_act_on_the_header_only() {
         let open = RowKind::Header { section_id: 3, collapsed: false };
         let folded = RowKind::Header { section_id: 3, collapsed: true };
-        assert_eq!(fold_target(&open, Fold::Close), Some((3, true)));
-        assert_eq!(fold_target(&folded, Fold::Open), Some((3, false)));
-        assert_eq!(fold_target(&folded, Fold::Toggle), Some((3, false)));
-        assert_eq!(fold_target(&open, Fold::Toggle), Some((3, true)));
+        assert_eq!(fold_target(&folded), Some((3, false)));
+        assert_eq!(fold_target(&open), Some((3, true)));
 
         let symbol = RowKind::Entry {
             section_id: 3,
@@ -3479,9 +3497,7 @@ mod tests {
             },
             cells: Vec::new(),
         };
-        assert_eq!(fold_target(&symbol, Fold::Close), Some((3, true)));
-        assert_eq!(fold_target(&symbol, Fold::Open), None);
-        assert_eq!(fold_target(&symbol, Fold::Toggle), None, "Enter stays the symbol's");
+        assert_eq!(fold_target(&symbol), None, "Enter stays the symbol's");
     }
 
     /// A handful of lists, so running off one end should land on the other
