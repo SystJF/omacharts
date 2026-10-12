@@ -2911,8 +2911,8 @@ impl ChartView {
     /// Bar indices are not shared — two resolutions of the same symbol count
     /// their bars differently — so both halves travel as values and each
     /// chart maps them through its own scales. Price is worth carrying
-    /// because an echo only ever reaches charts in the same link group, and a
-    /// group shares a symbol: the number means the same thing at both ends.
+    /// because an echo only ever reaches the Follow charts, and they share a
+    /// symbol: the number means the same thing at both ends.
     pub fn set_echo(&self, echo: Option<Echo>) {
         let changed = {
             let mut state = self.state.borrow_mut();

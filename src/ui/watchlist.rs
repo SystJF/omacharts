@@ -15,7 +15,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
-use omacharts_engine::{grouped_decimals, FetchFailure, Instrument, LinkGroup};
+use omacharts_engine::{grouped_decimals, FetchFailure, Instrument};
 
 use crate::store::{Entry, Section, Store, DEFAULT_WATCHLIST};
 use crate::ui::search::SymbolSearch;
@@ -420,7 +420,12 @@ pub struct Watchlist {
     index: crate::inventory::Inventory,
     quote: QuoteLookup,
     search: Rc<SymbolSearch>,
-    on_pick: Rc<dyn Fn(Instrument)>,
+    /// What a picked symbol is handed to. `false` when no chart took it.
+    on_pick: Rc<dyn Fn(Instrument) -> bool>,
+    /// What the last pick was answered, for [`pick`](Self::pick) to hand
+    /// back: a selection reaches `on_pick` through the list's own signal,
+    /// which has nowhere to return it.
+    taken: Cell<bool>,
     /// Parallel to the list's rows.
     rows: RefCell<Vec<RowKind>>,
     columns: RefCell<Vec<Column>>,
@@ -443,10 +448,6 @@ pub struct Watchlist {
     /// Set while we are selecting a row ourselves, so rebuilding does not
     /// re-load the chart.
     quiet: Cell<bool>,
-    /// The chain beside the name: which group of charts this list drives.
-    link: gtk::MenuButton,
-    link_tint: Rc<RefCell<Option<String>>>,
-    link_group: Cell<LinkGroup>,
     /// Which watchlist the rail is showing. Not which one the bar widget
     /// shows — that is always the default one.
     active: Cell<i64>,
@@ -454,9 +455,6 @@ pub struct Watchlist {
     switcher: gtk::Button,
     /// The watchlist on screen by name, or "Watchlists" on the page of them.
     title: gtk::Label,
-    /// What holds the chain, so it can be put out of the way on the page of
-    /// lists without touching the chain's own look.
-    link_slot: gtk::Box,
     /// Adds to the page on screen: a symbol or a section, or a list.
     add: gtk::Button,
     /// The rail's two pages: one list's symbols, and every list.
@@ -480,7 +478,7 @@ pub struct Watchlist {
 }
 
 const SETTING_COLUMNS: &str = "watchlist_columns";
-const SETTING_ACTIVE: &str = "active_watchlist";
+pub(crate) const SETTING_ACTIVE: &str = "active_watchlist";
 
 /// The rail's pages: one list's symbols, and every list.
 const PAGE_SYMBOLS: &str = "symbols";
@@ -499,7 +497,7 @@ impl Watchlist {
         index: crate::inventory::Inventory,
         search: Rc<SymbolSearch>,
         quote: QuoteLookup,
-        on_pick: impl Fn(Instrument) + 'static,
+        on_pick: impl Fn(Instrument) -> bool + 'static,
     ) -> Rc<Watchlist> {
         let list = gtk::ListBox::new();
         list.set_selection_mode(gtk::SelectionMode::Single);
@@ -562,16 +560,6 @@ impl Watchlist {
         title.set_max_width_chars(14);
         title.set_xalign(0.0);
 
-        // The chain beside the name, because the question it answers is about
-        // this list: which group of charts does picking a symbol here move.
-        let link_tint: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-        let link = gtk::MenuButton::new();
-        link.set_child(Some(&crate::ui::pane::chain_icon(link_tint.clone())));
-        link.add_css_class("flat");
-        link.add_css_class("legend-link");
-        link.set_always_show_arrow(false);
-        link.set_valign(gtk::Align::Center);
-
         // The button's edge on the rows' edge: a row sits 6px in, Adwaita's
         // sidebar row margin. Down the middle of the band below the 7px the
         // corner controls also step down (see `.window-corner`), which puts
@@ -583,9 +571,6 @@ impl Watchlist {
         named.set_margin_top(7);
         named.append(&switcher);
         named.append(&title);
-        let link_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        link_slot.append(&link);
-        named.append(&link_slot);
 
         // Adding, at the other end of the band from the name and clear of
         // the corner controls, where a sidebar keeps its "new". It used to be
@@ -699,6 +684,7 @@ impl Watchlist {
             quote,
             search,
             on_pick: Rc::new(on_pick),
+            taken: Cell::new(true),
             rows: RefCell::new(Vec::new()),
             columns: RefCell::new(columns),
             column_header: column_header.clone(),
@@ -708,12 +694,8 @@ impl Watchlist {
             row_marked: Cell::new(-1),
             sort: Cell::new(None),
             quiet: Cell::new(false),
-            link: link.clone(),
-            link_tint,
-            link_group: Cell::new(LinkGroup::None),
             active: Cell::new(active),
             switcher: switcher.clone(),
-            link_slot,
             add: add.clone(),
             title,
             pages,
@@ -842,25 +824,6 @@ impl Watchlist {
         self.announce_switch();
     }
 
-    /// Hear about the rail being pointed at a different watchlist.
-    /// The chain, for the window to hang the group popover off — the list of
-    /// groups is the same list a chart offers, and it is built where the
-    /// theme that colours it lives.
-    pub fn link_button(&self) -> gtk::MenuButton {
-        self.link.clone()
-    }
-
-    /// Which group picking a symbol here moves.
-    pub fn link_group(&self) -> LinkGroup {
-        self.link_group.get()
-    }
-
-    /// The list already driving `group`, for a row that has to explain why it
-    /// cannot be picked. `None` means the group is free, or is this list's.
-    pub fn group_held_by(&self, group: LinkGroup) -> Option<(i64, String)> {
-        group_held_by(&self.store, group, self.active.get())
-    }
-
     /// Answer which chartbook is using a watchlist, for the page of lists.
     ///
     /// Set by the window, because that is where the chartbooks are. Asked
@@ -883,100 +846,44 @@ impl Watchlist {
         ask.and_then(|ask| ask(id))
     }
 
-    /// The symbol the rail is on, if it is on one.
-    ///
-    /// What a list leads its group with when it is put in one. A watchlist has
-    /// no symbol of its own, and the row somebody left the selection on is the
-    /// nearest thing to one — so a list with nothing selected, or whose
-    /// selection is a section header, has nothing to lead with.
-    pub fn selected_instrument(&self) -> Option<Instrument> {
-        let at = self.list.selected_row()?.index().max(0) as usize;
-        match self.rows.borrow().get(at) {
-            Some(RowKind::Entry { instrument, .. }) => Some(instrument.clone()),
-            _ => None,
-        }
-    }
-
-    /// Join a group, or leave it. Remembered against the watchlist rather
-    /// than the rail, so a list keeps driving the same charts when a
-    /// chartbook brings it back.
-    ///
-    /// Only the group is written here. Making the group follow this list's
-    /// symbol is the window's business, because it owns the charts and the
-    /// books that are away — and it has to read the group back out of here
-    /// afterwards, since a group another list holds is refused below.
-    pub fn set_link_group(&self, group: LinkGroup, colour: Option<String>) {
-        // A group drives one list. The popover disables a group another list
-        // already holds, so reaching here with one is a bug rather than a
-        // choice — refuse it instead of quietly stealing it.
-        if group_held_by(&self.store, group, self.active.get()).is_some() {
-            return;
-        }
-        self.link_group.set(group);
-        self.store.set_setting(
-            &link_setting(self.active.get()),
-            &group.number().unwrap_or(0).to_string(),
-        );
-        self.paint_link(group, colour);
-    }
-
-    /// The same, for a list that has just been shown: read what it was left
-    /// in rather than writing anything down.
-    ///
-    /// Never leads, whatever it finds. Being shown a list, or redrawing the
-    /// rail after a symbol was added to one, is not somebody putting that list
-    /// in a group — so this only ever repaints the chain.
-    ///
-    /// Answers whether the group changed, which is the one thing that has a
-    /// consequence: the list then has to be pointed at what its new group is
-    /// showing. Without the answer the caller would have to follow on every
-    /// redraw, and adding one symbol to a list would jump the selection off
-    /// whatever somebody was looking at.
-    pub fn adopt_link_group(&self, colour: impl Fn(LinkGroup) -> Option<String>) -> bool {
-        let mut stored = stored_group(&self.store, self.active.get());
-        // A database written before a group could only be held once can have
-        // two lists claiming one. The first keeps it and this one comes back
-        // unlinked, written down so the same surprise does not happen twice.
-        if group_held_by(&self.store, stored, self.active.get()).is_some() {
-            stored = LinkGroup::None;
-            self.store.set_setting(&link_setting(self.active.get()), "0");
-        }
-        let changed = self.link_group.get() != stored;
-        self.link_group.set(stored);
-        self.paint_link(stored, colour(stored));
-        changed
-    }
-
-    fn paint_link(&self, group: LinkGroup, colour: Option<String>) {
-        self.link.set_tooltip_text(Some(&match group {
-            LinkGroup::None => "Not linked — this list drives the chart you are on".to_string(),
-            other => format!("Linked · {}", other.label()),
-        }));
-        self.link.set_opacity(if group.is_linked() { 1.0 } else { 0.28 });
-        *self.link_tint.borrow_mut() = colour;
-        if let Some(icon) = self.link.child() {
-            icon.queue_draw();
-        }
-    }
-
     /// Select a symbol the way a click does, so whatever is listening for a
     /// pick hears about it.
     ///
     /// Not [`highlight`](Self::highlight), which is deliberately silent: that
     /// one exists for the other direction, a chart moving and the rail
     /// following, and using it here would light up a row and move nothing.
-    pub fn pick(self: &Rc<Self>, instrument: &Instrument) -> bool {
-        let Some(at) = self.row_of(instrument) else { return false };
-        let Some(row) = self.list.row_at_index(at as i32) else { return false };
+    ///
+    /// `None` when the list does not hold it, otherwise whether a chart took
+    /// it.
+    pub fn pick(self: &Rc<Self>, instrument: &Instrument) -> Option<bool> {
+        let at = self.row_of(instrument)?;
+        let row = self.list.row_at_index(at as i32)?;
         // Selecting what is already selected emits nothing, so the pick has
         // to be made by hand — otherwise clicking the symbol you are already
         // on in the bar widget would do nothing at all.
         if self.list.selected_row().as_ref() == Some(&row) {
-            (self.on_pick)(instrument.clone());
-        } else {
-            self.list.select_row(Some(&row));
+            return Some((self.on_pick)(instrument.clone()));
         }
-        true
+        self.taken.set(true);
+        self.list.select_row(Some(&row));
+        Some(self.taken.get())
+    }
+
+    /// Put the highlight back on `instrument`, for a pick no chart took, so
+    /// the list does not claim a symbol no chart is showing. On no row when
+    /// the list does not hold it, or there is nothing to point at.
+    pub fn put_back(&self, instrument: Option<&Instrument>) {
+        let row = instrument
+            .and_then(|instrument| self.row_of(instrument))
+            .and_then(|at| self.list.row_at_index(at as i32));
+        match row {
+            Some(row) => self.select_quietly(&row),
+            None => {
+                self.quiet.set(true);
+                self.list.unselect_all();
+                self.quiet.set(false);
+            }
+        }
     }
 
     fn row_of(&self, instrument: &Instrument) -> Option<usize> {
@@ -1230,7 +1137,7 @@ impl Watchlist {
                 _ => None,
             };
             if let Some(instrument) = picked {
-                (this.on_pick)(instrument);
+                this.taken.set((this.on_pick)(instrument));
             }
         });
     }
@@ -2484,11 +2391,6 @@ impl Watchlist {
         self.switcher.add_css_class("open");
         self.title.set_text(LISTS_TITLE);
         self.add.set_tooltip_text(Some(NEW_LIST_TIP));
-        // The chain is about the list on screen, so it has nothing to say
-        // here. Faded out rather than hidden: it is the tallest thing in the
-        // band, and taking it away would move the title up out of line.
-        self.link_slot.set_opacity(0.0);
-        self.link_slot.set_sensitive(false);
         self.focus_lists();
     }
 
@@ -2498,8 +2400,6 @@ impl Watchlist {
         self.switcher.remove_css_class("open");
         self.write_switcher();
         self.add.set_tooltip_text(Some(ADD_TIP));
-        self.link_slot.set_opacity(1.0);
-        self.link_slot.set_sensitive(true);
     }
 
     fn showing_lists(&self) -> bool {
@@ -2826,9 +2726,6 @@ impl Watchlist {
                 return;
             }
             this.store.remove_watchlist(id);
-            // Or the group leaks: every row in the popover eventually reads
-            // as taken, by a list nobody can find.
-            this.store.set_setting(&link_setting(id), "0");
             // Whatever was being looked at has gone, and the one that is
             // always there is where there is always something to see.
             let fell_back = this.active.get() == id;
@@ -2894,7 +2791,7 @@ impl Watchlist {
             this.changed();
             // Land on what was just added. It goes to the end of its section,
             // which on a full rail is below the fold.
-            if this.pick(&instrument)
+            if this.pick(&instrument).is_some()
                 && let Some(row) = this.list.selected_row()
             {
                 row.grab_focus();
@@ -2977,62 +2874,6 @@ impl Watchlist {
         });
         dialog.present(Some(anchor));
     }
-}
-
-/// The group a watchlist is left in, read from the one place it is written.
-///
-/// A list with nothing written down is unlinked, except the default one,
-/// which drives group 1. Charts start in group 1 too, so out of the box the
-/// watchlist drives the charts — which is what linking did before there were
-/// groups to choose between. A default that left the two in different groups
-/// would make a fresh install less useful than the version before it.
-fn stored_group(store: &Store, watchlist: i64) -> LinkGroup {
-    match store.setting(&link_setting(watchlist)) {
-        Some(value) => value.parse::<u8>().ok().map(LinkGroup::numbered).unwrap_or_default(),
-        None if watchlist == DEFAULT_WATCHLIST => LinkGroup::numbered(1),
-        None => LinkGroup::None,
-    }
-}
-
-/// Which watchlist holds each group, as group, id and name.
-///
-/// A scan rather than an index. There are a handful of lists, and a second
-/// copy of who holds what is a second copy that can come to disagree with the
-/// first — the settings are the one source of truth and this reads them.
-///
-/// Many charts share a group, but only one list drives it: a group is the
-/// thing a list drives. Where two claim one — possible in a database written
-/// before that was enforced — the earlier in display order keeps it, so the
-/// answer does not depend on which list happened to be opened first.
-pub fn group_owners(store: &Store) -> Vec<(u8, i64, String)> {
-    let mut held: Vec<(u8, i64, String)> = Vec::new();
-    for (id, name) in store.watchlists() {
-        let Some(group) = stored_group(store, id).number() else { continue };
-        if held.iter().any(|(taken, ..)| *taken == group) {
-            continue;
-        }
-        held.push((group, id, name));
-    }
-    held
-}
-
-/// The list already driving `group`, if it is not this one.
-pub fn group_held_by(store: &Store, group: LinkGroup, besides: i64) -> Option<(i64, String)> {
-    let number = group.number()?;
-    group_owners(store)
-        .into_iter()
-        .find(|(taken, id, _)| *taken == number && *id != besides)
-        .map(|(_, id, name)| (id, name))
-}
-
-/// Where a watchlist's group is written down.
-///
-/// Against the watchlist's id rather than the rail, because the rail shows a
-/// different list from one chartbook to the next and the group belongs to the
-/// list — an energy list that drives group 3 should still drive group 3 when
-/// another book brings it back.
-fn link_setting(id: i64) -> String {
-    format!("watchlist_link_{id}")
 }
 
 /// What a drag in the rail is carrying.
@@ -3243,6 +3084,7 @@ fn popup_menu(model: &gio::Menu, over: &impl IsA<gtk::Widget>, x: f64, y: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::DEFAULT_WATCHLIST;
 
     /// Naming a section from the keyboard anchors the box on the list itself,
     /// which makes it a child of the list — and then writing the name rebuilds
@@ -3293,90 +3135,6 @@ mod tests {
             "the box being typed into is not the rail's to take away"
         );
         popover.unparent();
-    }
-
-    /// Out of the box the watchlist drives the charts, which is what linking
-    /// did before there were groups to pick between. Charts start in group 1,
-    /// so the default list has to as well or a fresh install links nothing to
-    /// anything.
-    #[test]
-    fn the_default_watchlist_starts_driving_group_one() {
-        let store = Store::memory().unwrap();
-        assert_eq!(stored_group(&store, DEFAULT_WATCHLIST), LinkGroup::numbered(1));
-
-        // Any other list starts out of the way.
-        let scratch = store.add_watchlist("Scratch").expect("made");
-        assert_eq!(stored_group(&store, scratch), LinkGroup::None);
-    }
-
-    /// Many charts share a group; one list drives it. So a group another list
-    /// already holds is not available, and the row that says so needs to name
-    /// the list holding it.
-    #[test]
-    fn a_group_drives_one_watchlist_and_says_who_holds_it() {
-        let store = Store::memory().unwrap();
-        let scratch = store.add_watchlist("Scratch").expect("made");
-
-        // The default list holds group 1 without anything being written down.
-        assert_eq!(
-            group_held_by(&store, LinkGroup::numbered(1), scratch),
-            Some((DEFAULT_WATCHLIST, "Default".to_string())),
-        );
-        // And nothing holds group 2.
-        assert_eq!(group_held_by(&store, LinkGroup::numbered(2), scratch), None);
-        // A list never collides with itself.
-        assert_eq!(group_held_by(&store, LinkGroup::numbered(1), DEFAULT_WATCHLIST), None);
-    }
-
-    /// Deleting a list has to give its group back, or the popover fills up
-    /// with groups held by lists nobody can find.
-    #[test]
-    fn deleting_a_watchlist_frees_the_group_it_held() {
-        let store = Store::memory().unwrap();
-        let energy = store.add_watchlist("Energy").expect("made");
-        store.set_setting(&link_setting(energy), "3");
-        assert!(group_held_by(&store, LinkGroup::numbered(3), DEFAULT_WATCHLIST).is_some());
-
-        store.remove_watchlist(energy);
-        assert_eq!(group_held_by(&store, LinkGroup::numbered(3), DEFAULT_WATCHLIST), None);
-
-        // And the row itself is gone, not merely ignored. Left behind it
-        // would be read again by anything that walks the settings, and would
-        // come back to life under a list that reused the id.
-        assert_eq!(store.setting(&link_setting(energy)), None, "the group outlived its list");
-    }
-
-    /// `remove_watchlist` deletes this row, and spells the key itself rather
-    /// than reaching into this module for it. Two spellings of one key is a
-    /// cleanup that stops happening the day either side is reworded, so the
-    /// agreement is pinned here where the name is defined.
-    #[test]
-    fn the_key_the_store_clears_is_the_key_this_writes() {
-        let store = Store::memory().unwrap();
-        let list = store.add_watchlist("Metals").expect("made");
-        store.set_setting(&link_setting(list), "5");
-        assert_eq!(store.setting(&format!("watchlist_link_{list}")).as_deref(), Some("5"));
-    }
-
-    /// Nothing stopped two lists claiming one group until now, so a database
-    /// can already hold that. Display order decides, rather than whichever
-    /// list the window happened to open first.
-    #[test]
-    fn a_group_claimed_twice_stays_with_the_earlier_list() {
-        let store = Store::memory().unwrap();
-        let first = store.add_watchlist("Energy").expect("made");
-        let second = store.add_watchlist("Metals").expect("made");
-        store.set_setting(&link_setting(first), "4");
-        store.set_setting(&link_setting(second), "4");
-
-        let owners = group_owners(&store);
-        let holders: Vec<i64> =
-            owners.iter().filter(|(group, ..)| *group == 4).map(|(_, id, _)| *id).collect();
-        assert_eq!(holders, vec![first], "only one list may hold a group");
-        assert!(
-            group_held_by(&store, LinkGroup::numbered(4), second).is_some(),
-            "the later list is told the group is taken rather than sharing it",
-        );
     }
 
     /// The section each row belongs to, laid out the way `rebuild` lays the

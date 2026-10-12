@@ -19,8 +19,8 @@ stored as content or structure**:
 - watchlists, their sections, and the symbols in them
 - chartbooks: creating, renaming, deleting, switching
 - chart layouts: splitting, closing, which chart holds what
-- a chart's symbol, resolution, indicators, bar style, session, link group
-- which watchlist a chartbook shows, and which link group a watchlist drives
+- a chart's symbol, resolution, indicators, bar style, session, link mode
+- which watchlist a chartbook shows
 - settings that are real preferences
 - cache management
 
@@ -352,13 +352,12 @@ fail rather than leaving it to somebody remembering to read the list.
   cannot be parsed, or an argument the table describes and the arm never
   reads, fails here — which is exactly how `chart focus` shipped broken.
 - **The enumerated-value tests** — bar styles, sessions, indicators, anchors,
-  line styles, link groups — compare what the table offers against what the
+  line styles, link modes — compare what the table offers against what the
   engine defines. One caught the table offering four bar styles when there
   were two.
-- **The key-pinning tests** — `the_group_a_command_sets_is_the_one_the_rail_reads`
-  and `the_scheme_this_remembers_is_the_one_the_dialog_remembers` — hold a
-  command and the window to the same settings key where the window's own
-  constant is private to it.
+- **The key-pinning test** — `the_scheme_this_remembers_is_the_one_the_dialog_remembers`
+  — holds a command and the window to the same settings key where the
+  window's own constant is private to it.
 
 Say plainly what they cannot reach, because a test that looks like it proves
 parity and does not is worse than none:

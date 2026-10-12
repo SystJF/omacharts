@@ -25,7 +25,7 @@ pub use bars::{
     bucket_of, grouped_decimals, price_decimals, repair_continuous_opens, resample, Bar, BarStyle, Timeframe,
 };
 pub use indicators::{palette_colors, Indicator, Kind as IndicatorKind, Output, Params, Reset};
-pub use link::LinkGroup;
+pub use link::LinkMode;
 pub use provider::{
     Capability, Closes, Delivery, FetchFailure, Pacing, Provider, ProviderError, SharedCooldown,
     Sink, Stream, Subscription, Update,

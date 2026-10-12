@@ -208,8 +208,7 @@ const KINDS: &[&str] = &[
 const ANCHORS: &[&str] = &["session", "week", "month", "quarter", "year"];
 const LINE_STYLES: &[&str] = &["solid", "dashed", "dotted"];
 const SWITCHES: &[&str] = &["on", "off"];
-const LINKS: &[&str] =
-    &["none", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+const LINKS: &[&str] = &["focus", "follow", "pinned"];
 const COLOURING: &[&str] = &["coloured", "red-up", "monochrome"];
 const SORT_COLUMNS: &[&str] = &["symbol", "last", "change", "change_pct", "none"];
 /// The kinds a drawing comes in, plus the one alias.
@@ -464,19 +463,6 @@ pub const SURFACE: &[Noun] = &[
                     Flag::valued("suffix", "S", "venue suffix of the symbol being moved"),
                 ],
                 example: "omacharts watchlist move Semis MU --section Energy",
-                json: true,
-                writes: true,
-                workspace: false,
-            },
-            Verb {
-                name: "link",
-                about: "Which link group a watchlist drives, if any — the list then follows it",
-                args: &[
-                    Arg::req("LIST", SELECTOR),
-                    Arg::opt("GROUP", "the group it drives, or `none`; omit to read it").of(LINKS),
-                ],
-                flags: &[],
-                example: "omacharts watchlist link Semis 3",
                 json: true,
                 writes: true,
                 workspace: false,
@@ -770,8 +756,12 @@ pub const SURFACE: &[Noun] = &[
                     Flag::valued("style", "STYLE", "how bars are drawn").of(STYLES),
                     Flag::valued("colouring", "COLOURING", "how the theme's candle colours are painted").of(COLOURINGS),
                     Flag::valued("session", "SESSION", "which hours to include").of(SESSIONS),
-                    Flag::valued("link", "GROUP", "the link group it joins and then leads, or `none` to leave one")
-                        .of(LINKS),
+                    Flag::valued(
+                        "link",
+                        "MODE",
+                        "what the watchlist does to it: moves it while focused, always (and it leads the others), or never",
+                    )
+                    .of(LINKS),
                     Flag::valued("grid", "BOOL", "draw the grid").of(&["on", "off"]),
                     Flag::valued("show-drawings", "BOOL", "whether the chart shows what other charts of its symbol draw")
                         .of(SWITCHES),
@@ -864,7 +854,7 @@ pub const SURFACE: &[Noun] = &[
             },
             Verb {
                 name: "crosshair",
-                about: "Whether a pointer on one chart draws a line on the charts linked to it",
+                about: "Whether a pointer on a Follow chart draws a line on the other Follow charts",
                 args: &[Arg::opt("STATE", "omit to read it").of(SWITCHES)],
                 flags: &[],
                 example: "omacharts chart crosshair off",
@@ -1239,7 +1229,7 @@ const STORED_FIELDS: &[(&str, &str, &str)] = &[
     ("colouring", "chart set", "--colouring"),
     ("session", "chart set", "--session"),
     ("show_grid", "chart set", "--grid"),
-    ("linked", "chart set", "--link"),
+    ("link", "chart set", "--link"),
     ("shows_drawings", "chart set", "--show-drawings"),
     ("sends_drawings", "chart set", "--send-drawings"),
     ("drawings", "chart drawing", ""),
@@ -1389,14 +1379,8 @@ mod tests {
     }
 
     #[test]
-    fn the_link_groups_on_offer_are_the_ones_that_exist() {
-        let engine: Vec<String> = link::ALL
-            .iter()
-            .map(|group| match group.number() {
-                None => "none".to_string(),
-                Some(n) => n.to_string(),
-            })
-            .collect();
+    fn the_link_modes_on_offer_are_the_ones_that_exist() {
+        let engine: Vec<&str> = link::MODES.iter().map(|mode| mode.key()).collect();
         assert_eq!(LINKS.to_vec(), engine);
     }
 

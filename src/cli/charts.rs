@@ -11,7 +11,7 @@
 //! writing it back would silently discard anything added since, and the field
 //! it discarded would be somebody's layout.
 
-use omacharts_engine::LinkGroup;
+use omacharts_engine::LinkMode;
 use serde_json::{json, Map, Value};
 
 use crate::store::Store;
@@ -28,11 +28,14 @@ pub struct Workspace {
 impl Workspace {
     /// Read what the window last wrote, or an empty arrangement.
     pub fn load(store: &Store) -> Workspace {
-        let value = store
+        let mut value = store
             .setting(SETTING)
             .and_then(|json| serde_json::from_str::<Value>(&json).ok())
             .filter(|value| value.get("books").is_some_and(Value::is_array))
             .unwrap_or_else(|| json!({ "books": [], "active": 0 }));
+        // A chart still written with a link group gets its mode the way the
+        // window gives it one, so both read the same row the same way.
+        crate::ui::window::upgrade_link_groups(&mut value, store);
         Workspace { value }
     }
 
@@ -178,44 +181,36 @@ impl Workspace {
         }
     }
 
-    /// Put `symbol` on every chart in `group`, everywhere but on the chart
-    /// that is leading it.
+    /// Put `symbol` on every Follow chart in the book at `at`, but on the
+    /// chart that is leading them.
     ///
-    /// Across every chartbook, not only the one that is open. A group reaches
-    /// across books, so stopping at the open one would make a group mean "the
-    /// charts in this group I can currently see" — and the book you switched
-    /// away from would come back showing a symbol from before the link. The
-    /// open book is included for the same reason the rest are: a command writes
-    /// the whole arrangement back and the window rebuilds from it.
+    /// The one book only. A chartbook you come back to is as you left it:
+    /// each shows its own watchlist, so following the watchlist means this
+    /// book's list.
     ///
     /// Answers how many charts actually moved, so a command that changed four
     /// of them can say so. A chart already on the symbol is not one of them.
-    pub fn lead_link_group(
+    pub fn lead_follow_charts(
         &mut self,
-        group: u8,
         symbol: &str,
         suffix: Option<&str>,
         at: usize,
         leader: u32,
     ) -> usize {
-        if group == 0 {
-            return 0;
-        }
+        let Some(book) = self.books_mut().get_mut(at) else { return 0 };
+        let Some(panes) = book["panes"].as_array_mut() else { return 0 };
         let mut moved = 0;
-        for (index, book) in self.books_mut().iter_mut().enumerate() {
-            let Some(panes) = book["panes"].as_array_mut() else { continue };
-            for pane in panes {
-                let is_leader = index == at && pane["id"].as_u64() == Some(u64::from(leader));
-                if is_leader || pane["linked"].as_u64() != Some(u64::from(group)) {
-                    continue;
-                }
-                if pane["symbol"].as_str() == Some(symbol) && pane["suffix"].as_str() == suffix {
-                    continue;
-                }
-                pane["symbol"] = json!(symbol);
-                pane["suffix"] = json!(suffix);
-                moved += 1;
+        for pane in panes {
+            let mode = serde_json::from_value::<LinkMode>(pane["link"].clone()).unwrap_or_default();
+            if pane["id"].as_u64() == Some(u64::from(leader)) || mode != LinkMode::Follow {
+                continue;
             }
+            if pane["symbol"].as_str() == Some(symbol) && pane["suffix"].as_str() == suffix {
+                continue;
+            }
+            pane["symbol"] = json!(symbol);
+            pane["suffix"] = json!(suffix);
+            moved += 1;
         }
         moved
     }
@@ -317,16 +312,15 @@ pub fn new_pane(
         "suffix": suffix,
         "timeframe": "1D",
         "indicators": [],
-        "bar_style": defaults.bar_style.key(),
-        "colouring": defaults.colouring.key(),
-        "session": defaults.session.key(),
-        "show_grid": defaults.show_grid,
-        // In the first group, which is where the window starts a new
-        // chartbook's chart. Unlinked, a book made from a terminal followed
-        // nothing in the rail until somebody found `chart set --link`.
-        "linked": LinkGroup::Group(1),
-        "shows_drawings": defaults.shows_drawings,
-        "sends_drawings": defaults.sends_drawings,
+            "bar_style": defaults.bar_style.key(),
+            "colouring": defaults.colouring.key(),
+            "session": defaults.session.key(),
+            "show_grid": defaults.show_grid,
+            // Focus, which is where the window starts a new chartbook's chart:
+            // it takes the rail's click while it holds the focus.
+            "link": "focus",
+            "shows_drawings": defaults.shows_drawings,
+            "sends_drawings": defaults.sends_drawings,
         // What the chart is called among the drawings it makes, so it can
         // take them back if it stops sending.
         "drawing_uid": gtk::glib::uuid_string_random().to_string(),

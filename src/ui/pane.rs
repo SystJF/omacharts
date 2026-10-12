@@ -14,19 +14,12 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use omacharts_engine::{BarStyle, Indicator, Instrument, LinkGroup, Session, Theme, Timeframe};
+use omacharts_engine::{
+    BarStyle, Indicator, Instrument, LinkMode, Session, Theme, Timeframe,
+};
 
 use crate::ui::chart::ChartView;
 use crate::ui::shortcuts;
-
-/// How a pane follows the others.
-///
-/// Panes in the same group share one symbol: a watchlist in that group drives
-/// them, and a symbol picked on any of them moves the rest. An unlinked pane
-/// is parked — the reason to split a chart in the first place is usually to
-/// leave one of them showing something while you go looking at something
-/// else.
-pub const LINK_OFF: &str = "Not linked — this chart stays where it is";
 
 /// One chart filling the window, and the way back.
 pub const MAXIMIZE: &str = "Maximize";
@@ -97,9 +90,8 @@ pub struct ChartPane {
     pub colouring: Cell<omacharts_engine::BarColouring>,
     pub session: Cell<Session>,
     pub show_grid: Cell<bool>,
-    pub linked: Cell<LinkGroup>,
-    /// What this chart shares its drawings with: the global group, one of
-    /// the nine, or nothing.
+    /// What the rail does to this chart.
+    mode: Cell<LinkMode>,
     /// Whether this chart shows the drawings other charts of its symbol
     /// send, and whether it sends its own. Both on by default: a drawing
     /// made on a symbol is usually a drawing about the symbol.
@@ -115,10 +107,13 @@ pub struct ChartPane {
     /// The drawings that are this chart's alone, kept with it rather than
     /// in the store, since they belong to no symbol but to this pane.
     pub local_drawings: RefCell<Vec<omacharts_engine::Drawing>>,
-    /// What the chain is painted in, so the group can be read off four charts
-    /// at a glance rather than by opening four popovers. Held here because the
-    /// drawing happens on every frame and the theme it comes from does not.
+    /// What the link icon is painted in, so a mode other than the default can
+    /// be read off four charts at a glance rather than by opening four
+    /// popovers. Held here because the drawing happens on every frame and the
+    /// theme it comes from does not.
     link_colour: Rc<RefCell<Option<String>>>,
+    /// What the link button draws. Shared with the icon.
+    glyph: Rc<Cell<LinkMode>>,
 }
 
 impl ChartPane {
@@ -132,7 +127,7 @@ impl ChartPane {
         bar_style: BarStyle,
         session: Session,
         show_grid: bool,
-        linked: LinkGroup,
+        mode: LinkMode,
     ) -> Rc<ChartPane> {
         let view = ChartView::new(theme, scheme);
 
@@ -173,8 +168,9 @@ impl ChartPane {
         // painted in whatever colour the button currently has, which is what
         // makes it follow the theme and dim with the rest of the legend.
         let link_colour: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let glyph = Rc::new(Cell::new(mode));
         let link = gtk::MenuButton::new();
-        link.set_child(Some(&chain_icon(link_colour.clone())));
+        link.set_child(Some(&mode_icon(link_colour.clone(), glyph.clone())));
         link.add_css_class("flat");
         link.add_css_class("legend-link");
         link.set_valign(gtk::Align::Center);
@@ -186,7 +182,10 @@ impl ChartPane {
             true => link.add_css_class("open"),
             false => link.remove_css_class("open"),
         });
-        set_link_look(&link, linked);
+        set_link_look(&link, mode);
+        // Hidden with the maximize corner until there is a second chart; the
+        // window says when, through `set_expandable`.
+        link.set_visible(mode == LinkMode::Pinned);
 
         let gear = gtk::Button::from_icon_name("emblem-system-symbolic");
         gear.add_css_class("flat");
@@ -260,13 +259,16 @@ impl ChartPane {
         corner.set_halign(gtk::Align::End);
         corner.set_valign(gtk::Align::Start);
         corner.set_margin_top(6);
-        // The symbol's row's height, so the link and the gear centre on the
+        // The symbol's row's height, so the corner's buttons centre on the
         // line the symbol is written on rather than a few pixels above it.
         corner.set_height_request(SYMBOL_ROW_HEIGHT);
         corner.set_margin_end(corner_margin(0));
-        corner.append(&link);
         corner.append(&gear);
         corner.append(&expand);
+        // The link last, against the price axis: it is the one that stays up
+        // at rest on a Follow or Pinned chart, and at the end of the row it
+        // keeps its place when the gear and the maximize appear beside it.
+        corner.append(&link);
 
         let overlay = gtk::Overlay::new();
         // The chart's own two layers, stacked, rather than the drawing area
@@ -337,12 +339,13 @@ impl ChartPane {
             colouring: Cell::new(Default::default()),
             session: Cell::new(session),
             show_grid: Cell::new(show_grid),
-            linked: Cell::new(linked),
+            mode: Cell::new(mode),
             shows_drawings: Cell::new(true),
             sends_drawings: Cell::new(true),
             uid: RefCell::new(gtk::glib::uuid_string_random().to_string()),
             local_drawings: RefCell::new(Vec::new()),
             link_colour,
+            glyph,
         });
         pane.arrange_header();
         pane
@@ -390,16 +393,39 @@ impl ChartPane {
         self.indicator_legend.set_visible(focused);
     }
 
-    /// Join a group, or leave. The colour is resolved against the live theme
-    /// by the window and handed in, because a pane has no theme of its own to
-    /// ask once the user has changed it.
-    pub fn set_link_group(&self, group: LinkGroup, colour: Option<String>) {
-        self.linked.set(group);
+    pub fn mode(&self) -> LinkMode {
+        self.mode.get()
+    }
+
+    /// Change what the rail does to this chart. The colour is resolved against
+    /// the live theme by the window and handed in, because a pane has no theme
+    /// of its own to ask once the user has changed it.
+    pub fn set_mode(&self, mode: LinkMode, colour: Option<String>) {
+        self.mode.set(mode);
         *self.link_colour.borrow_mut() = colour;
-        set_link_look(&self.link, group);
+        self.glyph.set(mode);
+        set_link_look(&self.link, mode);
+        self.sync_link_shown();
         if let Some(icon) = self.link.child() {
             icon.queue_draw();
         }
+    }
+
+    /// Point at the pin, for a rail click this chart refused.
+    ///
+    /// A click that moves nothing reads as broken. Lighting up the one thing
+    /// on screen that explains it says why, where the eye already is, and
+    /// needs nothing added to the window to carry a message.
+    ///
+    /// What lights is the button's ground, a box where there was none, so the
+    /// moment still shows to an eye that cannot tell the accent from the
+    /// legend's grey.
+    pub fn flag_pinned(&self) {
+        self.link.add_css_class("refused");
+        let link = self.link.clone();
+        gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(700), move || {
+            link.remove_css_class("refused");
+        });
     }
 
     /// Push the maximize corner in from the right, to leave room for
@@ -422,9 +448,19 @@ impl ChartPane {
     }
 
     /// Offer the maximize corner at all, which is a question of whether
-    /// there is anything else on screen to maximize away from.
+    /// there is anything else on screen to maximize away from. The link
+    /// button goes with it: with one chart, Focus and Follow do the same
+    /// thing, so there is nothing to choose between.
     pub fn set_expandable(&self, expandable: bool) {
         self.expand.set_visible(expandable);
+        self.sync_link_shown();
+    }
+
+    fn sync_link_shown(&self) {
+        // A lone Pinned chart keeps its pin, because a rail click it refuses
+        // lights the pin, and a hidden one would leave the refusal unexplained.
+        self.link
+            .set_visible(self.expand.is_visible() || self.mode.get() == LinkMode::Pinned);
     }
 
     /// Point the glyph in or out, and say which it is.
@@ -524,8 +560,8 @@ const LEGEND_MARGIN: i32 = 12;
 const SYMBOL_ROW_HEIGHT: i32 = 32;
 
 /// The corner's margin with `clearance` to leave. With none, it still
-/// clears the price axis: the link and the gear are always on screen, and
-/// over the axis they sat on its labels.
+/// clears the price axis: a Follow or Pinned chart's link is always on
+/// screen, and over the axis it sat on its labels.
 ///
 /// Past the window's controls, which are wider than the axis, it leaves a
 /// few pixels more than the legend's gap. The two pairs stand in one row,
@@ -615,20 +651,36 @@ fn expand_icon(maximized: Rc<Cell<bool>>) -> gtk::DrawingArea {
     area
 }
 
-/// A chain: two rounded links, overlapping, on the diagonal.
+/// A mode's icon for a row of the mode menu, in the colour the chart's button
+/// takes in that mode: the legend's own, dimmed, for Focus, and the accent for
+/// the other two. So the menu shows what the button will look like.
 ///
-/// Flat and side by side they read as a Venn diagram — two ovals that happen
-/// to overlap. On the diagonal the same two shapes read as a chain, which is
-/// why every chain icon is drawn that way, and it survives being shrunk to
-/// sixteen pixels where the flat version does not. Checked by rendering all
-/// three at true size and looking at them.
-pub(crate) fn chain_icon(tint: Rc<RefCell<Option<String>>>) -> gtk::DrawingArea {
+/// Coloured from CSS rather than handed a hex, because the popover outlives
+/// any one theme and CSS is what follows a change of it.
+pub(crate) fn menu_mode_icon(mode: LinkMode) -> gtk::DrawingArea {
+    let area = mode_icon(
+        Rc::new(RefCell::new(None)),
+        Rc::new(Cell::new(mode)),
+    );
+    area.add_css_class(match mode {
+        LinkMode::Focus => "dim-label",
+        LinkMode::Follow | LinkMode::Pinned => "link-mode-set",
+    });
+    area
+}
+
+/// The chart's link button, which has to say which of three modes it is in
+/// without being opened, so each mode has a shape of its own: one link for
+/// Focus, the chain for Follow, a pin for Pinned. One link and two say how
+/// much the chart is tied to the watchlist, only while focused or always;
+/// "never moves" is not a fainter "always moves", so it is not a chain at all.
+fn mode_icon(tint: Rc<RefCell<Option<String>>>, glyph: Rc<Cell<LinkMode>>) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_content_width(18);
     area.set_content_height(18);
     area.set_draw_func(move |area, cr, width, height| {
-        // The group's colour when it has one, and the legend's own otherwise:
-        // an unlinked chain is furniture and should dim with everything else
+        // The mode's colour when it has one, and the legend's own otherwise:
+        // the default is furniture and should dim with everything else
         // around it rather than insisting on a hue of its own.
         match tint.borrow().as_deref() {
             Some(hex) => crate::ui::colors::set_source(cr, hex),
@@ -643,22 +695,82 @@ pub(crate) fn chain_icon(tint: Rc<RefCell<Option<String>>>) -> gtk::DrawingArea 
             }
         }
         let (w, h) = (width as f64, height as f64);
-        let link_w = w * 0.56;
-        let link_h = h * 0.36;
-        let overlap = link_h * 0.34;
         cr.set_line_width(1.3);
-
         cr.save().ok();
         cr.translate(w / 2.0, h / 2.0);
-        cr.rotate(-std::f64::consts::FRAC_PI_4);
-        let total = link_w * 2.0 - overlap;
-        for x in [-total / 2.0, -total / 2.0 + link_w - overlap] {
-            rounded(cr, x, -link_h / 2.0, link_w, link_h, link_h / 2.0);
-            let _ = cr.stroke();
+        match glyph.get() {
+            LinkMode::Focus => draw_link(cr, w, h),
+            LinkMode::Follow => draw_chain(cr, w, h),
+            LinkMode::Pinned => draw_pin(cr, w),
         }
         cr.restore().ok();
     });
     area
+}
+
+/// The size of one link of the chain, for a box `w` by `h`.
+fn link_size(w: f64, h: f64) -> (f64, f64) {
+    (w * 0.56, h * 0.36)
+}
+
+/// One rounded link on the diagonal, around the origin: the chain with its
+/// other half missing, the same size and angle so the two read as one family.
+fn draw_link(cr: &gtk::cairo::Context, w: f64, h: f64) {
+    let (link_w, link_h) = link_size(w, h);
+    cr.rotate(-std::f64::consts::FRAC_PI_4);
+    rounded(cr, -link_w / 2.0, -link_h / 2.0, link_w, link_h, link_h / 2.0);
+    let _ = cr.stroke();
+}
+
+/// Two rounded links, overlapping, on the diagonal, around the origin.
+///
+/// Flat and side by side they read as a Venn diagram — two ovals that happen
+/// to overlap. On the diagonal the same two shapes read as a chain, which is
+/// why every chain icon is drawn that way, and it survives being shrunk to
+/// sixteen pixels where the flat version does not.
+fn draw_chain(cr: &gtk::cairo::Context, w: f64, h: f64) {
+    let (link_w, link_h) = link_size(w, h);
+    let overlap = link_h * 0.34;
+    cr.rotate(-std::f64::consts::FRAC_PI_4);
+    let total = link_w * 2.0 - overlap;
+    for x in [-total / 2.0, -total / 2.0 + link_w - overlap] {
+        rounded(cr, x, -link_h / 2.0, link_w, link_h, link_h / 2.0);
+        let _ = cr.stroke();
+    }
+}
+
+/// A thumbtack, leaning the way the chain does, around the origin: the head,
+/// the waist and the flared collar as one solid shape, over a bare point.
+fn draw_pin(cr: &gtk::cairo::Context, w: f64) {
+    cr.rotate(std::f64::consts::FRAC_PI_4);
+    cr.set_line_join(gtk::cairo::LineJoin::Round);
+    cr.set_line_cap(gtk::cairo::LineCap::Round);
+    // Drawn on an 18-pixel box and scaled to this one.
+    let k = w / 18.0;
+    let outline = [
+        (-2.6, -7.6),
+        (2.6, -7.6),
+        (2.6, -5.8),
+        (1.4, -5.8),
+        (1.4, -2.4),
+        (4.0, -1.0),
+        (-4.0, -1.0),
+        (-1.4, -2.4),
+        (-1.4, -5.8),
+        (-2.6, -5.8),
+    ];
+    for (i, &(x, y)) in outline.iter().enumerate() {
+        match i {
+            0 => cr.move_to(x * k, y * k),
+            _ => cr.line_to(x * k, y * k),
+        }
+    }
+    cr.close_path();
+    let _ = cr.fill_preserve();
+    let _ = cr.stroke();
+    cr.move_to(0.0, -k);
+    cr.line_to(0.0, 7.6 * k);
+    let _ = cr.stroke();
 }
 
 fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
@@ -671,22 +783,15 @@ fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     cr.close_path();
 }
 
-/// The legend stays out of the way, so an unlinked chart's toggle is only
-/// there under the pointer. A linked one is not: following the rail is the
-/// state worth being able to see across four charts without looking for it.
-fn set_link_look(link: &gtk::MenuButton, group: LinkGroup) {
-    let linked = group.is_linked();
-    link.set_tooltip_text(Some(&match group {
-        LinkGroup::None => LINK_OFF.to_string(),
-        other => format!("Linked · {}", other.label()),
-    }));
-    // Two states that cannot be confused, from one icon: Adwaita has a chain
-    // and no broken chain, so the difference has to be carried by presence
-    // rather than by a second glyph. A linked chart says so plainly; an
-    // unlinked one keeps a handle that shows when the pointer is on it.
-    match linked {
-        true => link.remove_css_class("quiet"),
-        false => link.add_css_class("quiet"),
+/// The legend stays out of the way, so a Focus chart's button is nearly
+/// invisible: it is the default, and four faint links say nothing is going on.
+/// Follow and Pinned are not: a chart that moves on every click, or on none,
+/// is the state worth being able to see across four charts without looking.
+fn set_link_look(link: &gtk::MenuButton, mode: LinkMode) {
+    link.set_tooltip_text(Some(&format!("{} — {}", mode.label(), mode.blurb())));
+    match mode {
+        LinkMode::Focus => link.add_css_class("quiet"),
+        _ => link.remove_css_class("quiet"),
     }
 }
 

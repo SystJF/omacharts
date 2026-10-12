@@ -1,12 +1,11 @@
 //! Watchlists as a file, for carrying them from one machine to another.
 //!
-//! `watchlist export` writes every list — sections, order, symbols and the
-//! link group each drives — and `watchlist import` brings them in on the
-//! other side. Importing adds what is missing and touches nothing else, so
-//! the same file can be imported again and again, on every machine, as the
-//! lists grow: a second run changes nothing. `--replace` is the one way to
-//! make a list match the file exactly, and even that never removes a list the
-//! file does not name.
+//! `watchlist export` writes every list — sections, order and symbols — and
+//! `watchlist import` brings them in on the other side. Importing adds what
+//! is missing and touches nothing else, so the same file can be imported
+//! again and again, on every machine, as the lists grow: a second run
+//! changes nothing. `--replace` is the one way to make a list match the file
+//! exactly, and even that never removes a list the file does not name.
 //!
 //! The file is the lists and nothing about this machine: no row ids, which
 //! mean nothing anywhere else, and the default list marked as the default
@@ -14,10 +13,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use omacharts_engine::{link, LinkGroup};
 use serde::{Deserialize, Serialize};
 
-use super::exec::link_setting;
 use super::Fault;
 use crate::store::{Entry, Store, DEFAULT_WATCHLIST};
 
@@ -41,9 +38,6 @@ pub struct List {
     /// calls it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub default: bool,
-    /// The link group it drives, 0 for none.
-    #[serde(default)]
-    pub link: u8,
     pub sections: Vec<Part>,
 }
 
@@ -92,17 +86,11 @@ impl Symbol {
 
 /// These watchlists, as the file `export` writes.
 pub fn export(store: &Store, lists: &[(i64, String)]) -> Export {
-    // Who drives what, read once: asking per list rescans every list each time.
-    let links: HashMap<i64, u8> = crate::ui::watchlist::group_owners(store)
-        .into_iter()
-        .map(|(group, id, _)| (id, group))
-        .collect();
     let watchlists = lists
         .iter()
         .map(|(id, name)| List {
             name: name.clone(),
             default: *id == DEFAULT_WATCHLIST,
-            link: links.get(id).copied().unwrap_or(0),
             sections: store
                 .watchlist_sections(*id)
                 .iter()
@@ -143,9 +131,6 @@ pub fn parse(text: &str) -> Result<Export, Fault> {
         if !names.insert(name.to_lowercase()) {
             return Err(Fault::usage(format!("the file has two watchlists called {name:?}")));
         }
-        if list.link > link::GROUP_COUNT {
-            return Err(Fault::usage(format!("{name:?} drives link group {}, which is not one", list.link)));
-        }
         if list.sections.iter().flat_map(|part| &part.symbols).any(|s| s.entry().symbol.is_empty()) {
             return Err(Fault::usage(format!("{name:?} has an empty symbol")));
         }
@@ -182,8 +167,6 @@ pub struct Imported {
     pub action: Action,
     pub symbols: usize,
     pub sections: usize,
-    /// A link group the file asked for and another list already drives.
-    pub link_kept_by: Option<(u8, String)>,
 }
 
 impl Imported {
@@ -193,7 +176,7 @@ impl Imported {
             n => format!("{n} {one}s"),
         };
         let (name, symbols) = (&self.name, counted(self.symbols, "symbol"));
-        let mut text = match self.action {
+        match self.action {
             Action::Unchanged => format!("{name}: already up to date"),
             Action::Merged if self.sections == 0 => format!("{name}: added {symbols}"),
             Action::Merged => {
@@ -204,11 +187,7 @@ impl Imported {
                 action.key(),
                 counted(self.sections, "section")
             ),
-        };
-        if let Some((group, holder)) = &self.link_kept_by {
-            text.push_str(&format!(" (link group {group} stays with {holder:?})"));
         }
-        text
     }
 }
 
@@ -317,24 +296,11 @@ fn bring_in(
         }
     }
 
-    // A group is the file's to set only on a list it is writing whole. On a
-    // merge the list keeps whatever group it drives here.
-    let mut link_kept_by = None;
-    if action != Action::Merged {
-        match crate::ui::watchlist::group_held_by(store, LinkGroup::numbered(list.link), id) {
-            Some((_, holder)) => link_kept_by = Some((list.link, holder)),
-            None if list.link > 0 || action == Action::Replaced => {
-                store.set_setting(&link_setting(id), &list.link.to_string());
-            }
-            None => {}
-        }
-    }
-
     let action = match (action, symbols + sections) {
         (Action::Merged, 0) => Action::Unchanged,
         (action, _) => action,
     };
-    Some(Imported { name, action, symbols, sections, link_kept_by })
+    Some(Imported { name, action, symbols, sections })
 }
 
 /// Empty a watchlist, keeping the list itself and its nameless section.

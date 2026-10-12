@@ -473,7 +473,7 @@ fn bars_group(window: &Rc<Window>, store: &Rc<Store>) -> adw::PreferencesGroup {
     // charts behave towards each other, which is not a property of any one of
     // them.
     let sync = adw::ActionRow::new();
-    sync.set_title("Crosshair across linked charts");
+    sync.set_title("Crosshair across Follow charts");
     sync.set_subtitle("The pointer on one draws the same moment on the others");
     let switch = gtk::Switch::new();
     switch.set_valign(gtk::Align::Center);
