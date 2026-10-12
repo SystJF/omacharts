@@ -1037,6 +1037,9 @@ impl Watchlist {
     /// Collapsed sections are excluded: what you cannot see, you cannot arrow
     /// onto, and prefetching it would spend the request budget on rows that
     /// are not there.
+    ///
+    /// The row's own flag, not whether it is on screen: with the rail closed
+    /// every row is off screen, and the chart still walks the list.
     pub fn flat_order(&self) -> Vec<Instrument> {
         self.rows
             .borrow()
@@ -1047,7 +1050,7 @@ impl Watchlist {
                     let visible = self
                         .list
                         .row_at_index(at as i32)
-                        .map(|row| row.is_visible())
+                        .map(|row| row.get_visible())
                         .unwrap_or(false);
                     visible.then(|| instrument.clone())
                 }
