@@ -1515,6 +1515,13 @@ pub struct Window {
     /// is the chart you expect to find filling it — and the corner it is put
     /// back from says there is more behind it.
     maximized: Cell<Option<u32>>,
+    /// Where the pointer last was, in the window's own coordinates.
+    pointer_at: Cell<Option<(f64, f64)>>,
+    /// Where the pointer was when the keyboard last moved the focus, while
+    /// it has not moved since. The charts' hover furniture — crosshair,
+    /// link, gear, maximize — belongs to a hand on the mouse, and a pointer
+    /// left resting over some chart is not one.
+    hushed_at: Cell<Option<(f64, f64)>>,
     /// Every chartbook, as it is written down, including the one on screen.
     ///
     /// Only one book is ever built into widgets: `panes` and `layout` above
@@ -1690,6 +1697,8 @@ impl Window {
             layout: RefCell::new(Node::leaf(1)),
             focused: Cell::new(1),
             maximized: Cell::new(None),
+            pointer_at: Cell::new(None),
+            hushed_at: Cell::new(None),
             books: RefCell::new(Vec::new()),
             active: Cell::new(0),
             next_pane: Cell::new(1),
@@ -1884,6 +1893,7 @@ impl Window {
         this.install_chart_actions();
 
         this.wire_shortcuts();
+        this.wire_hush();
         this.wire_responses(receiver);
         this.wire_theme_polling();
         this.wire_backfill();
@@ -2372,6 +2382,65 @@ impl Window {
         }
         if let Some((_, id)) = best {
             self.focus(id);
+            self.hush_pointer();
+        }
+    }
+
+    /// Put the charts' hover furniture away until the pointer moves: the
+    /// keyboard is driving, and a crosshair and three buttons wherever the
+    /// pointer happens to rest — on the chart just left, or, maximized, on
+    /// the one just swapped in under it — are only in the way.
+    fn hush_pointer(&self) {
+        let Some(at) = self.pointer_at.get() else { return };
+        self.hushed_at.set(Some(at));
+        self.chart_host.add_css_class("hushed");
+        for pane in self.panes.borrow().iter() {
+            pane.view.drop_pointer();
+        }
+    }
+
+    /// Wire the hush's way out. Motion is held back from the charts while
+    /// the pointer stands where it was hushed: GTK repeats the pointer's
+    /// position to whatever is newly under it after a rebuild, and a chart
+    /// would take that for a hand. A real move, or a press, lets it through.
+    fn wire_hush(self: &Rc<Self>) {
+        let legacy = gtk::EventControllerLegacy::new();
+        legacy.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let this = self.clone();
+        legacy.connect_event(move |_, event| {
+            use gtk::gdk::EventType;
+            match event.event_type() {
+                EventType::MotionNotify => {
+                    let Some(at) = event.position() else { return glib::Propagation::Proceed };
+                    this.pointer_at.set(Some(at));
+                    match this.hushed_at.get() {
+                        Some((x, y)) if (at.0 - x).abs() < 1.0 && (at.1 - y).abs() < 1.0 => {
+                            glib::Propagation::Stop
+                        }
+                        Some(_) => {
+                            this.unhush();
+                            glib::Propagation::Proceed
+                        }
+                        None => glib::Propagation::Proceed,
+                    }
+                }
+                EventType::ButtonPress | EventType::Scroll | EventType::TouchBegin => {
+                    this.unhush();
+                    glib::Propagation::Proceed
+                }
+                EventType::LeaveNotify => {
+                    this.pointer_at.set(None);
+                    glib::Propagation::Proceed
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        });
+        self.window.add_controller(legacy);
+    }
+
+    fn unhush(&self) {
+        if self.hushed_at.take().is_some() {
+            self.chart_host.remove_css_class("hushed");
         }
     }
 
@@ -3932,30 +4001,6 @@ impl Window {
             buttons.push((timeframe, button));
         }
         *pane.buttons.borrow_mut() = buttons;
-
-        // The same list behind the resolution beside the symbol, which stays
-        // when the strip has no room — the way a narrow TradingView chart
-        // folds its intervals into one dropdown.
-        let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let popover = gtk::Popover::new();
-        popover.add_css_class("menu");
-        for timeframe in self.timeframes.borrow().iter().copied() {
-            let item = gtk::Button::with_label(&timeframe.description());
-            item.add_css_class("flat");
-            let this = self.clone();
-            let owner = pane.id;
-            let closing = popover.downgrade();
-            item.connect_clicked(move |_| {
-                if let Some(popover) = closing.upgrade() {
-                    popover.popdown();
-                }
-                this.focus(owner);
-                this.set_timeframe(timeframe);
-            });
-            list.append(&item);
-        }
-        popover.set_child(Some(&list));
-        pane.timeframe_menu.set_popover(Some(&popover));
     }
 
     /// Put a resolution on the strip, in the place its length earns it.
@@ -4650,14 +4695,14 @@ impl Window {
         // window would put it over whichever chart happened to be underneath.
         let popover = gtk::Popover::new();
         popover.set_child(Some(&content));
-        // Or, on a chart too narrow to show the strip, to the resolution
-        // beside the symbol that stands in for it. Mapped rather than
-        // visible: the strip is hidden by its row stepping aside, and only
-        // the map state reaches down through the row to the strip itself.
+        // Or, on a chart too narrow to show the strip, to the chart's symbol.
+        // Mapped rather than visible: the strip is hidden by its row stepping
+        // aside, and only the map state reaches down through the row to the
+        // strip itself.
         let pane = self.focused_pane();
         match pane.strip.is_mapped() {
             true => popover.set_parent(&pane.strip),
-            false => popover.set_parent(&pane.timeframe_menu),
+            false => popover.set_parent(&pane.symbol_button),
         }
         // Every number typed builds a fresh one, so each has to let go of the
         // strip when it closes or they pile up on it.

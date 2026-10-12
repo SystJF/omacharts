@@ -351,14 +351,26 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 }
 .legend-symbol:hover { background: alpha(currentColor, 0.12); }
 
-/* The legend sits over the drawing, and the drawing is the point. Everything
-   here stays faint until the pointer is near it. */
-.legend-gear { opacity: 0.35; min-width: 22px; min-height: 22px; padding: 2px; }
-.legend-gear:hover { opacity: 1; }
+/* The legend sits over the drawing, and the drawing is the point. The gear,
+   and the link while the chart is in no group (the default, so nothing to
+   report), strike the maximize corner's bargain: not there until the pointer
+   is on the chart. A linked chart keeps its link showing, since then the
+   icon is telling you something. The link stays up while its menu is open,
+   when the pointer has left the chart for the menu. */
+.legend-gear,
+.legend-link.quiet {
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+.chart-pane:hover .legend-gear,
+.chart-pane:hover .legend-link.quiet,
+.legend-link.quiet.open { opacity: 0.45; }
+.chart-pane:hover .legend-gear:hover,
+.chart-pane:hover .legend-link.quiet:hover { opacity: 1; }
 
-/* The maximize corner is the same bargain as the gear, struck harder: it is
-   not there at all until the pointer is on the chart, which is also the only
-   moment it could be clicked. Four charts with a permanent button in each
+/* The maximize corner is the bargain the gear strikes: it is not there at
+   all until the pointer is on the chart, which is also the only moment it
+   could be clicked. Four charts with a permanent button in each
    corner is four more things between you and the prices. */
 .pane-expand {
   opacity: 0;
@@ -377,6 +389,15 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
   background: alpha(currentColor, 0.12);
   border-radius: 5px;
 }
+/* All three wait for a hand on the mouse: after the keyboard moves the
+   focus, the window hushes them until the pointer moves, whatever it
+   happens to be resting over. */
+.hushed .chart-pane:hover .legend-gear,
+.hushed .chart-pane:hover .legend-gear:hover,
+.hushed .chart-pane:hover .legend-link.quiet:not(.open),
+.hushed .chart-pane:hover .legend-link.quiet:not(.open):hover,
+.hushed .chart-pane:hover .pane-expand,
+.hushed .chart-pane:hover .pane-expand:hover { opacity: 0; }
 
 /* The window's own controls — the watchlist toggle and the main menu — sit
    in the top-right corner, over whatever is there, instead of on a header
