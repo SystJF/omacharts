@@ -33,7 +33,8 @@ use omacharts_engine::drawings::{
 };
 use omacharts_engine::indicators::{self as indicators, BandSeries, Output, Profile};
 use omacharts_engine::{
-    Bar, BarScheme, BarStyle, Direction, FetchFailure, Indicator, Instrument, Theme, Timeframe,
+    grouped_decimals, Bar, BarScheme, BarStyle, Direction, FetchFailure, Indicator, Instrument,
+    Theme, Timeframe,
 };
 
 use crate::ui::colors;
@@ -4230,7 +4231,7 @@ fn draw_price_grid(
 
             colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.9);
             cr.move_to(plot_x + plot_w + 6.0, y + 3.5);
-            let _ = cr.show_text(&format!("{price:.decimals$}"));
+            let _ = cr.show_text(&grouped_decimals(price, decimals));
         }
     });
 
@@ -4653,7 +4654,7 @@ fn draw_pane(
         pane.guides.iter().map(|g| (*g, format!("{g:.0}"))).collect()
     } else {
         let decimals = pane_decimals(pane, low, high);
-        vec![(low, format!("{low:.decimals$}")), (high, format!("{high:.decimals$}"))]
+        vec![(low, grouped_decimals(low, decimals)), (high, grouped_decimals(high, decimals))]
     };
     for (value, text) in marks {
         let y = to_y(value);
@@ -4687,7 +4688,7 @@ fn draw_pane(
         .filter_map(|(series, colour)| {
             let last = series.iter().rev().find_map(|value| *value)?;
             let y = to_y(last);
-            (y >= top && y <= top + height).then(|| (y, format!("{last:.decimals$}"), colour))
+            (y >= top && y <= top + height).then(|| (y, grouped_decimals(last, decimals), colour))
         })
         .collect();
     draw_axis_chips(cr, state, chips, plot_x + plot_w, top + height, width);
@@ -4897,7 +4898,7 @@ fn draw_last_price(
     label_on_axis(
         cr,
         state,
-        &format!("{:.*}", decimals, last.close),
+        &grouped_decimals(last.close, decimals),
         plot_x + plot_w,
         y,
         width,
@@ -4954,7 +4955,7 @@ fn draw_crosshair(
         label_on_axis(
             cr,
             state,
-            &format!("{price:.decimals$}"),
+            &grouped_decimals(price, decimals),
             plot_x + plot_w,
             py.round() + 0.5,
             width,
@@ -5023,7 +5024,7 @@ fn draw_pane_value(
     label_on_axis(
         cr,
         state,
-        &format!("{value:.decimals$}"),
+        &grouped_decimals(value, decimals),
         plan.plot_x + plan.plot_w,
         py.round() + 0.5,
         width,
