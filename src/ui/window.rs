@@ -1933,10 +1933,15 @@ impl Window {
         // Which means the restoration below runs against the curated half and
         // cannot name a listing outside it — the swap happens on the main loop,
         // and the main loop is waiting for this constructor to return. So the
-        // charts that could not be resolved are filled in from here, once.
+        // charts that could not be resolved are filled in from here, once —
+        // and the rail, which left out its symbols outside the curated half.
         let waiting = this.clone();
         crate::inventory::load_in_background(this.index.clone(), move |_| {
             waiting.resolve_pending();
+            let rail = waiting.watchlist.borrow().as_ref().cloned();
+            if let Some(rail) = rail {
+                rail.rebuild();
+            }
         });
 
         if !this.restore_workspace() {
