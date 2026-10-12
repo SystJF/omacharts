@@ -126,6 +126,10 @@ struct State {
     /// How many bars are visible.
     visible: usize,
     pointer: Option<(f64, f64)>,
+    /// Ctrl is held, as of the last event that said: what a drawing is laid
+    /// down or a corner dragged with snaps to the candle under it, and so
+    /// does the crosshair while it does, to show where.
+    magnet: bool,
     /// Pinned to the right edge, so new bars keep the view at "now" until the
     /// user pans away.
     anchored: bool,
@@ -914,6 +918,7 @@ impl State {
             first: 0,
             visible: 160,
             pointer: None,
+            magnet: false,
             anchored: true,
             overhang: RIGHT_MARGIN,
             lead: 0,
@@ -1004,6 +1009,38 @@ impl State {
         self.selected.iter().filter_map(|i| self.drawings.get(*i)).map(|d| d.id).collect()
     }
 
+    /// Whether the hand is placing an anchor with the magnet on: a tool in
+    /// hand, a drawing being laid down, or a corner being dragged, with Ctrl
+    /// held. Moving a whole drawing does not snap, so it is not this.
+    fn snapping(&self) -> bool {
+        let corner = matches!(self.drag, Some(Drag::Grip { grip, .. }) if grip != Grip::Body);
+        self.magnet && (self.tool.is_some() || self.placing.is_some() || corner)
+    }
+
+    /// A drawing with one anchor down follows the pointer with the other,
+    /// button or no button: click, move, click is the way a line is drawn,
+    /// and the line has to be there during the move.
+    fn follow_hand(&mut self, width: f64, height: f64) {
+        if self.drag.is_some() {
+            return;
+        }
+        let Some((x, y)) = self.pointer else { return };
+        if let Some(anchor) = self.locate_with(width, height, x, y, self.magnet)
+            && let Some(placing) = self.placing.as_mut()
+        {
+            match placing.kind.is_path() {
+                true => placing.move_last_corner(anchor),
+                false => placing.move_grip(Grip::To, anchor),
+            }
+        }
+    }
+
+    /// What a snapped anchor can land on: the prices the chart draws of a
+    /// bar.
+    fn snap_prices(&self, bar: &Bar) -> [f64; 4] {
+        [bar.open, bar.high, bar.low, bar.close]
+    }
+
     /// Where a pixel is in the chart's own units: the moment of the bar
     /// under it and the price at that height. `None` when there is nothing
     /// on the chart to measure against.
@@ -1012,6 +1049,17 @@ impl State {
     /// it exactly; past either end of the loaded bars it keeps counting at
     /// the last bar's step, so a line can be drawn into the future.
     fn locate(&self, width: f64, height: f64, x: f64, y: f64) -> Option<Anchor> {
+        self.locate_with(width, height, x, y, false)
+    }
+
+    /// [`locate`](Self::locate), and with `snap` the price is pulled onto
+    /// the candle under the pointer: whichever of the prices the chart draws
+    /// of it is nearest on screen. That is Ctrl while a drawing is laid down
+    /// or a corner dragged, the magnet every charting tool has, because a
+    /// line from one low to another is meant to touch both lows exactly and
+    /// a hand lands a pixel off. Past either end of the bars there is no
+    /// candle and the price is where the pointer is.
+    fn locate_with(&self, width: f64, height: f64, x: f64, y: f64, snap: bool) -> Option<Anchor> {
         let (first, visible, lead) = self.view();
         if visible == 0 {
             return None;
@@ -1019,19 +1067,30 @@ impl State {
         let plan = layout(self, width, height);
         let scale = price_range(self, &self.bars[first..first + visible])?;
         let price = scale.price_at(y, plan.price_y, plan.price_h);
+        let to_y = |price: f64| plan.price_y + plan.price_h * (high - price) / (high - low);
         // A column's width, the room at either end counted: the plot's
         // first column may stand before the first bar.
         let bar_w = plan.plot_w / self.columns().max(1) as f64;
-        let index = first as f64 - lead as f64 + (x - plan.plot_x) / bar_w - 0.5;
-        Some(Anchor::new(ts_at(&self.bars, index.round()), price))
+        let index = (first as f64 - lead as f64 + (x - plan.plot_x) / bar_w - 0.5).round();
+        let price = match snap && index >= 0.0 {
+            true => self.bars.get(index as usize).map_or(price, |bar| {
+                let off = |price: f64| (to_y(price) - y).abs();
+                self.snap_prices(bar)
+                    .into_iter()
+                    .min_by(|a, b| off(*a).total_cmp(&off(*b)))
+                    .unwrap_or(price)
+            }),
+            false => price,
+        };
+        Some(Anchor::new(ts_at(&self.bars, index), price))
     }
 
     /// The first press with a tool in hand: a drawing of that kind, in the
     /// configuration chosen for it and the scope this chart draws into, with
     /// both anchors where the hand is until the hand moves.
-    fn begin_placing(&mut self, width: f64, height: f64, x: f64, y: f64) -> bool {
+    fn begin_placing(&mut self, width: f64, height: f64, x: f64, y: f64, snap: bool) -> bool {
         let Some(kind) = self.tool else { return false };
-        let Some(anchor) = self.locate(width, height, x, y) else { return false };
+        let Some(anchor) = self.locate_with(width, height, x, y, snap) else { return false };
         let mut drawing = match kind.is_path() {
             true => Drawing::zigzag_from(anchor),
             false => Drawing::new(kind, anchor, anchor),
@@ -1894,6 +1953,14 @@ impl ChartView {
             let Some(view) = view.upgrade() else { return glib::Propagation::Proceed };
             use gtk::gdk::Key;
             match key {
+                // Ctrl alone says nothing to anybody else, so it goes on;
+                // here it is the magnet, and the crosshair and a drawing
+                // half laid down move onto the candle without waiting for
+                // the hand to.
+                Key::Control_L | Key::Control_R => {
+                    view.set_magnet(true);
+                    glib::Propagation::Proceed
+                }
                 Key::Escape => match view.cancel() {
                     true => glib::Propagation::Stop,
                     false => glib::Propagation::Proceed,
@@ -2071,7 +2138,28 @@ impl ChartView {
                 _ => glib::Propagation::Proceed,
             }
         });
+        let view = Rc::downgrade(self);
+        keys.connect_key_released(move |_, key, _, _| {
+            use gtk::gdk::Key;
+            if let (Key::Control_L | Key::Control_R, Some(view)) = (key, view.upgrade()) {
+                view.set_magnet(false);
+            }
+        });
         self.area.add_controller(keys);
+    }
+
+    /// Ctrl went down or came up: snap, or stop snapping, where the pointer
+    /// already is.
+    fn set_magnet(&self, on: bool) {
+        {
+            let mut s = self.state.borrow_mut();
+            if s.magnet == on {
+                return;
+            }
+            s.magnet = on;
+            s.follow_hand(self.area.width() as f64, self.area.height() as f64);
+        }
+        self.pointer.queue_draw();
     }
 
     /// Configuration `n` (1 to 9) for the selected drawing, or, while a tool
@@ -3042,25 +3130,12 @@ impl ChartView {
         let area = self.area.clone();
         let pointer = self.pointer.clone();
         let on_hover = self.on_hover.clone();
-        motion.connect_motion(move |_, x, y| {
+        motion.connect_motion(move |controller, x, y| {
             {
                 let mut s = state.borrow_mut();
+                s.magnet = controller.current_event_state().contains(gtk::gdk::ModifierType::CONTROL_MASK);
                 s.pointer = Some((x, y));
-                // A drawing with one anchor down follows the pointer with
-                // the other, button or no button: click, move, click is
-                // the way a line is drawn, and the line has to be there
-                // during the move.
-                if s.drag.is_none() && s.placing.is_some() {
-                    let (w, h) = (area.width() as f64, area.height() as f64);
-                    if let Some(anchor) = s.locate(w, h, x, y)
-                        && let Some(placing) = s.placing.as_mut()
-                    {
-                        match placing.kind.is_path() {
-                            true => placing.move_last_corner(anchor),
-                            false => placing.move_grip(Grip::To, anchor),
-                        }
-                    }
-                }
+                s.follow_hand(area.width() as f64, area.height() as f64);
             }
             // The cursor is the only thing that says a line can be dragged, so
             // it changes the moment the pointer is close enough to grab it.
@@ -3232,10 +3307,13 @@ impl ChartView {
         // On a drawing, Shift or Ctrl adds it to the selection: design
         // tools say Shift and charting tools say Ctrl, and a hand that
         // learned one should not have to learn the other. On empty chart
-        // only Shift pulls out a box; Ctrl with a drag is left for later.
+        // only Shift pulls out a box. With a tool in hand, Ctrl snaps the
+        // anchor to the candle under it instead.
         let modifiers = gesture.current_event_state();
         let shift_only = modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK);
-        let shift = shift_only || modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+        let ctrl = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+        let shift = shift_only || ctrl;
+        state.borrow_mut().magnet = ctrl;
         // A drawing being laid down takes the press before anything
         // else: the second press is the drawing's second anchor.
         // What this press means for a drawing already being laid down:
@@ -3251,7 +3329,7 @@ impl ChartView {
             if s.placing.is_none() {
                 Press::Elsewhere
             } else {
-                let anchor = s.locate(width, height, x, y);
+                let anchor = s.locate_with(width, height, x, y, ctrl);
                 let path = s.placing.as_ref().is_some_and(|d| d.kind.is_path());
                 if let Some(anchor) = anchor
                     && let Some(placing) = s.placing.as_mut()
@@ -3320,7 +3398,7 @@ impl ChartView {
             // is at a point — so one press puts the caret down and the
             // keyboard takes over from there.
             if s.tool == Some(DrawingKind::Text) {
-                let anchor = s.locate(width, height, x, y);
+                let anchor = s.locate_with(width, height, x, y, ctrl);
                 drop(s);
                 if let (Some(view), Some(anchor)) = (view.upgrade(), anchor) {
                     view.start_text_at(anchor);
@@ -3328,7 +3406,7 @@ impl ChartView {
                 return;
             }
             if s.tool.is_some() {
-                s.begin_placing(width, height, x, y);
+                s.begin_placing(width, height, x, y, ctrl);
                 // A zig-zag is laid down by pressing, a corner at a time,
                 // so the drag that would rubber-band a line out of this
                 // press is never started.
@@ -3342,8 +3420,10 @@ impl ChartView {
             // already selected keeps its company, so a drag on it moves
             // them all. Otherwise a press on the chart lets go of whatever
             // was selected, and pans as it always did.
+            // Except Ctrl on a corner, which takes hold of it so the
+            // drag that follows snaps it to a candle; Shift still adds.
             match s.drawing_at(width, height, x, y) {
-                Some((index, _)) if shift => {
+                Some((index, grip)) if shift && (shift_only || grip == Grip::Body) => {
                     match s.selected.iter().position(|i| *i == index) {
                         Some(at) => {
                             s.selected.remove(at);
@@ -3419,11 +3499,13 @@ impl ChartView {
             let plot_w = (area.width() as f64 - PRICE_AXIS_W - PAD).max(1.0);
             let (width, height) = (area.width() as f64, area.height() as f64);
             let hand = gesture.start_point().map(|(sx, sy)| (sx + offset_x, sy + offset_y));
+            let snap = gesture.current_event_state().contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            s.magnet = snap;
 
             match drag {
                 Drag::Place { moved } => {
                     let Some((x, y)) = hand else { return };
-                    if let Some(anchor) = s.locate(width, height, x, y)
+                    if let Some(anchor) = s.locate_with(width, height, x, y, snap)
                         && let Some(placing) = s.placing.as_mut()
                     {
                         match placing.kind.is_path() {
@@ -3459,7 +3541,11 @@ impl ChartView {
                 }
                 Drag::Grip { index, grip, origin } => {
                     let Some((x, y)) = hand else { return };
-                    let Some(now) = s.locate(width, height, x, y) else { return };
+                    // A corner snaps; the whole drawing does not, since
+                    // it moves by how far the hand went, and a hand pulled
+                    // onto a candle would jump it by that much.
+                    let snap = snap && grip != Grip::Body;
+                    let Some(now) = s.locate_with(width, height, x, y, snap) else { return };
                     let moving: Vec<Drawing> = match grip {
                         Grip::Body => {
                             // The whole selection follows the hand by the
@@ -4006,8 +4092,15 @@ fn draw_pointer(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     }
 
     if let Some((px, py)) = state.pointer {
+        // With the magnet on, the crosshair goes where the anchor will: onto
+        // the candle, if the pointer is over the price plot.
+        let over_price = py >= plan.price_y && py <= plan.price_y + plan.price_h;
+        let cross_y = match state.snapping() && over_price {
+            true => state.locate_with(width, height, px, py, true).map_or(py, |a| to_y(a.price)),
+            false => py,
+        };
         draw_crosshair(
-            cr, state, px, py, plan.plot_x, plan.plot_w, plan.top, plan.price_y, plan.price_h,
+            cr, state, px, cross_y, plan.plot_x, plan.plot_w, plan.top, plan.price_y, plan.price_h,
             width, height, bar_w, first as i64 - lead as i64, &scale,
         );
         draw_pane_value(cr, state, &plan, px, py, first, visible, width);
@@ -6952,6 +7045,83 @@ mod drawing_tests {
         assert_eq!(anchor.ts, state.bars[99].ts + 21 * 3600);
     }
 
+    /// With Ctrl, an anchor on a candle takes whichever of its open, high,
+    /// low and close is nearest the pointer; past the last bar there is no
+    /// candle and the price is left where the pointer is.
+    #[test]
+    fn a_snapped_anchor_lands_on_the_nearest_price_of_its_candle() {
+        let mut state = charted(100);
+        state.visible = 100;
+        state.overhang = 0;
+        let (w, h) = (800.0, 400.0);
+        let plan = layout(&state, w, h);
+        let (first, visible) = state.slice();
+        let (low, high) = price_range(&state, &state.bars[first..first + visible]).unwrap();
+        let bar_w = plan.plot_w / visible as f64;
+        let to_y = |price: f64| plan.price_y + plan.price_h * (high - price) / (high - low);
+        let bar = state.bars[40];
+        let x = plan.plot_x + 40.5 * bar_w;
+        // A pixel above the high, a pixel below the low, and a pixel
+        // off the open and the close, which make up the body.
+        for (target, nudge) in [(bar.high, -1.0), (bar.low, 1.0), (bar.open, 1.0), (bar.close, -1.0)] {
+            let y = to_y(target) + nudge;
+            let free = state.locate(w, h, x, y).unwrap();
+            assert_ne!(free.price, target, "without Ctrl the hand is followed");
+            let snapped = state.locate_with(w, h, x, y, true).unwrap();
+            assert_eq!(snapped.ts, bar.ts);
+            assert_eq!(snapped.price, target, "aimed at {target}");
+        }
+        let past = plan.plot_x + 120.5 * bar_w;
+        let free = state.locate(w, h, past, 100.0).unwrap();
+        assert_eq!(state.locate_with(w, h, past, 100.0, true), Some(free));
+    }
+
+    /// Ctrl snaps only while an anchor is being put somewhere: a tool in
+    /// hand, or a corner in hand. Held over a chart with neither, or while a
+    /// whole drawing is dragged, it is not the magnet.
+    #[test]
+    fn the_magnet_is_on_only_while_an_anchor_is_in_hand() {
+        let mut state = charted(100);
+        state.magnet = true;
+        assert!(!state.snapping(), "nothing in hand");
+        state.tool = Some(DrawingKind::Line);
+        assert!(state.snapping(), "a tool in hand");
+        state.tool = None;
+        let origin = Anchor::new(state.bars[0].ts, 100.0);
+        state.drag = Some(Drag::Grip { index: 0, grip: Grip::To, origin });
+        assert!(state.snapping(), "a corner in hand");
+        state.drag = Some(Drag::Grip { index: 0, grip: Grip::Body, origin });
+        assert!(!state.snapping(), "a whole drawing in hand");
+        state.magnet = false;
+        state.tool = Some(DrawingKind::Line);
+        assert!(!state.snapping(), "no Ctrl");
+    }
+
+    /// Ctrl going down with a drawing half laid down puts its loose end on
+    /// the candle where the pointer already is, without waiting for a move.
+    #[test]
+    fn a_drawing_half_laid_down_snaps_when_ctrl_goes_down() {
+        let mut state = charted(100);
+        state.visible = 100;
+        state.overhang = 0;
+        let (w, h) = (800.0, 400.0);
+        let plan = layout(&state, w, h);
+        let (first, visible) = state.slice();
+        let (low, high) = price_range(&state, &state.bars[first..first + visible]).unwrap();
+        let bar = state.bars[40];
+        let x = plan.plot_x + 40.5 * plan.plot_w / visible as f64;
+        let y = plan.price_y + plan.price_h * (high - bar.high) / (high - low) - 1.0;
+        state.tool = Some(DrawingKind::Line);
+        assert!(state.begin_placing(w, h, 100.0, 100.0, false));
+        state.drag = None;
+        state.pointer = Some((x, y));
+        state.follow_hand(w, h);
+        assert_ne!(state.placing.as_ref().unwrap().to.price, bar.high);
+        state.magnet = true;
+        state.follow_hand(w, h);
+        assert_eq!(state.placing.as_ref().unwrap().to.price, bar.high);
+    }
+
     /// The configuration chosen for the next drawing survives picking a
     /// tool, so the two can be asked for in either order.
     #[test]
@@ -6961,7 +7131,7 @@ mod drawing_tests {
         // Tool first, then the number — which always worked.
         state.tool = Some(DrawingKind::Line);
         state.next_config = 3;
-        assert!(state.begin_placing(800.0, 400.0, 200.0, 150.0));
+        assert!(state.begin_placing(800.0, 400.0, 200.0, 150.0, false));
         assert_eq!(state.placing.as_ref().unwrap().config, Some(3));
 
         // And the other way round: the number is already set when the tool
@@ -6969,14 +7139,14 @@ mod drawing_tests {
         let mut state = charted(400);
         state.next_config = 3;
         state.tool = Some(DrawingKind::Rect);
-        assert!(state.begin_placing(800.0, 400.0, 200.0, 150.0));
+        assert!(state.begin_placing(800.0, 400.0, 200.0, 150.0, false));
         assert_eq!(state.placing.as_ref().unwrap().config, Some(3));
 
         // Laying one down ends the choice: the next is the usual one.
         state.placing = None;
         state.next_config = 1;
         state.tool = Some(DrawingKind::Ellipse);
-        assert!(state.begin_placing(800.0, 400.0, 200.0, 150.0));
+        assert!(state.begin_placing(800.0, 400.0, 200.0, 150.0, false));
         assert_eq!(state.placing.as_ref().unwrap().config, Some(1));
     }
 
@@ -7085,13 +7255,13 @@ mod drawing_tests {
         state.sends = false;
         state.tool = Some(DrawingKind::Rect);
         state.next_config = 3;
-        assert!(state.begin_placing(800.0, 400.0, 200.0, 150.0));
+        assert!(state.begin_placing(800.0, 400.0, 200.0, 150.0, false));
         let placing = state.placing.clone().expect("a drawing in hand");
         assert_eq!(placing.kind, DrawingKind::Rect);
         assert_eq!(placing.config, Some(3));
         assert_eq!(placing.scope, drawings::Scope::Local, "a chart that does not send keeps it");
         state.sends = true;
-        assert!(state.begin_placing(800.0, 400.0, 200.0, 150.0));
+        assert!(state.begin_placing(800.0, 400.0, 200.0, 150.0, false));
         assert_eq!(
             state.placing.clone().expect("a drawing in hand").scope,
             drawings::Scope::Shared
@@ -7100,7 +7270,7 @@ mod drawing_tests {
         // Nothing in hand, nothing begins.
         state.tool = None;
         state.placing = None;
-        assert!(!state.begin_placing(800.0, 400.0, 200.0, 150.0));
+        assert!(!state.begin_placing(800.0, 400.0, 200.0, 150.0, false));
     }
 
     /// The newest drawing is picked first, and a press on an unselected
