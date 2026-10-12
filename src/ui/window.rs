@@ -1542,7 +1542,7 @@ fn opening_candidates(
 
 /// How wide the window's corner controls are, for the one time a chart's own
 /// corner has to step around them before either has been allocated.
-const CORNER_WIDTH: i32 = 78;
+pub(crate) const CORNER_WIDTH: i32 = 78;
 
 /// Bars already folded to a resolution, keyed by cache key and that
 /// resolution, and shared with every pane drawing them.
