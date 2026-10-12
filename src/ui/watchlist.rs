@@ -535,7 +535,7 @@ impl Watchlist {
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         header.add_css_class("rail-header");
 
-        // The step `.rail-header` takes is thirty pixels of nothing, and the
+        // The step `.rail-header` takes is 37 pixels of nothing, and the
         // corner controls only cover its right-hand end. Naming the watchlist
         // in what is left costs no height at all, which is the only reason
         // the rail can be told what it is showing without giving up a row.
@@ -573,12 +573,14 @@ impl Watchlist {
         link.set_valign(gtk::Align::Center);
 
         // The button's edge on the rows' edge: a row sits 6px in, Adwaita's
-        // sidebar row margin. Down the middle of the band, which only lines
-        // up with the corner controls where there are any.
+        // sidebar row margin. Down the middle of the band below the 7px the
+        // corner controls also step down (see `.window-corner`), which puts
+        // the name on the line a chart's own symbol and resolutions are on.
         let named = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         named.set_halign(gtk::Align::Start);
         named.set_valign(gtk::Align::Center);
         named.set_margin_start(6);
+        named.set_margin_top(7);
         named.append(&switcher);
         named.append(&title);
         let link_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -596,7 +598,7 @@ impl Watchlist {
         add.set_halign(gtk::Align::End);
         add.set_valign(gtk::Align::Center);
         add.set_margin_top(7);
-        add.set_margin_end(crate::ui::window::CORNER_WIDTH);
+        add.set_margin_end(crate::ui::window::RAIL_ADD_END);
 
         let band = gtk::Overlay::new();
         band.set_child(Some(&header));

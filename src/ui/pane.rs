@@ -215,6 +215,9 @@ impl ChartPane {
         corner.set_halign(gtk::Align::End);
         corner.set_valign(gtk::Align::Start);
         corner.set_margin_top(6);
+        // The symbol's row's height, so the link and the gear centre on the
+        // line the symbol is written on rather than a few pixels above it.
+        corner.set_height_request(SYMBOL_ROW_HEIGHT);
         corner.set_margin_end(corner_margin(0));
         corner.append(&link);
         corner.append(&gear);
@@ -416,20 +419,27 @@ impl ChartPane {
     }
 }
 
-/// How far the maximize corner sits in from the chart's right edge, past
-/// whatever else wants that corner. The same gap the legend keeps on the
-/// left, so the two corners are a pair.
-const CORNER_MARGIN: i32 = 12;
+/// How far the legend sits in from the chart's left edge. The corner on the
+/// right keeps the same gap past the window's controls, so the two corners
+/// are a pair.
 const LEGEND_MARGIN: i32 = 12;
 /// The strip's height: its buttons plus the padding around them.
 const SYMBOL_ROW_HEIGHT: i32 = 32;
 
-/// The corner's margin with `clearance` to leave, and never less than the
-/// price axis: the link and the gear are always on screen, and over the
-/// axis they sat on its labels.
+/// The corner's margin with `clearance` to leave. With none, it still
+/// clears the price axis: the link and the gear are always on screen, and
+/// over the axis they sat on its labels.
+///
+/// Past the window's controls, which are wider than the axis, it leaves a
+/// few pixels more than the legend's gap. The two pairs stand in one row,
+/// and at the plain gap the space between them was not much wider than the
+/// space inside the window's pair, so the row read as four buttons rather
+/// than two groups of two.
 fn corner_margin(clearance: i32) -> i32 {
-    const AXIS_GAP: i32 = 6;
-    (CORNER_MARGIN + clearance).max(crate::ui::chart::PRICE_AXIS_W as i32 + AXIS_GAP)
+    match clearance {
+        0 => crate::ui::chart::PRICE_AXIS_W as i32 + 6,
+        _ => clearance + LEGEND_MARGIN + 4,
+    }
 }
 
 /// Whether a strip `strip` wide, centred in `width`, clears what sits at

@@ -1500,9 +1500,17 @@ fn opening_candidates(
     wanted
 }
 
-/// How wide the window's corner controls are, for the one time a chart's own
-/// corner has to step around them before either has been allocated.
-pub(crate) const CORNER_WIDTH: i32 = 78;
+/// How wide the window's corner controls are: the price axis's width, plus
+/// the ring every pane carries inside its edge, so that over a chart the
+/// corner stands exactly on the axis's column and its left edge is the
+/// axis's rule. Held to it, not left to the buttons, which is what keeps the
+/// rule straight.
+pub(crate) const CORNER_WIDTH: i32 =
+    crate::ui::chart::PRICE_AXIS_W as i32 + omacharts_engine::frame::RING_WIDTH as i32;
+
+/// Where the rail's + stands from the window's right edge: against the
+/// toggle, the way the toggle stands against the menu.
+pub(crate) const RAIL_ADD_END: i32 = CORNER_WIDTH - crate::theming::CORNER_PAD_START;
 
 /// How far a chart down the window's left edge steps its name in, past the
 /// drawing tools' corner: one button, as wide as the bar it stands over, 44
@@ -2606,12 +2614,14 @@ impl Window {
 
         // The rects tile the area exactly, so the chart under the window's
         // corner is the one — the only one — holding its top right pixel.
+        // Compared within a millionth of the width rather than half a pixel:
+        // before the window has a size the area is one pixel wide, and half
+        // of it would take the second chart of an even split for the first.
         let rects = self.layout_rects();
         let right = self.chart_host.width().max(1) as f64;
+        let at = |a: f64, b: f64| (a - b).abs() <= right * 1e-6;
         let topmost = self.mounted().leaves().into_iter().find(|id| {
-            rects
-                .get(id)
-                .is_some_and(|(x, y, w, _)| *y <= 0.5 && x + w >= right - 0.5)
+            rects.get(id).is_some_and(|(x, y, w, _)| at(*y, 0.0) && at(x + w, right))
         });
         for pane in self.panes.borrow().iter() {
             let margin = if Some(pane.id) == topmost { clearance } else { 0 };
@@ -2635,7 +2645,7 @@ impl Window {
             }
         }
         for pane in self.panes.borrow().iter() {
-            let edge = rects.get(&pane.id).is_some_and(|(x, _, _, _)| *x <= 0.5);
+            let edge = rects.get(&pane.id).is_some_and(|(x, _, _, _)| at(*x, 0.0));
             pane.set_start_clearance(if edge { clearance } else { 0 });
             pane.set_under_tools(edge && tooled);
         }
@@ -3992,6 +4002,9 @@ impl Window {
 
         let cluster = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         cluster.add_css_class("window-corner");
+        // The axis's width: with the ring's width of margin standing it off
+        // the window's edge (see the stylesheet), it stands on the axis.
+        cluster.set_size_request(crate::ui::chart::PRICE_AXIS_W as i32, -1);
         cluster.append(&toggle);
         cluster.append(&menu_button);
 
