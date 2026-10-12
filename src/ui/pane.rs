@@ -60,6 +60,10 @@ pub struct ChartPane {
     /// on the chart: with four charts open, four of these drawn all the time
     /// is four more things between you and the prices.
     pub expand: gtk::Button,
+    /// The focus ring's left side when the drawing tools lie over this
+    /// chart: a line along the bar's right edge, so the ring closes round
+    /// what is left of the chart rather than running under the bar.
+    ring_cut: gtk::Box,
     expand_icon: gtk::DrawingArea,
     /// Which way the expand glyph points, and which word its tooltip uses.
     expand_state: Rc<Cell<bool>>,
@@ -179,7 +183,7 @@ impl ChartPane {
         let legend = gtk::Box::new(gtk::Orientation::Vertical, 0);
         legend.set_halign(gtk::Align::Start);
         legend.set_valign(gtk::Align::Start);
-        legend.set_margin_start(12);
+        legend.set_margin_start(LEGEND_MARGIN);
         legend.set_margin_top(6);
         legend.append(&bar);
         legend.append(&indicator_legend);
@@ -223,18 +227,27 @@ impl ChartPane {
         overlay.add_overlay(&legend);
         overlay.add_overlay(&top);
         overlay.add_overlay(&corner);
+        let ring_cut = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        ring_cut.add_css_class("ring-cut");
+        ring_cut.set_halign(gtk::Align::Start);
+        ring_cut.set_size_request(omacharts_engine::frame::RING_WIDTH as i32, -1);
+        ring_cut.set_can_target(false);
+        ring_cut.set_visible(false);
+        overlay.add_overlay(&ring_cut);
 
         // The three are laid over the chart independently, so on a narrow
         // chart the centred strip lands on the symbol. It steps aside rather
         // than overlap, and the keyboard still sets a resolution. Decided
         // where the overlay places it, the one moment every width involved
         // is known.
-        let legend_margin = legend.margin_start();
-        let (legend_row, strip_row, corner_box) = (bar.clone(), top.clone(), corner.clone());
+        let (legend_box, legend_row, strip_row, corner_box) =
+            (legend.clone(), bar.clone(), top.clone(), corner.clone());
         overlay.connect_get_child_position(move |overlay, child| {
             if child == strip_row.upcast_ref::<gtk::Widget>() {
                 let natural = |w: &gtk::Widget| w.preferred_size().1.width();
-                let left = legend_margin + natural(legend_row.upcast_ref());
+                // Read here, not once: a chart on the window's left edge
+                // steps its legend past the drawing toggle after it is built.
+                let left = legend_box.margin_start() + natural(legend_row.upcast_ref());
                 let right = natural(corner_box.upcast_ref()) + corner_box.margin_end();
                 strip_row.set_child_visible(strip_fits(
                     overlay.width(),
@@ -265,6 +278,7 @@ impl ChartPane {
             gear,
             link,
             expand,
+            ring_cut,
             expand_icon,
             expand_state,
             instrument: RefCell::new(None),
@@ -343,6 +357,28 @@ impl ChartPane {
         }
     }
 
+    /// The same for the legend and the window's top-left corner, which
+    /// holds the drawing tools' toggle and drops onto the top-left chart
+    /// while the tools are put away. Every chart down the left edge takes
+    /// the same step, so their names line up rather than only the top-left
+    /// one moving.
+    pub fn set_start_clearance(&self, clearance: i32) {
+        if let Some(legend) = self.symbol_button.parent().and_then(|bar| bar.parent()) {
+            legend.set_margin_start(LEGEND_MARGIN + clearance);
+        }
+    }
+
+    /// Close the focus ring along the drawing tools while they lie over
+    /// this chart, or round the whole chart when they don't. The bar covers
+    /// the ring's own left side; nothing under it moves.
+    pub fn set_under_tools(&self, under: bool) {
+        self.ring_cut.set_visible(under);
+        // The bar is the ring's width of padding and then the tools, and the
+        // chart's own layers start inside the ring: the line starts where
+        // the tools end.
+        self.ring_cut.set_margin_start(crate::ui::drawing_bar::WIDTH);
+    }
+
     /// Offer the maximize corner at all, which is a question of whether
     /// there is anything else on screen to maximize away from.
     pub fn set_expandable(&self, expandable: bool) {
@@ -384,6 +420,7 @@ impl ChartPane {
 /// whatever else wants that corner. The same gap the legend keeps on the
 /// left, so the two corners are a pair.
 const CORNER_MARGIN: i32 = 12;
+const LEGEND_MARGIN: i32 = 12;
 /// The strip's height: its buttons plus the padding around them.
 const SYMBOL_ROW_HEIGHT: i32 = 32;
 

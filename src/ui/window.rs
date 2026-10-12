@@ -1489,6 +1489,13 @@ fn opening_candidates(
 /// corner has to step around them before either has been allocated.
 pub(crate) const CORNER_WIDTH: i32 = 78;
 
+/// How far a chart down the window's left edge steps its name in, past the
+/// drawing tools' corner: one button, as wide as the bar it stands over, 44
+/// pixels with its margin, less the 8 the name tucks back under the
+/// corner's empty right edge, so it reads as the toggle's neighbour rather
+/// than a column of its own.
+const START_CLEARANCE: i32 = 36;
+
 /// Bars already folded to a resolution, keyed by cache key and that
 /// resolution, and shared with every pane drawing them.
 type SeriesCache = Rc<RefCell<HashMap<(String, Timeframe), Rc<Vec<omacharts_engine::Bar>>>>>;
@@ -1553,9 +1560,9 @@ pub struct Window {
     drawing_clipboard: RefCell<Vec<omacharts_engine::Drawing>>,
     /// The drawing tools, on the left.
     drawing_bar: RefCell<Option<Rc<crate::ui::drawing_bar::DrawingBar>>>,
-    /// The tools' handle floating in the bottom-left corner, shown while
-    /// the chartbook strip is not there to carry one.
-    corner_handle: RefCell<Option<gtk::DrawingArea>>,
+    /// The drawing tools' toggle, floating over the top-left corner the way
+    /// `corner` floats over the top-right, and stepped around the same way.
+    start_corner: RefCell<Option<gtk::WindowHandle>>,
     /// Where the tree of charts is mounted, rebuilt whenever it changes.
     chart_host: gtk::Box,
     /// The row of chartbook tabs under the charts, empty and hidden until
@@ -1712,7 +1719,7 @@ impl Window {
             drawing_settings_action: RefCell::new(None),
             drawing_clipboard: RefCell::new(Vec::new()),
             drawing_bar: RefCell::new(None),
-            corner_handle: RefCell::new(None),
+            start_corner: RefCell::new(None),
             chart_host: chart_host.clone(),
             book_strip: book_strip.clone(),
             corner: RefCell::new(None),
@@ -1803,8 +1810,10 @@ impl Window {
         split.set_shrink_end_child(false);
         watchlist.widget.set_visible(store.setting_bool(SHOW_WATCHLIST, true));
 
-        // The tools slide in on the left of the charts, the way the rail
-        // slides in on the right; they are not part of the split, so the
+        // The tools lie over the left of the charts rather than pushing them
+        // aside: pushed, every chart reflowed as they came and went, and the
+        // centred resolutions drifted with it. Over them, nothing on the
+        // charts moves at all. They are not part of the split, so the
         // divider between charts and rail is still the only divider.
         let bar = crate::ui::drawing_bar::DrawingBar::new(
             {
@@ -1825,9 +1834,14 @@ impl Window {
                 move || this.toggle_drawing_tools()
             },
         );
-        let with_tools = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        with_tools.append(&bar.root);
-        with_tools.append(&chart_host);
+        let with_tools = gtk::Overlay::new();
+        with_tools.set_child(Some(&chart_host));
+        // Flush with the window's edges, over the focus ring's left side:
+        // a focused chart down the left closes its ring along the bar
+        // instead (`ChartPane::set_under_tools`), so the bar stands outside
+        // the chart rather than inside its frame.
+        bar.root.set_halign(gtk::Align::Start);
+        with_tools.add_overlay(&bar.root);
         bar.set_shown(store.setting_bool(SHOW_DRAWING_TOOLS, false));
         *this.drawing_bar.borrow_mut() = Some(bar);
         split.set_start_child(Some(&with_tools));
@@ -1848,21 +1862,19 @@ impl Window {
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&root));
         overlay.add_overlay(&corner);
-        // The drawing tools' handle, in the bottom-left corner while there
-        // is no chartbook strip to carry it. The strip takes over when it
-        // arrives, so there is one handle at a time and it is always in the
-        // same corner.
+        // The drawing tools' toggle, in the top-left corner: the mirror of
+        // the rail's in the top-right, so both edges open the same way.
         if let Some(bar) = this.drawing_bar.borrow().as_ref() {
-            let handle = bar.handle();
-            // Over the chart rather than in the strip: it wears the
-            // window's own ground and a shadow, so it reads as a tab on
-            // the frame and not a mark on the chart.
-            handle.add_css_class("floating");
-            handle.set_margin_start(0);
-            handle.set_margin_bottom(8);
-            handle.set_visible(!this.book_strip.is_visible());
-            overlay.add_overlay(&handle);
-            *this.corner_handle.borrow_mut() = Some(handle);
+            let cluster = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            cluster.add_css_class("window-corner");
+            cluster.add_css_class("start");
+            cluster.append(&bar.toggle);
+            let start = gtk::WindowHandle::new();
+            start.set_child(Some(&cluster));
+            start.set_halign(gtk::Align::Start);
+            start.set_valign(gtk::Align::Start);
+            overlay.add_overlay(&start);
+            *this.start_corner.borrow_mut() = Some(start);
         }
         this.watch_sidebar_width();
         window.set_content(Some(&overlay));
@@ -2578,6 +2590,28 @@ impl Window {
         for pane in self.panes.borrow().iter() {
             let margin = if Some(pane.id) == topmost { clearance } else { 0 };
             pane.set_corner_clearance(margin);
+        }
+
+        // The same on the left, for the drawing tools' toggle and the bar
+        // under it, which is as wide: the bar lies over the charts, so the
+        // names step past it whether it is out or not, and opening it moves
+        // nothing. Every chart down the window's left edge steps its name
+        // over by the same amount, not only the one under the toggle, so the
+        // names stand in one column. A chart further right has nothing to
+        // clear.
+        let tooled = self.drawing_bar.borrow().as_ref().is_some_and(|bar| bar.is_shown());
+        let start = self.start_corner.borrow().as_ref().and_then(|corner| corner.child());
+        let clearance = if start.is_some() { START_CLEARANCE } else { 0 };
+        if let Some(cluster) = &start {
+            match tooled {
+                true => cluster.remove_css_class("over-chart"),
+                false => cluster.add_css_class("over-chart"),
+            }
+        }
+        for pane in self.panes.borrow().iter() {
+            let edge = rects.get(&pane.id).is_some_and(|(x, _, _, _)| *x <= 0.5);
+            pane.set_start_clearance(if edge { clearance } else { 0 });
+            pane.set_under_tools(edge && tooled);
         }
     }
 
@@ -3584,20 +3618,8 @@ impl Window {
         // naming the only thing there is would be a row of furniture saying
         // nothing. It arrives with the second book and leaves with it.
         self.book_strip.set_visible(count > 1);
-        if let Some(handle) = self.corner_handle.borrow().as_ref() {
-            handle.set_visible(count < 2);
-        }
         if count < 2 {
             return;
-        }
-        // The drawing tools' handle leads the strip, in the corner it
-        // floats in when there is no strip.
-        if let Some(bar) = self.drawing_bar.borrow().as_ref() {
-            let handle = bar.handle();
-            handle.set_valign(gtk::Align::Center);
-            handle.set_margin_start(0);
-            handle.set_margin_end(6);
-            self.book_strip.append(&handle);
         }
         for index in 0..count {
             self.book_strip.append(&self.build_book_tab(index));
@@ -3696,10 +3718,9 @@ impl Window {
         tab.upcast()
     }
 
-    /// The tab sitting at `index` in the strip right now. The first child
-    /// is the tools' handle, not a tab.
+    /// The tab sitting at `index` in the strip right now.
     fn book_tab(&self, index: usize) -> Option<gtk::Box> {
-        let mut child = self.book_strip.first_child()?.next_sibling()?;
+        let mut child = self.book_strip.first_child()?;
         for _ in 0..index {
             child = child.next_sibling()?;
         }
@@ -3926,8 +3947,7 @@ impl Window {
 
         *self.watchlist_toggle.borrow_mut() = Some(toggle.clone());
 
-        // The drawing tools have no button here: the corner is the charts'.
-        // They come in from a handle on the chart's own edge, or by key.
+        // The drawing tools' toggle has a corner of its own, the top-left.
         let action = gio::SimpleAction::new("drawing-tools", None);
         let this = self.clone();
         action.connect_activate(move |_, _| this.toggle_drawing_tools());
@@ -6473,12 +6493,14 @@ impl Window {
         self.save_workspace();
     }
 
-    /// Show or hide the drawing tools. Ctrl+D, and the tab on the edge.
+    /// Show or hide the drawing tools. Ctrl+D, and the toggle top-left.
     pub fn toggle_drawing_tools(self: &Rc<Self>) {
         let Some(bar) = self.drawing_bar.borrow().clone() else { return };
         let shown = !bar.is_shown();
         bar.set_shown(shown);
         self.store.set_setting_bool(SHOW_DRAWING_TOOLS, shown);
+        // Putting the tools away drops their toggle onto the top-left chart.
+        self.sync_corner_clearance();
     }
 
     /// Light the tool in hand on the bar, after the chart was told by a key
