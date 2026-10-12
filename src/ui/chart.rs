@@ -47,6 +47,15 @@ const PAD: f64 = 10.0;
 /// things about at the edges. Fixed for now; a setting one day, if anyone
 /// wants a different amount.
 const OVERHANG_PX: f64 = 500.0;
+/// Room above the highest price on screen when the price is the top row, so
+/// it clears the header and the legend laid over the plot.
+const PRICE_TOP_AIR: f64 = 70.0;
+/// The most of the price plot that room may take: a short chart, in a split
+/// or a small window, keeps its candles rather than a fixed band of nothing.
+const PRICE_TOP_AIR_SHARE: f64 = 0.15;
+/// Room below the lowest price on screen, and above the highest when
+/// something else is the top row, as a share of the price span.
+const PRICE_AIR: f64 = 0.06;
 /// Space between two rows of the stack.
 const PANE_GAP: f64 = 6.0;
 /// The least of the chart the price keeps, however many panes are stacked
@@ -626,7 +635,7 @@ fn index_of_ts(bars: &[Bar], ts: i64) -> f64 {
 /// number on two charts if both worked it out from the same scale.
 ///
 /// `None` when the bars carry nothing finite to measure.
-fn price_range(state: &State, bars: &[Bar]) -> Option<(f64, f64)> {
+fn price_range(state: &State, bars: &[Bar], plan: &Layout) -> Option<(f64, f64)> {
     let (mut low, mut high) = (f64::MAX, f64::MIN);
     for b in bars {
         low = low.min(b.low);
@@ -640,8 +649,18 @@ fn price_range(state: &State, bars: &[Bar]) -> Option<(f64, f64)> {
         low -= 1.0;
     }
     let span = high - low;
-    low -= span * 0.04;
-    high += span * 0.04;
+    low -= span * PRICE_AIR;
+    // The top gets its air in pixels, because what it has to clear is drawn
+    // in pixels: the header and the legend sit over the top of the plot
+    // whenever the price is the top row. Capped at a share of the height, so
+    // a chart in a quarter of the window keeps its candles.
+    high += match plan.price_y <= plan.top {
+        true => {
+            let air = (PRICE_TOP_AIR / plan.price_h).min(PRICE_TOP_AIR_SHARE);
+            (high - low) * air / (1.0 - air)
+        }
+        false => span * PRICE_AIR,
+    };
     Some(state.price_window(low, high))
 }
 
@@ -857,7 +876,7 @@ impl State {
             return None;
         }
         let plan = layout(self, width, height);
-        let (low, high) = price_range(self, &self.bars[first..first + visible])?;
+        let (low, high) = price_range(self, &self.bars[first..first + visible], &plan)?;
         let price = high - (y - plan.price_y) / plan.price_h * (high - low);
         // A column's width, the room at either end counted: the plot's
         // first column may stand before the first bar.
@@ -944,7 +963,7 @@ impl State {
             return Vec::new();
         }
         let plan = layout(self, width, height);
-        let Some((low, high)) = price_range(self, &self.bars[first..first + visible]) else {
+        let Some((low, high)) = price_range(self, &self.bars[first..first + visible], &plan) else {
             return Vec::new();
         };
         let bar_w = plan.plot_w / self.columns().max(1) as f64;
@@ -987,7 +1006,7 @@ impl State {
             return Vec::new();
         }
         let plan = layout(self, width, height);
-        let Some((low, high)) = price_range(self, &self.bars[first..first + visible]) else {
+        let Some((low, high)) = price_range(self, &self.bars[first..first + visible], &plan) else {
             return Vec::new();
         };
         (0..self.drawings.len())
@@ -1002,7 +1021,7 @@ impl State {
             return None;
         }
         let plan = layout(self, width, height);
-        let (low, high) = price_range(self, &self.bars[first..first + visible])?;
+        let (low, high) = price_range(self, &self.bars[first..first + visible], &plan)?;
         // The selected ones first, since their grips are what the hand is
         // most likely reaching for; then the most recently drawn.
         let order = self.selected.iter().rev().copied().chain((0..self.drawings.len()).rev());
@@ -2015,7 +2034,7 @@ impl ChartView {
                 return;
             }
             let plan = layout(&state, w, h);
-            let Some((low, high)) = price_range(&state, &state.bars[first..first + visible]) else {
+            let Some((low, high)) = price_range(&state, &state.bars[first..first + visible], &plan) else {
                 return;
             };
             let bar_w = plan.plot_w / state.columns().max(1) as f64;
@@ -2220,7 +2239,7 @@ impl ChartView {
             let size = editing.measure(&style.text, at.alignment(), at);
             let plan = layout(&state, width, height);
             let (first, visible) = state.slice();
-            let Some((low, high)) = price_range(&state, &state.bars[first..first + visible]) else {
+            let Some((low, high)) = price_range(&state, &state.bars[first..first + visible], &plan) else {
                 return;
             };
             let projected = state.project(&plan, low, high, drawing);
@@ -3623,7 +3642,7 @@ fn notify_hover(
                         .floor()
                         .max(0.0) as usize;
                     let plan = layout(&s, area.width() as f64, area.height() as f64);
-                    let range = price_range(&s, &s.bars[first..first + visible]);
+                    let range = price_range(&s, &s.bars[first..first + visible], &plan);
                     s.bars.get(index.min(s.bars.len().saturating_sub(1))).map(|bar| Hover {
                         bar: *bar,
                         index,
@@ -3682,7 +3701,7 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     // column keeps the highest high and the lowest low of what it stands for —
     // and the crosshair works the same range out from the same bars on its own
     // layer, where going through the columns would be work for nothing.
-    let Some((low, high)) = price_range(state, bars) else {
+    let Some((low, high)) = price_range(state, bars, &plan) else {
         draw_placeholder(cr, width, height, state);
         return;
     };
@@ -3763,7 +3782,7 @@ fn draw_pointer(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     }
     let bars = &state.bars[first..first + visible];
     let plan = layout(state, width, height);
-    let Some((low, high)) = price_range(state, bars) else { return };
+    let Some((low, high)) = price_range(state, bars, &plan) else { return };
     let to_y = |price: f64| plan.price_y + plan.price_h * (high - price) / (high - low);
     let bar_w = plan.plot_w / state.columns().max(1) as f64;
     // Where the bars begin: after the room before the first, if any.
@@ -4114,6 +4133,10 @@ fn draw_volume(
     max_volume: f64,
 ) {
     let body_w = (bar_w * 0.68).clamp(1.0, 24.0);
+    // A tenth of the strip clear at the top, so the tallest bar does not
+    // reach the line above it. Bars run under the name, which is short.
+    let inner_top = top + height * 0.1;
+    let inner_h = height * 0.9;
     for rising in [false, true] {
         let colour = if rising { &state.scheme.volume_up } else { &state.scheme.volume_down };
         let mut any = false;
@@ -4122,9 +4145,9 @@ fn draw_volume(
                 continue;
             }
             any = true;
-            let h = (bar.volume / max_volume * height).max(1.0);
+            let h = (bar.volume / max_volume * inner_h).max(1.0);
             let x = plot_x + (i as f64 + 0.5) * bar_w - body_w / 2.0;
-            cr.rectangle(x.round(), (top + height - h).round(), body_w.round(), h.round());
+            cr.rectangle(x.round(), (inner_top + inner_h - h).round(), body_w.round(), h.round());
         }
         if any {
             colors::set_source_alpha(cr, colour, 0.85);
@@ -4210,12 +4233,13 @@ fn draw_pane_name(cr: &cairo::Context, state: &State, drawn: &Drawn, plot_x: f64
 const PANE_NAME_ROOM: f64 = 16.0;
 
 /// The part of a strip its scale is laid over, as a top and a height: under
-/// the name, and a few pixels clear of the strip below.
+/// the name with a little of the strip to spare, and a few pixels clear of
+/// the strip below.
 ///
 /// The drawing and the crosshair both read the strip through this, or the
 /// value on the axis would not be the line under the pointer.
 fn pane_plot(top: f64, height: f64) -> (f64, f64) {
-    let room = PANE_NAME_ROOM.min(height * 0.3);
+    let room = (PANE_NAME_ROOM + height * 0.05).min(height * 0.35);
     let foot = 3.0_f64.min(height * 0.1);
     (top + room, (height - room - foot).max(1.0))
 }
@@ -6617,7 +6641,7 @@ mod drawing_tests {
         let (w, h) = (800.0, 400.0);
         let (first, visible) = state.slice();
         let plan = layout(&state, w, h);
-        let (low, high) = price_range(&state, &state.bars[first..first + visible]).unwrap();
+        let (low, high) = price_range(&state, &state.bars[first..first + visible], &plan).unwrap();
         let bar_w = plan.plot_w / visible as f64;
         for (x, y) in [(120.0, 90.0), (400.0, 200.0), (plan.plot_x + plan.plot_w - 3.0, 150.0)] {
             let anchor = state.locate(w, h, x, y).expect("a chart with bars locates");
