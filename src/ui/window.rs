@@ -910,6 +910,16 @@ mod tests {
         assert_eq!(book.sidebar_width, None);
     }
 
+    /// The rail stops at its ceiling on a wide window, at what leaves the
+    /// charts their floor on a narrow one, and at its own floor on one too
+    /// narrow for both.
+    #[test]
+    fn the_rail_cannot_take_the_window_from_the_charts() {
+        assert_eq!(sidebar_room(1914), MAX_SIDEBAR_WIDTH);
+        assert_eq!(sidebar_room(957), 957 - MIN_CHARTS_WIDTH);
+        assert_eq!(sidebar_room(500), MIN_SIDEBAR_WIDTH);
+    }
+
     /// The two shapes have to be told apart by what is in them, because both
     /// arrive as the same string from the same setting.
     #[test]
@@ -1259,6 +1269,15 @@ const DEFAULT_SIDEBAR_WIDTH: i32 = 280;
 /// without showing anything more.
 const MIN_SIDEBAR_WIDTH: i32 = 160;
 const MAX_SIDEBAR_WIDTH: i32 = 900;
+/// How narrow the rail may push the charts. The rail is a list of symbols;
+/// it should not be able to take the window from the charts of them.
+const MIN_CHARTS_WIDTH: i32 = 480;
+
+/// The widest the rail may be in a split this wide: its own ceiling, or
+/// what leaves the charts their floor, and never below its own floor.
+fn sidebar_room(total: i32) -> i32 {
+    (total - MIN_CHARTS_WIDTH).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+}
 pub const SETTING_BAR_STYLE: &str = "bar_style";
 pub const SETTING_SHOW_GRID: &str = "show_grid";
 const SETTING_TIMEFRAMES: &str = "timeframes";
@@ -1623,6 +1642,10 @@ pub struct Window {
     /// A width has been put back, so what the handle says from here on is
     /// somebody's choice rather than a guess from a window with no size yet.
     sidebar_placed: Cell<bool>,
+    /// How wide the rail was last put, which is narrower than it wants when
+    /// the window has no room for the whole of it. The handle reading back
+    /// this width is the window resizing; any other is somebody dragging.
+    sidebar_laid: Cell<i32>,
     store: Rc<Store>,
     index: crate::inventory::Inventory,
     theming: Rc<RefCell<Theming>>,
@@ -1759,6 +1782,7 @@ impl Window {
             watchlist_toggle: RefCell::new(None),
             sidebar_width: Cell::new(DEFAULT_SIDEBAR_WIDTH),
             sidebar_placed: Cell::new(false),
+            sidebar_laid: Cell::new(0),
             store: store.clone(),
             index: index.clone(),
             theming: theming.clone(),
@@ -7268,9 +7292,10 @@ impl Window {
     /// window was resized.
     fn place_sidebar(&self) {
         let total = self.split.width();
-        let width = self.sidebar_width.get();
+        let width = self.sidebar_width.get().min(sidebar_room(total));
         if total > width + 200 {
             self.sidebar_placed.set(true);
+            self.sidebar_laid.set(width);
             self.split.set_position(total - width);
         }
     }
@@ -7298,11 +7323,28 @@ impl Window {
                 this.place_sidebar();
                 return;
             }
-            if paned.width() <= 0 || paned.position() <= 0 {
+            let total = paned.width();
+            if total <= 0 || paned.position() <= 0 {
                 return;
             }
-            let width =
-                (paned.width() - paned.position()).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+            let raw = total - paned.position();
+            // The rail keeps its width when the window resizes, so a handle
+            // still at the width it was put at means the window moved, not
+            // the hand: put back what the rail wants, as far as there is room
+            // for it, and remember nothing.
+            if raw == this.sidebar_laid.get() {
+                if raw != this.sidebar_width.get().min(sidebar_room(total)) {
+                    this.place_sidebar();
+                }
+                return;
+            }
+            // Dragged: held between the bounds, which is the handle stopping
+            // at them rather than the stored width merely being clamped.
+            let width = raw.clamp(MIN_SIDEBAR_WIDTH, sidebar_room(total));
+            this.sidebar_laid.set(width);
+            if width != raw {
+                paned.set_position(total - width);
+            }
             if width == this.sidebar_width.get() {
                 return;
             }
