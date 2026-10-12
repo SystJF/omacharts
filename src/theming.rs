@@ -541,7 +541,8 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
    beside a label, and a row here is one line of text; at that height a list
    of thirty did not fit on a laptop's screen. The radius comes down with the
    height, or a selected row reads as a pill. */
-.navigation-sidebar > row.symbol-row {
+.navigation-sidebar > row.symbol-row,
+.navigation-sidebar > row.list-row {
   min-height: 26px;
   margin-bottom: 1px;
   border-radius: 6px;
@@ -585,44 +586,25 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
   background-image: none;
 }
 
-/* The watchlist's name, in the band the corner controls already reserved.
-   Text with a chevron rather than a button: it names what you are looking at,
-   and brightens rather than lighting up a background under the pointer, so the
-   band stays a label and never grows a button in it. The zero min-height is
-   what keeps it inside the band — Adwaita's default would overflow it.
+/* The watchlist's name, in the band the corner controls already reserved,
+   after the button that steps out to every list. Bold at the rail's own size:
+   it is the title of what the rail is showing. */
+.rail-title { font-weight: bold; }
 
-   No horizontal padding, on either node: the name is lined up with the symbol
-   column by the margin of the box it sits in (see the rail's `named`), and
-   any padding here would push its first letter off that line. */
-.rail-switcher {
-  padding: 1px 0;
-  min-height: 0;
-  min-width: 0;
-  opacity: 0.6;
-  background: none;
-  background-image: none;
-  border: none;
-  box-shadow: none;
-  transition: opacity 120ms ease-out;
+/* Adwaita's flat image buttons, a little smaller so they sit inside the
+   band: the way out to every list, lit while that page is open the way a
+   toggle is, and the + at the band's other end. */
+button.rail-switcher,
+button.rail-add {
+  min-height: 24px;
+  min-width: 24px;
+  padding: 2px;
 }
-.rail-switcher:hover { opacity: 1; }
-/* A GtkMenuButton is a `menubutton` node wrapping a `button` node, and the
-   rules above only reach the outer one. Adwaita still gives the inner button
-   its own 10px of side padding and a hover pill, which is where the name's
-   offset came from and why it did light up. The `.flat` is in the selector
-   only to outweigh Adwaita's `menubutton.flat > button:hover`. */
-.rail-switcher.flat > button,
-.rail-switcher.flat > button:hover,
-.rail-switcher.flat > button:active,
-.rail-switcher.flat > button:checked {
-  padding-left: 0;
-  padding-right: 0;
-  min-width: 0;
-  background: none;
-  background-image: none;
-  box-shadow: none;
-}
-.rail-switcher label { font-size: 0.85em; }
+button.rail-switcher.open { background: alpha(currentColor, 0.15); }
+
+/* The pencil and the bin a list's row shows under the pointer, held inside
+   the row's height so the row does not grow when they appear. */
+button.list-row-action { min-height: 0; min-width: 0; padding: 3px; }
 
 /* A way back to a default, without shouting about it. */
 .subtle-link {
