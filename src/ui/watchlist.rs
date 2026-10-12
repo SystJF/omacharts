@@ -1063,9 +1063,32 @@ impl Watchlist {
     pub fn highlight(self: &Rc<Self>, instrument: &Instrument) {
         let Some(at) = self.row_of(instrument) else { return };
         let Some(row) = self.list.row_at_index(at as i32) else { return };
+        self.select_quietly(&row);
+    }
+
+    /// Select `row` without loading it again, and scroll it into view.
+    fn select_quietly(&self, row: &gtk::ListBoxRow) {
         self.quiet.set(true);
-        self.list.select_row(Some(&row));
+        self.list.select_row(Some(row));
         self.quiet.set(false);
+        self.reveal(row);
+    }
+
+    /// Scroll the rail until `row` is in view. A row the keyboard is on
+    /// needs nothing, since the viewport follows the focus; a row only
+    /// selected, as a chart moving leaves it, is followed by nothing.
+    fn reveal(&self, row: &gtk::ListBoxRow) {
+        let Some(scroller) =
+            self.list.ancestor(gtk::ScrolledWindow::static_type()).and_downcast::<gtk::ScrolledWindow>()
+        else {
+            return;
+        };
+        // Measured against what the viewport scrolls rather than against the
+        // list, which need not start at its top.
+        let Some(content) = scroller.child().and_then(|viewport| viewport.first_child()) else { return };
+        let Some(bounds) = row.compute_bounds(&content) else { return };
+        let top = f64::from(bounds.y());
+        scroller.vadjustment().clamp_page(top, top + f64::from(bounds.height()));
     }
 
     fn wire_selection(self: &Rc<Self>) {
