@@ -15,7 +15,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
-use omacharts_engine::{FetchFailure, Instrument, LinkGroup};
+use omacharts_engine::{grouped_decimals, FetchFailure, Instrument, LinkGroup};
 
 use crate::store::{Entry, Section, Store, DEFAULT_WATCHLIST};
 use crate::ui::search::SymbolSearch;
@@ -133,8 +133,8 @@ impl Column {
     fn width_chars(self) -> i32 {
         match self {
             Column::Symbol => 0,
-            Column::Last => 9,
-            Column::Change => 8,
+            Column::Last => 10,
+            Column::Change => 9,
             Column::ChangePct => 7,
         }
     }
@@ -2882,8 +2882,12 @@ fn write_cell(
         return;
     };
     match column {
-        Column::Last => label.set_text(&format!("{:.*}", decimals, q.last)),
-        Column::Change => label.set_text(&format!("{:+.*}", decimals, q.change)),
+        Column::Last => label.set_text(&grouped_decimals(q.last, decimals)),
+        Column::Change => {
+            // The plus `{:+}` would write: on anything not negative or NaN.
+            let plus = if q.change.is_sign_positive() && !q.change.is_nan() { "+" } else { "" };
+            label.set_text(&format!("{plus}{}", grouped_decimals(q.change, decimals)))
+        }
         Column::ChangePct => label.set_text(&format!("{:+.2}%", q.change_pct)),
         Column::Symbol => {}
     }
