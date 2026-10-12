@@ -4861,21 +4861,25 @@ impl Window {
     /// Move through the watchlist without going to it.
     fn step_symbol(self: &Rc<Self>, delta: i32) {
         let Some(watchlist) = self.watchlist.borrow().as_ref().cloned() else { return };
-        let order = watchlist.flat_order();
+        let current = self.focused_pane().instrument.borrow().clone();
+        let (order, from) = watchlist.step_order(current.as_ref());
         if order.is_empty() {
             return;
         }
-        let current = self.focused_pane().instrument.borrow().clone();
-        let at = current
-            .and_then(|instrument| {
-                order
-                    .iter()
-                    .position(|i| i.symbol == instrument.symbol && i.suffix == instrument.suffix)
-            })
+        // Nothing to step from, not even a highlight: start at whichever end
+        // the step points away from.
+        let at = from
             .map(|at| at as i32)
             .unwrap_or(if delta > 0 { -1 } else { order.len() as i32 });
         let next = (at + delta).clamp(0, order.len() as i32 - 1) as usize;
-        self.show(order[next].clone());
+        let landed = &order[next];
+        let showing = current
+            .as_ref()
+            .is_some_and(|c| c.symbol == landed.symbol && c.suffix == landed.suffix);
+        if !showing {
+            self.show(landed.clone());
+        }
+        watchlist.highlight_walked(next);
     }
 
     /// Switch to a resolution that may not be on the strip yet.

@@ -1041,6 +1041,11 @@ impl Watchlist {
     /// The row's own flag, not whether it is on screen: with the rail closed
     /// every row is off screen, and the chart still walks the list.
     pub fn flat_order(&self) -> Vec<Instrument> {
+        self.walked_rows().into_iter().map(|(_, instrument)| instrument).collect()
+    }
+
+    /// `flat_order`, with the index of the row each symbol is on.
+    fn walked_rows(&self) -> Vec<(usize, Instrument)> {
         self.rows
             .borrow()
             .iter()
@@ -1052,15 +1057,54 @@ impl Watchlist {
                         .row_at_index(at as i32)
                         .map(|row| row.get_visible())
                         .unwrap_or(false);
-                    visible.then(|| instrument.clone())
+                    visible.then(|| (at, instrument.clone()))
                 }
                 RowKind::Header { .. } => None,
             })
             .collect()
     }
 
+    /// `flat_order`, and which of its symbols a step from the chart starts
+    /// at.
+    ///
+    /// The highlighted row when it holds what the chart shows, so a symbol
+    /// listed twice steps on from the copy the chart reached rather than the
+    /// first; then the first copy of it; then the highlighted row anyway,
+    /// for a symbol picked from search or sitting in a folded section,
+    /// which then steps on from where the list was left instead of from its
+    /// top. `None` only with nothing to go on.
+    pub fn step_order(
+        &self,
+        current: Option<&Instrument>,
+    ) -> (Vec<Instrument>, Option<usize>) {
+        let walked = self.walked_rows();
+        let selected = self.list.selected_row().map(|row| row.index().max(0) as usize);
+        let from = step_from(&walked, selected, current);
+        (walked.into_iter().map(|(_, instrument)| instrument).collect(), from)
+    }
+
+    /// Highlight the `at`th symbol of `flat_order`: the row itself, which
+    /// for a symbol listed twice `highlight` cannot tell apart.
+    pub fn highlight_walked(&self, at: usize) {
+        let Some(&(row, _)) = self.walked_rows().get(at) else { return };
+        let Some(row) = self.list.row_at_index(row as i32) else { return };
+        self.select_quietly(&row);
+    }
+
     /// Highlight a symbol without loading it again.
     pub fn highlight(self: &Rc<Self>, instrument: &Instrument) {
+        // Already on it, perhaps on its second copy: moving to the first
+        // would send the next step back up the list.
+        let on_it = self.list.selected_row().is_some_and(|row| {
+            matches!(
+                self.rows.borrow().get(row.index().max(0) as usize),
+                Some(RowKind::Entry { instrument: i, .. })
+                    if i.symbol == instrument.symbol && i.suffix == instrument.suffix
+            )
+        });
+        if on_it {
+            return;
+        }
         let Some(at) = self.row_of(instrument) else { return };
         let Some(row) = self.list.row_at_index(at as i32) else { return };
         self.select_quietly(&row);
@@ -2804,6 +2848,23 @@ fn clear_rows(list: &gtk::ListBox) {
     }
 }
 
+/// Which of `walked` — the symbols a step from the chart walks, each with
+/// the row it is on — a step starts at, given the highlighted row and what
+/// the chart shows. `Watchlist::step_order` has the reasoning.
+fn step_from(
+    walked: &[(usize, Instrument)],
+    selected: Option<usize>,
+    current: Option<&Instrument>,
+) -> Option<usize> {
+    let highlighted = selected.and_then(|row| walked.iter().position(|(at, _)| *at == row));
+    let is_current =
+        |i: &Instrument| current.is_some_and(|c| c.symbol == i.symbol && c.suffix == i.suffix);
+    highlighted
+        .filter(|&at| walked.get(at).is_some_and(|(_, i)| is_current(i)))
+        .or_else(|| walked.iter().position(|(_, i)| is_current(i)))
+        .or(highlighted)
+}
+
 /// Put a quote into one value label, direction colouring included.
 fn write_cell(
     label: &gtk::Label,
@@ -3395,6 +3456,51 @@ mod tests {
             let expected = if descending { ["UP", "DOWN", "NONE"] } else { ["DOWN", "UP", "NONE"] };
             assert_eq!(order, expected);
         }
+    }
+
+    /// A step from the chart starts where the chart is in the list, and
+    /// when it is not in the list, where the list was left: never back at
+    /// the top, which is what the end of a list used to wrap to.
+    #[test]
+    fn a_step_starts_where_the_chart_is_or_where_the_list_was_left() {
+        let named = |symbol: &str| Instrument {
+            symbol: symbol.to_string(),
+            name: symbol.to_string(),
+            kind: omacharts_engine::InstrumentKind::Equity,
+            suffix: None,
+            currency: None,
+            tier: 1,
+            session_origin: 0,
+            overrides: Vec::new(),
+            exchange: None,
+            popularity: 0,
+            local_name: None,
+        };
+        // Row 1 is a section header, so the rows and the walk disagree.
+        let rows = [(0, "SPY"), (2, "EURUSD"), (3, "CCJ"), (4, "EURUSD")];
+        let walked: Vec<(usize, Instrument)> = rows
+            .into_iter()
+            .map(|(row, symbol)| (row, named(symbol)))
+            .collect();
+
+        assert_eq!(step_from(&walked, Some(3), Some(&named("CCJ"))), Some(2));
+        assert_eq!(
+            step_from(&walked, None, Some(&named("CCJ"))),
+            Some(2),
+            "nothing highlighted: found by symbol"
+        );
+        assert_eq!(
+            step_from(&walked, Some(4), Some(&named("EURUSD"))),
+            Some(3),
+            "listed twice: the copy that is highlighted, not the first"
+        );
+        assert_eq!(
+            step_from(&walked, Some(3), Some(&named("URA"))),
+            Some(2),
+            "not in the list: from where the list was left"
+        );
+        assert_eq!(step_from(&walked, None, Some(&named("URA"))), None);
+        assert_eq!(step_from(&walked, Some(1), None), None, "a header is not a place in the walk");
     }
 
     #[test]
