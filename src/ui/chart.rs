@@ -40,7 +40,7 @@ use omacharts_engine::{
 use crate::ui::colors;
 use gtk::glib;
 
-const PRICE_AXIS_W: f64 = 64.0;
+pub(crate) const PRICE_AXIS_W: f64 = 64.0;
 const TIME_AXIS_H: f64 = 24.0;
 const PAD: f64 = 10.0;
 /// How far past either end of the series the chart can be panned: empty
@@ -2907,6 +2907,17 @@ impl ChartView {
 
     pub fn set_hover_handler(&self, handler: impl Fn(Option<Hover>) + 'static) {
         *self.on_hover.borrow_mut() = Some(Box::new(handler));
+    }
+
+    /// Take the crosshair off as though the pointer had left the chart.
+    pub fn drop_pointer(&self) {
+        if self.state.borrow_mut().pointer.take().is_none() {
+            return;
+        }
+        if let Some(handler) = self.on_hover.borrow().as_ref() {
+            handler(None);
+        }
+        self.pointer.queue_draw();
     }
 
     /// Replace the series. Resets the view only when the instrument changed,
