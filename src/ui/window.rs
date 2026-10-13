@@ -4687,9 +4687,30 @@ impl Window {
         }
         // Every number typed builds a fresh one, so each has to let go of the
         // strip when it closes or they pile up on it.
-        popover.connect_closed(|popover| {
+        //
+        // Closing hands the keyboard to what it hangs from, which put a focus
+        // ring on the strip's first button and sent the chart's keys there.
+        // Back to the chart it was typed on, unless a click outside already
+        // took the keyboard somewhere else.
+        let area = pane.view.area.downgrade();
+        popover.connect_closed(move |popover| {
             let popover = popover.clone();
-            glib::idle_add_local_once(move || popover.unparent());
+            let area = area.clone();
+            glib::idle_add_local_once(move || {
+                let anchor = popover.parent();
+                popover.unparent();
+                let focus = anchor.as_ref().and_then(|a| a.root()).and_then(|root| root.focus());
+                // Still in the entry here: the move to the anchor comes later.
+                let stranded = match (&anchor, &focus) {
+                    (Some(anchor), Some(focus)) => {
+                        focus.is_ancestor(&popover) || focus.is_ancestor(anchor) || focus == anchor
+                    }
+                    _ => true,
+                };
+                if let Some(area) = area.upgrade().filter(|_| stranded) {
+                    area.grab_focus();
+                }
+            });
         });
 
         let this = self.clone();
