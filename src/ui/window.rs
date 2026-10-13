@@ -4421,11 +4421,11 @@ impl Window {
                     this.focused_pane().view.pan_bars(5);
                     glib::Propagation::Stop
                 }
-                (Key::plus | Key::equal, false) => {
+                (Key::plus | Key::equal | Key::KP_Add, false) => {
                     this.focused_pane().view.zoom(1.0 / 1.25);
                     glib::Propagation::Stop
                 }
-                (Key::minus, false) => {
+                (Key::minus | Key::KP_Subtract, false) => {
                     this.focused_pane().view.zoom(1.25);
                     glib::Propagation::Stop
                 }
