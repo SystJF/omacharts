@@ -3986,6 +3986,10 @@ impl Window {
             let button = gtk::ToggleButton::with_label(&timeframe.label());
             button.add_css_class("flat");
             button.set_tooltip_text(Some(&timeframe.description()));
+            // A click picks a resolution; it does not move the keyboard. Taking
+            // the focus left a ring on the button that outlived the click, and
+            // the keys meant for the chart went to the strip instead.
+            button.set_focus_on_click(false);
             match &first {
                 Some(anchor) => button.set_group(Some(anchor)),
                 None => first = Some(button.clone()),
