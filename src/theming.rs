@@ -537,6 +537,36 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
   box-shadow: none;
 }
 
+/* One line a symbol. Adwaita's sidebar row is 36px tall, sized for an icon
+   beside a label, and a row here is one line of text; at that height a list
+   of thirty did not fit on a laptop's screen. The radius comes down with the
+   height, or a selected row reads as a pill. */
+.navigation-sidebar > row.symbol-row {
+  min-height: 26px;
+  margin-bottom: 1px;
+  border-radius: 6px;
+}
+
+/* The chart's symbol, in the accent, filled. Adwaita marks it with a tenth
+   of the foreground and lays its keyboard-focus ring on top, the accent at
+   half strength: on a dark theme that is a grey-blue frame round a row
+   barely lighter than its neighbours. Arrows move the selection with the
+   focus, so the fill already says where the keys are and the ring goes —
+   except on a row the focus reached without selecting it. */
+.navigation-sidebar > row.symbol-row:selected {
+  background-color: alpha(@accent_color, 0.22);
+}
+.navigation-sidebar > row.symbol-row:selected:hover {
+  background-color: alpha(@accent_color, 0.28);
+}
+.navigation-sidebar > row.symbol-row:selected:focus-visible {
+  outline: none;
+}
+
+/* The fold arrow on a section's header, at the height of the title beside
+   it, so a header is no longer the tallest row in a rail of one-line rows. */
+.section-fold { min-height: 0; min-width: 0; padding: 2px 4px; }
+
 .symbol-row:drop(active),
 .section-row:drop(active) {
   outline: none;
