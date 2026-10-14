@@ -1508,6 +1508,23 @@ impl ChartView {
         self.tool_changed();
     }
 
+    /// Pass the tool in hand to `to`, with whether it stays there and the
+    /// configuration chosen for the next drawing, and go back to the
+    /// pointer. The tool belongs to the window, not to one chart: picking
+    /// the line and then clicking into the chart beside draws a line there.
+    pub fn hand_over(&self, to: &ChartView) {
+        let (kind, sticky, next) = {
+            let state = self.state.borrow();
+            (state.tool, state.sticky, state.next_config)
+        };
+        if self.armed().is_some() {
+            self.arm(None);
+        }
+        to.arm_sticky(kind, sticky);
+        to.state.borrow_mut().next_config = next;
+        to.tool_changed();
+    }
+
     pub fn armed(&self) -> Option<DrawingKind> {
         self.state.borrow().tool
     }

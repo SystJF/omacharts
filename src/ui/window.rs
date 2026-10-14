@@ -2222,6 +2222,11 @@ impl Window {
         if self.focused.get() == id && self.panes.borrow().iter().any(|p| p.id == id) {
             return;
         }
+        // The tool in hand goes with the focus, so every chart is drawn on
+        // with the one the bar shows.
+        if let (Some(from), Some(to)) = (self.pane(self.focused.get()), self.pane(id)) {
+            from.view.hand_over(&to.view);
+        }
         self.focused.set(id);
         // Maximized, the focus keys still walk the arrangement — they just
         // walk it one chart at a time, with the window showing whichever one
