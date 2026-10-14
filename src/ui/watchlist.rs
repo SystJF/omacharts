@@ -1481,6 +1481,7 @@ impl Watchlist {
             "pan-down-symbolic"
         });
         arrow.add_css_class("flat");
+        arrow.add_css_class("section-fold");
         arrow.set_valign(gtk::Align::Center);
         let this = self.clone();
         arrow.connect_clicked(move |_| this.fold_section(id, !collapsed));
@@ -1669,8 +1670,6 @@ impl Watchlist {
     ) -> (gtk::ListBoxRow, Vec<(Column, gtk::Label)>) {
         let quote = (self.quote)(instrument);
         let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        row_box.set_margin_top(4);
-        row_box.set_margin_bottom(4);
         row_box.set_margin_start(12);
         row_box.set_margin_end(10);
 
