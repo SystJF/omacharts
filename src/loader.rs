@@ -61,7 +61,18 @@ pub struct Request {
     pub timeframe: Timeframe,
 }
 
+/// One symbol in a batch of closes: the cache key its answer is stored
+/// under, and the provider's own spelling to ask for.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Listing {
+    pub key: String,
+    pub symbol: String,
+}
+
 pub enum Response {
+    /// A batch of closes is in the store. `keys` are the listings it brought
+    /// closes back for; `failure` is why it brought none, if it failed.
+    Closes { keys: Vec<String>, failure: Option<FetchFailure> },
     /// Bars at the *native* timeframe. The caller folds to what it is showing.
     Bars { key: String, timeframe: Timeframe, bars: Vec<Bar> },
     /// Nothing new arrived. `bars` is whatever the cache already had, and
@@ -205,6 +216,19 @@ struct Job {
     /// queued, where everything more wanted overtakes it and any arrival can
     /// interrupt the wait, rather than slept out inside a call.
     not_before: Option<Instant>,
+    /// Set for a batch of closes rather than one series' bars. The request
+    /// then only names the batch, so that asking for the same one twice
+    /// queues it once, and carries its pacing.
+    closes: Option<Batch>,
+}
+
+/// A batch of closes as queued: what it names, and when it was asked for.
+#[derive(Debug)]
+struct Batch {
+    listings: Vec<Listing>,
+    /// Unix seconds. A listing another batch brought back since is left out
+    /// when this one is sent, see [`attempt_closes`].
+    asked_at: i64,
 }
 
 impl Loader {
@@ -238,12 +262,18 @@ impl Loader {
             while let Some(dispatch) = worker.take(rules) {
                 let (job, outcome) = match dispatch {
                     Dispatch::Send(job) => {
-                        let outcome = attempt(&job.request, provider.as_ref());
+                        let outcome = match &job.closes {
+                            Some(batch) => attempt_closes(batch, provider.as_ref()),
+                            None => attempt(&job.request, provider.as_ref()),
+                        };
                         handed_on = hand_on_cooldown(provider.as_ref(), handed_on);
                         (job, outcome)
                     }
                     Dispatch::Refuse(job) => {
-                        let outcome = refused(&job.request);
+                        let outcome = match job.closes {
+                            Some(_) => Outcome::Done(closes_failed(FetchFailure::RateLimited)),
+                            None => refused(&job.request),
+                        };
                         (job, outcome)
                     }
                 };
@@ -259,6 +289,9 @@ impl Loader {
                                 let not_before = Some(Instant::now() + backoff);
                                 worker.again(Job { attempt: job.attempt + 1, not_before, ..job });
                                 continue;
+                            }
+                            None if job.closes.is_some() => {
+                                closes_failed(FetchFailure::from(&error))
                             }
                             None => failed(&job.request, bars, FetchFailure::from(&error)),
                         }
@@ -285,6 +318,28 @@ impl Loader {
     pub fn fetch(&self, request: Request, priority: u32) {
         let mut queue = self.inner.queue.lock().unwrap_or_else(|e| e.into_inner());
         let queued = enqueue(&mut queue, request, priority);
+        drop(queue);
+        if queued {
+            self.inner.wake.notify_one();
+        }
+    }
+
+    /// Queue one request for the latest closes of each of `listings`.
+    ///
+    /// Speculative, always: nobody is waiting on a list of prices the way
+    /// they wait on a chart. Kept to what one request may name by the caller,
+    /// which knows the provider's [`Provider::max_batch`]. Asking for the same
+    /// batch while it is queued queues it once.
+    pub fn fetch_closes(&self, listings: Vec<Listing>, priority: u32) {
+        let keys: Vec<&str> = listings.iter().map(|l| l.key.as_str()).collect();
+        let request = Request {
+            speculative: true,
+            key: format!("closes:{}", keys.join(",")),
+            symbol: String::new(),
+            timeframe: Timeframe::days(1),
+        };
+        let mut queue = self.inner.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let queued = enqueue_job(&mut queue, request, priority, Some(listings));
         drop(queue);
         if queued {
             self.inner.wake.notify_one();
@@ -773,6 +828,16 @@ fn warm_up_is_worth_reporting(failed: bool, claimed: bool) -> bool {
 /// Add a job, or improve the one already there. True when the worker has
 /// something new to wake up for.
 fn enqueue(queue: &mut Queue, request: Request, priority: u32) -> bool {
+    enqueue_job(queue, request, priority, None)
+}
+
+/// [`enqueue`], for a series or for a batch of closes.
+fn enqueue_job(
+    queue: &mut Queue,
+    request: Request,
+    priority: u32,
+    closes: Option<Vec<Listing>>,
+) -> bool {
     // Somebody has asked for the resolution a warm-up is already fetching.
     // Join that reply instead of queueing a second request for the same
     // series: one fetch, whose answer — bars or failure — is now the chart's,
@@ -801,7 +866,9 @@ fn enqueue(queue: &mut Queue, request: Request, priority: u32) -> bool {
     }
     let seq = queue.next_seq;
     queue.next_seq += 1;
-    queue.jobs.push(Job { request, priority, seq, attempt: 0, not_before: None });
+    let closes =
+        closes.map(|listings| Batch { listings, asked_at: chrono::Utc::now().timestamp() });
+    queue.jobs.push(Job { request, priority, seq, attempt: 0, not_before: None, closes });
     true
 }
 
@@ -881,6 +948,57 @@ fn attempt(request: &Request, provider: &dyn Provider) -> Outcome {
         }
         Err(error) => Outcome::Failed { error, bars: cached },
     }
+}
+
+/// Send one batch of closes and store what came back.
+///
+/// Only the listings no other batch has brought back since this one was
+/// asked for: the bar widget and the rail each plan from the same rows, and
+/// a row on both queues twice before either is sent. The rest go; when
+/// nothing is left, nothing is asked.
+///
+/// Every listing sent is marked as asked, answered or not. One the provider
+/// left out has nothing to show, and is fetched by its bars after this, see
+/// [`crate::cli::plan_refresh`]. A provider that knows none of them says so
+/// with [`ProviderError::NotFound`], which leaves them all out the same way
+/// rather than failing the batch and having it asked again.
+fn attempt_closes(batch: &Batch, provider: &dyn Provider) -> Outcome {
+    let Ok(store) = Store::open() else {
+        return Outcome::Done(closes_failed(FetchFailure::LocalCache));
+    };
+    let listings: Vec<&Listing> = batch
+        .listings
+        .iter()
+        .filter(|l| store.closes_fetched_at(&l.key).is_none_or(|at| at < batch.asked_at))
+        .collect();
+    if listings.is_empty() {
+        return Outcome::Done(Response::Closes { keys: Vec::new(), failure: None });
+    }
+    let symbols: Vec<&str> = listings.iter().map(|l| l.symbol.as_str()).collect();
+    let answer = match provider.closes(&symbols) {
+        Err(ProviderError::NotFound) => Ok(Vec::new()),
+        answer => answer,
+    };
+    match answer {
+        Ok(answer) => {
+            let mut keys = Vec::with_capacity(answer.len());
+            for listing in listings {
+                match answer.iter().find(|closes| closes.symbol == listing.symbol) {
+                    Some(closes) => {
+                        store.write_closes(&listing.key, closes);
+                        keys.push(listing.key.clone());
+                    }
+                    None => store.mark_closes_asked(&listing.key),
+                }
+            }
+            Outcome::Done(Response::Closes { keys, failure: None })
+        }
+        Err(error) => Outcome::Failed { error, bars: Vec::new() },
+    }
+}
+
+fn closes_failed(failure: FetchFailure) -> Response {
+    Response::Closes { keys: Vec::new(), failure: Some(failure) }
 }
 
 /// The settings row through which a provider's cooldown outlives the process
@@ -1082,6 +1200,7 @@ mod tests {
             seq,
             attempt: 0,
             not_before: None,
+            closes: None,
         }
     }
 
@@ -1492,7 +1611,7 @@ mod tests {
     fn unasked_of(response: &Response) -> bool {
         match response {
             Response::Failed { unasked, .. } => *unasked,
-            Response::Bars { .. } => panic!("expected a failure"),
+            Response::Bars { .. } | Response::Closes { .. } => panic!("expected a failure"),
         }
     }
 
@@ -1745,6 +1864,7 @@ mod tests {
             seq: 0,
             attempt: 1,
             not_before: None,
+            closes: None,
         });
 
         let queue = inner.queue.lock().unwrap();
@@ -1767,6 +1887,7 @@ mod tests {
             seq: 0,
             attempt: 1,
             not_before: Some(Instant::now() + ms(400)),
+            closes: None,
         });
 
         let queue = inner.queue.lock().unwrap();

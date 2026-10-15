@@ -77,6 +77,18 @@ pub struct Coverage {
     pub fetched_at: i64,
 }
 
+/// A symbol's latest two closes as last fetched in a batch, and when.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StoredCloses {
+    pub last: f64,
+    pub previous: f64,
+    /// The latest close's session, unix seconds.
+    pub at: i64,
+    /// The previous close's session.
+    pub previous_at: i64,
+    pub fetched_at: i64,
+}
+
 impl Store {
     pub fn open() -> Result<Store, migrations::Error> {
         let dir = data_dir();
@@ -154,6 +166,7 @@ impl Store {
             return Ok(());
         }
         self.conn.execute("DELETE FROM bar_series", [])?;
+        self.conn.execute("DELETE FROM quotes", [])?;
         self.conn.execute(
             "INSERT INTO meta (key, value) VALUES ('cache_version', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -264,6 +277,90 @@ impl Store {
             "UPDATE bar_series SET fetched_at = ?3 WHERE key = ?1 AND interval = ?2",
             params![key, timeframe.key(), chrono::Utc::now().timestamp()],
         );
+    }
+
+    // -- quotes ------------------------------------------------------------
+
+    /// Store the closes a batch brought back for `key`.
+    pub fn write_closes(&self, key: &str, closes: &omacharts_engine::Closes) {
+        let _ = self.conn.execute(
+            "INSERT INTO quotes (key, last, previous, at, previous_at, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(key) DO UPDATE SET last = excluded.last, previous = excluded.previous,
+                 at = excluded.at, previous_at = excluded.previous_at,
+                 fetched_at = excluded.fetched_at",
+            params![
+                key,
+                closes.last,
+                closes.previous,
+                closes.at,
+                closes.previous_at,
+                chrono::Utc::now().timestamp()
+            ],
+        );
+    }
+
+    /// Record that `key` was asked for in a batch and left out of the answer.
+    ///
+    /// Whatever closes it had before go: they are no longer the latest, and
+    /// kept beside a fresh `fetched_at` they would pass for current. A row
+    /// asked for and left with none is what tells the next refresh to fetch
+    /// its bars instead, see [`crate::cli::plan_refresh`], rather than asking
+    /// the batch again on every run and getting the same nothing.
+    pub fn mark_closes_asked(&self, key: &str) {
+        let _ = self.conn.execute(
+            "INSERT INTO quotes (key, fetched_at) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET fetched_at = excluded.fetched_at,
+                 last = NULL, previous = NULL, at = NULL, previous_at = NULL",
+            params![key, chrono::Utc::now().timestamp()],
+        );
+    }
+
+    /// The closes last fetched for `key` in a batch, if any came back.
+    pub fn load_closes(&self, key: &str) -> Option<StoredCloses> {
+        self.conn
+            .query_row(
+                "SELECT last, previous, at, previous_at, fetched_at FROM quotes
+                 WHERE key = ?1 AND last IS NOT NULL AND previous IS NOT NULL AND at IS NOT NULL
+                     AND previous_at IS NOT NULL",
+                params![key],
+                |r| {
+                    Ok(StoredCloses {
+                        last: r.get(0)?,
+                        previous: r.get(1)?,
+                        at: r.get(2)?,
+                        previous_at: r.get(3)?,
+                        fetched_at: r.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// When `key` was last asked for in a batch, answered or not.
+    pub fn closes_fetched_at(&self, key: &str) -> Option<i64> {
+        self.conn
+            .query_row("SELECT fetched_at FROM quotes WHERE key = ?1", params![key], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// Pretend a series was last fetched at `at`, for tests about staleness.
+    #[cfg(test)]
+    pub fn backdate(&self, key: &str, timeframe: Timeframe, at: i64) {
+        let _ = self.conn.execute(
+            "UPDATE bar_series SET fetched_at = ?3 WHERE key = ?1 AND interval = ?2",
+            params![key, timeframe.key(), at],
+        );
+    }
+
+    /// Pretend a batch of closes was last fetched at `at`.
+    #[cfg(test)]
+    pub fn backdate_closes(&self, key: &str, at: i64) {
+        let _ = self.conn.execute("UPDATE quotes SET fetched_at = ?2 WHERE key = ?1", params![key, at]);
     }
 
     pub fn load_bars(&self, key: &str, timeframe: Timeframe) -> Vec<Bar> {
@@ -396,6 +493,7 @@ impl Store {
     /// Settings and saved themes survive; only market data goes.
     pub fn clear_market_data(&self) -> rusqlite::Result<()> {
         self.conn.execute("DELETE FROM bar_series", [])?;
+        self.conn.execute("DELETE FROM quotes", [])?;
         self.conn.execute_batch("VACUUM")?;
         Ok(())
     }
@@ -1746,6 +1844,22 @@ mod tests {
         let store = Store::memory().unwrap();
         store.set_setting("indicators", "{ this is not json");
         assert!(store.indicators().is_empty());
+    }
+
+    /// Left out of a batch: remembered as asked, with nothing to show, so the
+    /// next refresh fetches its bars rather than the same batch again. Closes
+    /// from an earlier batch go with it: under a fresh stamp they would pass
+    /// for current, and never be asked for again.
+    #[test]
+    fn a_symbol_left_out_of_a_batch_is_asked_and_has_no_closes() {
+        let store = Store::memory().unwrap();
+        let closes = omacharts_engine::Closes {
+            symbol: "AAPL".into(), last: 2.0, previous: 1.0, at: 86_400, previous_at: 0,
+        };
+        store.write_closes("yahoo:AAPL", &closes);
+        store.mark_closes_asked("yahoo:AAPL");
+        assert_eq!(store.load_closes("yahoo:AAPL"), None, "yesterday's closes are not today's");
+        assert!(store.closes_fetched_at("yahoo:AAPL").is_some());
     }
 
     #[test]

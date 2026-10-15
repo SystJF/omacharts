@@ -23,10 +23,18 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::bars::{Bar, Timeframe, Unit};
-use crate::provider::{Capability, Pacing, Provider, ProviderError, SharedCooldown};
+use crate::provider::{Capability, Closes, Pacing, Provider, ProviderError, SharedCooldown};
 use crate::symbols::{Instrument, InstrumentKind};
 
 const ENDPOINT: &str = "https://query1.finance.yahoo.com/v8/finance/chart";
+
+/// Daily closes for many symbols in one request. Like the chart endpoint it
+/// wants no cookie and no crumb.
+const SPARK: &str = "https://query1.finance.yahoo.com/v8/finance/spark";
+
+/// How many symbols one spark request may name. Twenty come back whole;
+/// fifty are refused outright with a 400 (measured 2026-10-15).
+const MAX_BATCH: usize = 20;
 
 /// Yahoo serves nothing without a browser-shaped agent.
 const AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
@@ -255,6 +263,15 @@ impl Yahoo {
     }
 }
 
+/// One spark request for the last few sessions of each symbol.
+///
+/// Five days, because two closes is all a quote needs and a long weekend or a
+/// holiday can put the session before three days back.
+fn spark_url(symbols: &[&str]) -> String {
+    let joined: Vec<String> = symbols.iter().map(|s| encode(s)).collect();
+    format!("{SPARK}?symbols={}&range=5d&interval=1d", joined.join(","))
+}
+
 /// Percent-encode the handful of characters Yahoo symbols actually contain.
 fn encode(symbol: &str) -> String {
     let mut out = String::with_capacity(symbol.len() + 4);
@@ -275,6 +292,19 @@ fn encode(symbol: &str) -> String {
 }
 
 impl Yahoo {
+    /// One request, keeping the cooldown's state: a 429 starts or lengthens
+    /// it and any answer relaxes it, whichever endpoint it came from.
+    fn ask(&self, url: &str) -> Result<serde_json::Value, ProviderError> {
+        let answer = self.fetch(url);
+        let mut cooldown = self.cooldown.lock().unwrap_or_else(|e| e.into_inner());
+        match &answer {
+            Ok(_) => cooldown.succeeded(),
+            Err(ProviderError::RateLimited) => cooldown.throttled(Instant::now()),
+            Err(_) => {}
+        }
+        answer
+    }
+
     /// One request, no pacing and no retries.
     fn fetch(&self, url: &str) -> Result<serde_json::Value, ProviderError> {
         let mut request = ureq::get(url).header("User-Agent", AGENT);
@@ -410,22 +440,31 @@ impl Provider for Yahoo {
         since: Option<i64>,
     ) -> Result<Vec<Bar>, ProviderError> {
         let url = Self::url(symbol, timeframe, since)?;
-        match self.fetch(&url) {
-            Ok(body) => {
-                self.cooldown.lock().unwrap_or_else(|e| e.into_inner()).succeeded();
-                let session = session_start(&body);
-                parse_chart(&body).map(|bars| collapse_days(bars, timeframe, session))
-            }
-            Err(ProviderError::RateLimited) => {
-                self.cooldown.lock().unwrap_or_else(|e| e.into_inner()).throttled(Instant::now());
-                Err(ProviderError::RateLimited)
-            }
-            Err(error) => Err(error),
-        }
+        let body = self.ask(&url)?;
+        let session = session_start(&body);
+        parse_chart(&body).map(|bars| collapse_days(bars, timeframe, session))
     }
 
     fn pacing(&self) -> Pacing {
         PACING
+    }
+
+    fn max_batch(&self) -> usize {
+        MAX_BATCH
+    }
+
+    /// Through spark, which answers for up to [`MAX_BATCH`] symbols at once.
+    fn closes(&self, symbols: &[&str]) -> Result<Vec<Closes>, ProviderError> {
+        if symbols.is_empty() {
+            return Ok(Vec::new());
+        }
+        if symbols.len() > MAX_BATCH {
+            return Err(ProviderError::Unsupported(format!(
+                "{} symbols in one request, at most {MAX_BATCH}",
+                symbols.len()
+            )));
+        }
+        parse_spark(&self.ask(&spark_url(symbols))?)
     }
 
     // No `stream`, so `delivery` is polled. There is nothing to subscribe
@@ -513,6 +552,72 @@ pub fn parse_chart(body: &serde_json::Value) -> Result<Vec<Bar>, ProviderError> 
     bars.sort_by_key(|b| b.ts);
     bars.dedup_by_key(|b| b.ts);
     Ok(bars)
+}
+
+/// Pull the latest two closes per symbol out of a spark response.
+///
+/// Spark answers with an object keyed by symbol, each holding its stamps and
+/// closes and nothing else worth reading. `fulldayPrice` is not the close:
+/// before the open it is the pre-market print, which is not what a list of
+/// closes means today. Nulls are skipped, as on a chart, and a second stamp
+/// on one day keeps the later close, the way [`collapse_days`] does. A symbol
+/// left with fewer than two closes has no move to show and is left out, as is
+/// one Yahoo did not know, which it drops from the answer without a word.
+///
+/// The session in progress comes stamped with the time of its last print,
+/// as on a chart, and is put on the series' own clock the same way, a whole
+/// number of days after the session before: EURUSD's Thursday is Wednesday
+/// 23:00, not Thursday 10:57. Left as the print time it reads as a session
+/// of its own a day after the bars' one.
+///
+/// A 200 can still carry an error, `{"finance":{"error":…}}`, which has no
+/// symbol in it to skip: that is an answer that went wrong, not one that
+/// knew none of the symbols, and says so rather than coming back empty.
+pub fn parse_spark(body: &serde_json::Value) -> Result<Vec<Closes>, ProviderError> {
+    let symbols =
+        body.as_object().ok_or_else(|| ProviderError::Malformed("no spark object".into()))?;
+    if let Some(error) = symbols.values().find_map(|entry| entry["error"]["code"].as_str()) {
+        return Err(match error {
+            "Not Found" => ProviderError::NotFound,
+            other => ProviderError::Malformed(other.to_string()),
+        });
+    }
+    let answered = |entry: &serde_json::Value| {
+        entry["timestamp"].is_array() || entry["symbol"].is_string()
+    };
+    if !symbols.is_empty() && !symbols.values().any(answered) {
+        return Err(ProviderError::Malformed("no symbol in the spark answer".into()));
+    }
+    let mut out = Vec::with_capacity(symbols.len());
+    for (symbol, entry) in symbols {
+        let (Some(stamps), Some(closes)) =
+            (entry["timestamp"].as_array(), entry["close"].as_array())
+        else {
+            continue;
+        };
+        let mut prints: Vec<(i64, f64)> = stamps
+            .iter()
+            .zip(closes)
+            .filter_map(|(stamp, close)| Some((stamp.as_i64()?, close.as_f64()?)))
+            .collect();
+        // Oldest first, as the chart endpoint is, but nothing promises it.
+        prints.sort_by_key(|&(at, _)| at);
+        if let [.., (before, _), (latest, _)] = &mut prints[..] {
+            *latest -= (*latest - *before).rem_euclid(86_400);
+        }
+        let mut days: Vec<(i64, f64)> = Vec::with_capacity(prints.len());
+        for (at, close) in prints {
+            match days.last_mut() {
+                Some(last) if last.0.div_euclid(86_400) == at.div_euclid(86_400) => {
+                    *last = (last.0, close)
+                }
+                _ => days.push((at, close)),
+            }
+        }
+        let [.., (previous_at, previous), (at, last)] = days[..] else { continue };
+        out.push(Closes { symbol: symbol.clone(), last, at, previous, previous_at });
+    }
+    Ok(out)
 }
 
 /// Fold bars that land on the same day into one, for daily and coarser.
@@ -1029,6 +1134,32 @@ mod tests {
         for code in [401, 410, 451] {
             assert!(matches!(refusal(code), ProviderError::Malformed(_)), "{code}");
         }
+    }
+
+    /// A real spark answer from 2026-10-15 before the US open, cut to two of
+    /// its symbols. AAPL's `fulldayPrice`, 345.935, is the pre-market print,
+    /// not the close. EURUSD's days are stamped at London midnight, 23:00 UTC
+    /// the evening before, and Thursday's session in progress at its last
+    /// print, 10:57: it is Wednesday 23:00's session, the stamp the bars give
+    /// it, not a day of its own after them.
+    #[test]
+    fn a_spark_answer_gives_each_symbol_its_last_two_closes_on_its_own_clock() {
+        let body: serde_json::Value = serde_json::from_str(include_str!("spark.json")).unwrap();
+        let all = parse_spark(&body).unwrap();
+        let of = |symbol: &str| all.iter().find(|c| c.symbol == symbol).unwrap();
+        let aapl = of("AAPL");
+        assert_eq!((aapl.previous, aapl.last, aapl.at), (341.27, 342.96, 1_791_984_600));
+        let eurusd = of("EURUSD=X");
+        assert_eq!((eurusd.previous, eurusd.last), (1.1204, 1.1217));
+        assert_eq!(eurusd.at, 1_792_018_800, "2026-10-14 23:00 UTC");
+    }
+
+    /// An error in a 200 is not an answer that knew none of the symbols.
+    #[test]
+    fn a_spark_error_is_an_error_not_an_empty_answer() {
+        let body = r#"{"finance":{"result":null,"error":{"code":"Bad Request","description":"x"}}}"#;
+        let answer = parse_spark(&serde_json::from_str(body).unwrap());
+        assert!(matches!(answer, Err(ProviderError::Malformed(code)) if code == "Bad Request"));
     }
 
     #[test]

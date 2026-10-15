@@ -198,6 +198,27 @@ impl Pacing {
     }
 }
 
+/// The latest two daily closes of one symbol, which is all a quote in a list
+/// is: a price and how far it has moved since the session before.
+///
+/// Apart from [`Bar`] on purpose. A provider that answers many symbols in one
+/// request answers with closes alone, and a bar made of a close would have an
+/// open, high and low that never traded — which is exactly what a later fetch
+/// of the real series compares against, and would read as history rewritten.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Closes {
+    /// The provider's own spelling, as it was asked for.
+    pub symbol: String,
+    /// The latest close, and its session's stamp in unix seconds.
+    pub last: f64,
+    pub at: i64,
+    /// The close of the session before, and its stamp. The stamp is how a
+    /// reader tells an answer that skipped a session: one comes back now and
+    /// then with a day missing, and its "previous" is then two sessions old.
+    pub previous: f64,
+    pub previous_at: i64,
+}
+
 /// A provider's cooldown in terms another process can read.
 ///
 /// Wall-clock seconds rather than an [`Instant`], which means nothing outside
@@ -399,6 +420,27 @@ pub trait Provider: Send + Sync {
     /// never block a caller on it. Defaults to never.
     fn cooldown_until(&self) -> Option<Instant> {
         None
+    }
+
+    /// How many symbols one [`Self::closes`] request may name. Zero, the
+    /// default, for a provider that has no such request.
+    fn max_batch(&self) -> usize {
+        0
+    }
+
+    /// The latest two daily closes of each of `symbols`, in one request.
+    ///
+    /// For a list of prices rather than a chart: one request where asking
+    /// for each symbol's bars would be one each, which is the difference
+    /// between a bar widget that stays current and one that spends the rate
+    /// limit doing it. At most [`Self::max_batch`] symbols. One the provider
+    /// does not know is left out of the answer rather than failing the rest.
+    ///
+    /// Paced, refused and retried like [`Self::bars`]: a batch is one
+    /// request. Unsupported by default.
+    fn closes(&self, symbols: &[&str]) -> Result<Vec<Closes>, ProviderError> {
+        let _ = symbols;
+        Err(ProviderError::Unsupported("closes in a batch".into()))
     }
 
     /// The cooldown as it stands, for another process to carry on from.

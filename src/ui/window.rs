@@ -4198,18 +4198,8 @@ impl Window {
         let quote: crate::ui::watchlist::QuoteLookup = Rc::new(move |instrument: &Instrument| {
             let provider = window.upgrade()?.provider();
             let symbol = provider.symbol_for(instrument)?;
-            let bars = store.load_bars(&format!("{}:{symbol}", provider.id()), Timeframe::days(1));
-            let (previous, last) = (bars.get(bars.len().checked_sub(2)?)?, bars.last()?);
-            let change = last.close - previous.close;
-            Some(Quote {
-                last: last.close,
-                change,
-                change_pct: if previous.close == 0.0 {
-                    0.0
-                } else {
-                    change / previous.close * 100.0
-                },
-            })
+            let quote = crate::cli::quote_at(&store, &format!("{}:{symbol}", provider.id()))?;
+            Some(Quote { last: quote.last, change: quote.change, change_pct: quote.change_pct })
         });
 
         let this = self.clone();
@@ -4605,6 +4595,18 @@ impl Window {
                     break;
                 }
                 match response {
+                    // The rail reads the newer of a row's bars and its closes,
+                    // so a batch the widget asked for moves its prices too.
+                    Response::Closes { keys, failure } => {
+                        if !keys.is_empty()
+                            && let Some(rail) = this.watchlist.borrow().as_ref()
+                        {
+                            rail.refresh_quotes();
+                        }
+                        if failure == Some(FetchFailure::RateLimited) {
+                            this.pause_backfill();
+                        }
+                    }
                     Response::Bars { key, timeframe, bars } => {
                         this.present(&key, timeframe, bars, None);
                         // One at a time, each asked for as the last lands.
@@ -5381,6 +5383,14 @@ impl Window {
                 Request { key, symbol, timeframe: daily, speculative: true },
                 BACKFILL.saturating_add(rank as u32),
             );
+        }
+    }
+
+    /// Queue batches of closes for the bar widget, on this window's loader so
+    /// that they share its pacing and its cooldown with everything else.
+    pub fn warm_closes(self: &Rc<Self>, batches: Vec<Vec<crate::loader::Listing>>) {
+        for listings in batches {
+            self.loader().fetch_closes(listings, BACKFILL);
         }
     }
 

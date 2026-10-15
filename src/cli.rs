@@ -24,7 +24,7 @@ use std::rc::Rc;
 use omacharts_engine::providers;
 use omacharts_engine::{Instrument, Provider, SearchIndex, Timeframe};
 
-use crate::loader::{Loader, Request, BACKFILL};
+use crate::loader::{Listing, Loader, Request, BACKFILL};
 use crate::store::{Store, ROOT_SECTION};
 
 pub mod charts;
@@ -240,6 +240,9 @@ pub trait Live {
     /// nearest-wanted-first and shares one throttle across every request it
     /// has ever made, which is strictly the better place to do it.
     fn warm(&self, instruments: &[Instrument]);
+    /// Queue batches of closes on the window's loader, the same bargain as
+    /// [`Self::warm`] for the rows a batch can cover.
+    fn warm_closes(&self, batches: Vec<Vec<Listing>>);
     /// The window's symbol index, if it already names every listing.
     ///
     /// Same bargain as `warm`: the window has spent the milliseconds once, so
@@ -420,21 +423,48 @@ pub fn run(args: &[String], store: &Store, live: Option<&dyn Live>, caller: &dyn
 /// payload: the widget re-reads this every couple of minutes.
 const SPARK_POINTS: usize = 30;
 
-/// How stale a quote may be before a `--refresh` run goes and gets it.
+/// How long a row whose market is shut goes before a `--refresh` run fetches
+/// it anyway.
 ///
-/// The very number a chart in the window holds itself to at its slowest, and
-/// for the same reason — it is the worst delay the provider admits to. Taken
-/// from there rather than respelled here, because the bar widget and the
-/// window answering "how old is too old" differently would be a disagreement
-/// nobody could see and everybody would feel.
-const STALE_AFTER_SECONDS: i64 = omacharts_engine::refresh::CEILING_SECONDS;
+/// When a row is due is otherwise the window's own rule,
+/// [`omacharts_engine::refresh::due`]: once a quarter of an hour while its
+/// market trades, never while it is shut. Never is right for a chart on
+/// screen, which was fetched while the market was open, and wrong for a
+/// widget nobody ran since Thursday: on Saturday it would go on showing
+/// Thursday's close until Monday. Once a day is enough to catch that, and
+/// costs a weekend two requests.
+const CLOSED_REFRESH_SECONDS: i64 = 86_400;
 
-/// Most symbols one invocation will fetch.
+/// Most symbols one invocation will fetch bars for, one request each.
 ///
-/// The bar calls this on a timer, and a run that tries to refresh forty
-/// symbols would spend minutes being paced apart and overlap the next run.
-/// Whatever is stalest goes first, so a few runs cover everything.
+/// Only rows with no daily bars at all are fetched this way, or every row
+/// on a provider that cannot batch. The bar calls this on a timer, and a run
+/// that tried forty would spend minutes being paced apart and overlap the
+/// next run. Whatever is stalest goes first, so a few runs cover everything.
 const MAX_REFRESH: usize = 6;
+
+/// Most batches of closes one invocation will send. Sixty rows at Yahoo's
+/// twenty a request; a longer list takes its stalest first and the rest on
+/// the next run.
+const MAX_BATCHES: usize = 3;
+
+/// How far ahead of UTC a session's own day runs.
+///
+/// A daily bar is stamped at its session's open, and a few sessions open on
+/// their own date while it is still the evening before in UTC: FX at London
+/// midnight, 23:00 UTC in summer, Sydney at 23:00 and Wellington at 21:00.
+/// Everything else opens between midnight and 15:00 UTC. Three hours on
+/// puts every one of them on its own date.
+const SESSION_LEAD_SECONDS: i64 = 3 * 3_600;
+
+/// The day the session at `ts` belongs to, as days since the epoch.
+///
+/// What a daily stamp means, rather than the UTC date it happens to fall
+/// on: EURUSD's Friday is stamped Thursday 23:00 in summer and Friday 00:00
+/// in winter, and is Friday's either way.
+pub fn session_day(ts: i64) -> i64 {
+    (ts + SESSION_LEAD_SECONDS).div_euclid(86_400)
+}
 
 pub struct Quote {
     pub last: f64,
@@ -443,17 +473,49 @@ pub struct Quote {
     pub as_of: i64,
 }
 
-/// Read the cached daily bars for an instrument and work out its move.
+/// Read an instrument's move from the cache.
 pub fn quote(store: &Store, provider: &dyn Provider, instrument: &Instrument) -> Option<Quote> {
-    let key = cache_key(provider, instrument)?;
-    let bars = store.load_bars(&key, Timeframe::days(1));
-    let (previous, last) = (bars.get(bars.len().checked_sub(2)?)?, bars.last()?);
-    let change = last.close - previous.close;
+    quote_at(store, &cache_key(provider, instrument)?)
+}
+
+/// The move of the series cached under `key`: its latest close against the
+/// one before, from whichever of the two places a close is kept is newer.
+///
+/// The daily bars, which a chart keeps current, or the closes a batch
+/// fetched for the bar widget. Newer means the later session first, then the
+/// later fetch: a chart refreshed a minute after the widget's batch has the
+/// fresher close for the same day.
+pub fn quote_at(store: &Store, key: &str) -> Option<Quote> {
+    let daily = Timeframe::days(1);
+    let bars = store.load_bars(key, daily);
+    let from_bars = match bars.as_slice() {
+        [.., previous, last] => {
+            let fetched_at = store.coverage(key, daily).map_or(0, |c| c.fetched_at);
+            Some((last.ts, fetched_at, last.close, previous.close))
+        }
+        _ => None,
+    };
+    let from_closes = store.load_closes(key).map(|c| {
+        // A batch now and then comes back with a session missing, and its
+        // previous close is then two sessions old: the move shown would be
+        // yesterday's and today's together. When the bars hold a session in
+        // the gap, the latest of them is the previous close.
+        let day = session_day;
+        let previous = bars
+            .iter()
+            .rev()
+            .find(|bar| day(bar.ts) > day(c.previous_at) && day(bar.ts) < day(c.at))
+            .map_or(c.previous, |bar| bar.close);
+        (c.at, c.fetched_at, c.last, previous)
+    });
+    let newer = |(at, fetched_at, ..): &(i64, i64, f64, f64)| (session_day(*at), *fetched_at);
+    let (as_of, _, last, previous) = [from_bars, from_closes].into_iter().flatten().max_by_key(newer)?;
+    let change = last - previous;
     Some(Quote {
-        last: last.close,
+        last,
         change,
-        change_pct: if previous.close == 0.0 { 0.0 } else { change / previous.close * 100.0 },
-        as_of: last.ts,
+        change_pct: if previous == 0.0 { 0.0 } else { change / previous * 100.0 },
+        as_of,
     })
 }
 
@@ -461,28 +523,120 @@ pub fn cache_key(provider: &dyn Provider, instrument: &Instrument) -> Option<Str
     provider.symbol_for(instrument).map(|symbol| format!("{}:{symbol}", provider.id()))
 }
 
-/// The symbols whose daily bars are old enough to be worth fetching, stalest
-/// first.
-///
-/// Who acts on it depends on where we are running, which is the distinction
-/// [`Live::warm`] exists to make.
-fn stale_daily(store: &Store, provider: &dyn Provider, instruments: &[Instrument]) -> Vec<Instrument> {
-    let now = chrono::Utc::now().timestamp();
-    let daily = Timeframe::days(1);
-
-    let mut candidates: Vec<(i64, &Instrument)> = instruments
-        .iter()
-        .filter_map(|instrument| {
-            let key = cache_key(provider, instrument)?;
-            let fetched_at = store.coverage(&key, daily).map(|c| c.fetched_at).unwrap_or(0);
-            (now - fetched_at > STALE_AFTER_SECONDS).then_some((fetched_at, instrument))
-        })
-        .collect();
-    candidates.sort_by_key(|(fetched_at, _)| *fetched_at);
-    candidates.into_iter().map(|(_, instrument)| instrument.clone()).collect()
+/// What one refresh of the widget's rows asks for.
+#[derive(Debug, Default, PartialEq)]
+pub struct Refresh {
+    /// Rows to fetch daily bars for, one request each: those with none
+    /// cached, whose sparkline needs a history that closes alone cannot give,
+    /// and any row on a provider that cannot batch.
+    pub bars: Vec<Instrument>,
+    /// The rest, one request per batch, when any of them is due.
+    pub closes: Vec<Vec<Listing>>,
 }
 
-/// Fetch daily bars for the stalest symbols that need them, here and now.
+/// Whether a row with something cached is worth asking about again.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Due {
+    Now,
+    /// Not yet, but its market trades and it is over halfway there: worth
+    /// a place in a batch that is going anyway, see [`plan_refresh`].
+    Soon,
+    Later,
+}
+
+/// Is a row with something cached worth asking about again at `now`?
+fn row_due(provider: &dyn Provider, instrument: &Instrument, fetched_at: i64, now: i64) -> Due {
+    use omacharts_engine::refresh::{self, Held};
+    let timeframe = Timeframe::days(1);
+    let candidate = refresh::Candidate {
+        delivery: provider.delivery(),
+        visible: true,
+        at_latest: true,
+        timeframe,
+        instrument,
+        fetched_at: Some(fetched_at),
+    };
+    match refresh::due(&candidate, now) {
+        Ok(()) => Due::Now,
+        Err(Held::Closed) if now - fetched_at > CLOSED_REFRESH_SECONDS => Due::Now,
+        Err(Held::Fresh) if now - fetched_at >= refresh::period(timeframe) / 2 => Due::Soon,
+        Err(_) => Due::Later,
+    }
+}
+
+/// Decide what a refresh of `instruments` asks for at `now`.
+///
+/// Once any row that can be batched is due, the due rows go, and with them
+/// the rows that would fall due within the next half period: the request is
+/// one whether it names three symbols or twenty, and rows fetched together
+/// stay together, rather than each falling due on its own minute and going
+/// in a request of its own. A row whose market is shut is due only once a
+/// day, so a list of shares and one coin asks for the coin over the
+/// weekend, not for the shares beside it.
+///
+/// A row the batch left out last time it was asked has its bars fetched
+/// instead, as a chart's would be, and is tried in a batch again a day
+/// later. Without that it sits on the price it had, asked for again and
+/// again in a request that never answers for it.
+///
+/// Who sends it depends on where we are running, which is the distinction
+/// [`Live::warm`] exists to make.
+pub fn plan_refresh(
+    store: &Store,
+    provider: &dyn Provider,
+    instruments: &[Instrument],
+    now: i64,
+) -> Refresh {
+    let daily = Timeframe::days(1);
+    let batch = provider.max_batch();
+    let mut bars: Vec<(i64, &Instrument)> = Vec::new();
+    let mut batchable: Vec<(i64, Listing)> = Vec::new();
+    let mut any_due = false;
+    let mut seen = std::collections::HashSet::new();
+    for instrument in instruments {
+        let Some(symbol) = provider.symbol_for(instrument) else { continue };
+        let key = format!("{}:{symbol}", provider.id());
+        // Listed twice, in two sections or under two labels: asked for once.
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let Some(coverage) = store.coverage(&key, daily) else {
+            bars.push((0, instrument));
+            continue;
+        };
+        let asked = store.closes_fetched_at(&key);
+        let left_out = asked.is_some_and(|at| now - at < CLOSED_REFRESH_SECONDS)
+            && store.load_closes(&key).is_none();
+        let fetched_at =
+            if left_out { coverage.fetched_at } else { coverage.fetched_at.max(asked.unwrap_or(0)) };
+        let due = row_due(provider, instrument, fetched_at, now);
+        if batch == 0 || left_out {
+            if due == Due::Now {
+                bars.push((fetched_at, instrument));
+            }
+            continue;
+        }
+        any_due |= due == Due::Now;
+        if due != Due::Later {
+            batchable.push((fetched_at, Listing { key, symbol }));
+        }
+    }
+
+    bars.sort_by_key(|(fetched_at, _)| *fetched_at);
+    let mut plan = Refresh {
+        bars: bars.into_iter().take(MAX_REFRESH).map(|(_, i)| i.clone()).collect(),
+        closes: Vec::new(),
+    };
+    if any_due {
+        batchable.sort_by_key(|(fetched_at, _)| *fetched_at);
+        let listings: Vec<Listing> =
+            batchable.into_iter().take(batch * MAX_BATCHES).map(|(_, l)| l).collect();
+        plan.closes = listings.chunks(batch).map(<[Listing]>::to_vec).collect();
+    }
+    plan
+}
+
+/// Fetch what `plan` asks for, here and now.
 ///
 /// Only correct with no window open, where "here" is a short-lived process
 /// that exists to answer one question and has nothing to block. Inside the
@@ -492,16 +646,21 @@ fn stale_daily(store: &Store, provider: &dyn Provider, instruments: &[Instrument
 /// is the one place that paces requests. Speculative, so they go two seconds
 /// apart and are refused outright while the provider is throttling: a bar
 /// widget must never cost the app its rate limit.
-fn refresh(store: &Store, provider: &dyn Provider, instruments: &[Instrument]) {
+fn refresh(store: &Store, provider: &dyn Provider, plan: Refresh) {
     let (sender, receiver) = async_channel::unbounded();
     let loader = Loader::new(std::sync::Arc::from(crate::feeds::selected(store)), sender);
     let mut outstanding = 0;
-    let stale = stale_daily(store, provider, instruments);
-    for (rank, instrument) in stale.iter().take(MAX_REFRESH).enumerate() {
+    // The batches first: a request each for the whole list, against one each
+    // for the rows that need a history.
+    for listings in plan.closes {
+        loader.fetch_closes(listings, BACKFILL);
+        outstanding += 1;
+    }
+    for (rank, instrument) in plan.bars.iter().enumerate() {
         let Some(symbol) = provider.symbol_for(instrument) else { continue };
         let Some(key) = cache_key(provider, instrument) else { continue };
         let request = Request { key, symbol, timeframe: Timeframe::days(1), speculative: true };
-        loader.fetch(request, BACKFILL.saturating_add(rank as u32));
+        loader.fetch(request, BACKFILL.saturating_add(1 + rank as u32));
         outstanding += 1;
     }
     // The loader writes whatever arrives to the cache itself. All that is
@@ -525,14 +684,19 @@ pub fn watchlist_json(store: &Store, refresh_first: bool, live: Option<&dyn Live
             .flat_map(|section| section.entries.iter())
             .filter_map(|entry| index.find(&entry.symbol, entry.suffix.as_deref()).cloned())
             .collect();
+        let now = chrono::Utc::now().timestamp();
+        let plan = plan_refresh(store, provider.as_ref(), &instruments, now);
         match live {
             // Inside the window, on its main loop. Hand the work to the
             // loader thread and answer from the cache, which is all the
             // widget draws anyway: a quote that arrives on the next tick is
             // not worth six seconds of frozen application.
-            Some(live) => live.warm(&stale_daily(store, provider.as_ref(), &instruments)),
+            Some(live) => {
+                live.warm(&plan.bars);
+                live.warm_closes(plan.closes);
+            }
             // A process of its own, with no window and nothing to block.
-            None => refresh(store, provider.as_ref(), &instruments),
+            None => refresh(store, provider.as_ref(), plan),
         }
     }
 
@@ -637,16 +801,29 @@ fn entry_json(store: &Store, provider: &dyn Provider, instrument: &Instrument) -
         json_string(&instrument.name),
         json_string(instrument.kind.label()),
     );
+    let quote = quote(store, provider, instrument);
     if let Some(key) = cache_key(provider, instrument) {
         let bars = store.load_bars(&key, Timeframe::days(1));
-        let tail = &bars[bars.len().saturating_sub(SPARK_POINTS)..];
+        let mut closes: Vec<(i64, f64)> = bars.iter().map(|bar| (bar.ts, bar.close)).collect();
+        // The line ends where the price beside it does. A batch of closes is
+        // usually newer than the bars: its close replaces the day it shares
+        // with them, or follows them for a day they do not have yet.
+        if let Some(q) = &quote {
+            let day = session_day(q.as_of);
+            match closes.last_mut() {
+                Some(last) if session_day(last.0) == day => last.1 = q.last,
+                Some(last) if session_day(last.0) < day => closes.push((q.as_of, q.last)),
+                _ => {}
+            }
+        }
+        let tail = &closes[closes.len().saturating_sub(SPARK_POINTS)..];
         if tail.len() >= 2 {
             let points: Vec<String> =
-                tail.iter().map(|bar| format!("{:.6}", bar.close)).collect();
+                tail.iter().map(|(_, close)| format!("{close:.6}")).collect();
             fields.push_str(&format!(",\"spark\":[{}]", points.join(",")));
         }
     }
-    match quote(store, provider, instrument) {
+    match quote {
         // A quote we do not have is absent rather than zero. Zero is a price.
         Some(q) => fields.push_str(&format!(
             ",\"last\":{:.6},\"change\":{:.6},\"changePct\":{:.4},\"asOf\":{}",
@@ -723,6 +900,10 @@ impl Live for Rc<crate::ui::Window> {
 
     fn warm(&self, instruments: &[Instrument]) {
         crate::ui::Window::warm(self, instruments);
+    }
+
+    fn warm_closes(&self, batches: Vec<Vec<Listing>>) {
+        crate::ui::Window::warm_closes(self, batches);
     }
 
     fn symbols(&self) -> Option<Rc<SearchIndex>> {
@@ -866,6 +1047,7 @@ mod tests {
         fn reload_watchlists(&self) {}
         fn adopt_theming(&self) {}
         fn warm(&self, _instruments: &[Instrument]) {}
+        fn warm_closes(&self, _batches: Vec<Vec<Listing>>) {}
         fn symbols(&self) -> Option<Rc<SearchIndex>> {
             None
         }
@@ -1142,6 +1324,181 @@ mod tests {
         assert_eq!(parsed["last"].as_f64().unwrap(), 110.0);
         assert_eq!(parsed["change"].as_f64().unwrap(), 10.0);
         assert!((parsed["changePct"].as_f64().unwrap() - 10.0).abs() < 1e-6);
+    }
+
+    // -- refreshing the widget's rows ---------------------------------------
+
+    /// Wednesday 2026-10-14, 11:00 in New York: US shares trading.
+    const OPEN: i64 = 1_791_990_000;
+    /// Saturday 2026-10-17, noon in New York: nothing but crypto trading.
+    const SATURDAY: i64 = 1_792_252_800;
+
+    fn listed(symbol: &str) -> Instrument {
+        let index = SearchIndex::new(omacharts_engine::symbols::seed());
+        let mut instrument = index.find("AAPL", None).unwrap().clone();
+        instrument.symbol = symbol.to_string();
+        instrument
+    }
+
+    /// `symbol` with two daily bars cached, last fetched at `fetched_at`.
+    fn cached(store: &Store, provider: &dyn Provider, symbol: &str, fetched_at: i64) -> Instrument {
+        let instrument = listed(symbol);
+        let key = cache_key(provider, &instrument).unwrap();
+        let bar = |ts| omacharts_engine::Bar { ts, open: 1.0, high: 1.0, low: 1.0, close: 1.0, volume: 1.0 };
+        store.write_bars(&key, Timeframe::days(1), &[bar(86_400), bar(172_800)]);
+        store.backdate(&key, Timeframe::days(1), fetched_at);
+        instrument
+    }
+
+    fn batched(plan: &Refresh) -> Vec<Vec<&str>> {
+        plan.closes.iter().map(|b| b.iter().map(|l| l.symbol.as_str()).collect()).collect()
+    }
+
+    /// One row due brings the rows over halfway to due with it, in the one
+    /// request it costs anyway, so that they fall due together from then on.
+    /// A row fetched a minute ago stays out, whether by its bars or a batch.
+    #[test]
+    fn one_stale_row_brings_the_rows_nearly_due_in_one_request() {
+        let store = Store::memory().unwrap();
+        let provider = Yahoo::new();
+        let rows = [
+            cached(&store, &provider, "FRESH", OPEN - 60),
+            cached(&store, &provider, "BATCHED", OPEN - 3_600),
+            cached(&store, &provider, "HALFWAY", OPEN - 600),
+            cached(&store, &provider, "STALE", OPEN - 3_600),
+        ];
+        let closes = omacharts_engine::Closes {
+            symbol: "BATCHED".into(), last: 2.0, previous: 1.0, at: OPEN, previous_at: OPEN - 86_400,
+        };
+        store.write_closes("yahoo:BATCHED", &closes);
+        store.backdate_closes("yahoo:BATCHED", OPEN - 60);
+        let plan = plan_refresh(&store, &provider, &rows, OPEN);
+        assert!(plan.bars.is_empty());
+        assert_eq!(batched(&plan), vec![vec!["STALE", "HALFWAY"]], "stalest first, one request");
+    }
+
+    /// Yahoo takes twenty to a request, and a run sends at most three.
+    #[test]
+    fn a_long_list_is_cut_into_batches_the_provider_takes() {
+        let store = Store::memory().unwrap();
+        let provider = Yahoo::new();
+        let rows: Vec<Instrument> =
+            (0..70).map(|i| cached(&store, &provider, &format!("S{i:02}"), OPEN - 3_600 - i)).collect();
+        let plan = plan_refresh(&store, &provider, &rows, OPEN);
+        let sizes: Vec<usize> = plan.closes.iter().map(Vec::len).collect();
+        assert_eq!(sizes, vec![20, 20, 20]);
+        assert_eq!(plan.closes[0][0].symbol, "S69", "the stalest go first; the rest next run");
+    }
+
+    /// Saturday: a shut market is asked for nothing while its close is
+    /// recent and once a day otherwise, so a widget left off since Thursday
+    /// does not show Thursday all weekend. A coin trades through it, and
+    /// brings no shut row with it that is not due.
+    #[test]
+    fn a_shut_market_is_asked_once_a_day_at_most() {
+        let store = Store::memory().unwrap();
+        let provider = Yahoo::new();
+        let friday = cached(&store, &provider, "FRI", SATURDAY - 3 * 3_600);
+        let thursday = cached(&store, &provider, "THU", SATURDAY - 2 * 86_400);
+        let coin = Instrument { kind: omacharts_engine::InstrumentKind::Crypto, ..listed("BTC") };
+        let key = cache_key(&provider, &coin).unwrap();
+        let bar = |ts| omacharts_engine::Bar { ts, open: 1.0, high: 1.0, low: 1.0, close: 1.0, volume: 1.0 };
+        store.write_bars(&key, Timeframe::days(1), &[bar(86_400), bar(172_800)]);
+        store.backdate(&key, Timeframe::days(1), SATURDAY - 3_600);
+
+        let plan = plan_refresh(&store, &provider, &[friday, thursday, coin], SATURDAY);
+        assert_eq!(batched(&plan), vec![vec!["THU", "BTC-USD"]]);
+    }
+
+    /// A row the batch left out goes to its bars, at the cadence a chart
+    /// keeps, rather than sitting on the price it had for good; a day later
+    /// the batch gets another try.
+    #[test]
+    fn a_row_the_batch_left_out_gets_its_bars() {
+        let store = Store::memory().unwrap();
+        let provider = Yahoo::new();
+        let row = cached(&store, &provider, "GONE", OPEN - 3_600);
+        let key = cache_key(&provider, &row).unwrap();
+        store.mark_closes_asked(&key);
+        store.backdate_closes(&key, OPEN - 60);
+        let plan = plan_refresh(&store, &provider, std::slice::from_ref(&row), OPEN);
+        assert_eq!(plan.bars.len(), 1, "due by its bars, fetched an hour ago");
+        assert!(plan.closes.is_empty());
+
+        store.backdate_closes(&key, OPEN - 2 * 86_400);
+        let plan = plan_refresh(&store, &provider, &[row], OPEN);
+        assert_eq!(batched(&plan), vec![vec!["GONE"]]);
+    }
+
+    /// EURUSD on Thursday 2026-10-15 at 10:57 UTC. The bars stamp its days
+    /// at London midnight, 23:00 UTC the evening before, today's included;
+    /// the batch's closes, taken from Yahoo's own answer, must land on the
+    /// same day rather than a day after it, or the move is measured against
+    /// today's own price and the line draws today twice.
+    #[test]
+    fn an_fx_batch_and_its_bars_agree_on_the_day() {
+        let store = Store::memory().unwrap();
+        let key = "yahoo:EURUSD=X";
+        let bar = |ts, close| omacharts_engine::Bar { ts, open: close, high: close, low: close, close, volume: 0.0 };
+        let (tuesday, wednesday, thursday) = (1_791_846_000, 1_791_932_400, 1_792_018_800);
+        store.write_bars(key, Timeframe::days(1), &[bar(tuesday, 1.116), bar(wednesday, 1.1204), bar(thursday, 1.1210)]);
+        store.backdate(key, Timeframe::days(1), thursday + 3_600);
+        let body = serde_json::json!({ "EURUSD=X": { "symbol": "EURUSD=X",
+            "timestamp": [tuesday, wednesday, 1_792_061_850],
+            "close": [1.116, 1.1204, 1.1217] } });
+        let closes = omacharts_engine::providers::yahoo::parse_spark(&body).unwrap();
+        store.write_closes(key, &closes[0]);
+
+        let q = quote_at(&store, key).unwrap();
+        assert_eq!(q.last, 1.1217);
+        assert!((q.change - 0.0013).abs() < 1e-9, "against Wednesday, not today: {}", q.change);
+        assert_eq!(q.as_of, thursday);
+
+        let eurusd = Instrument { kind: omacharts_engine::InstrumentKind::Fx, ..listed("EURUSD") };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&entry_json(&store, &Yahoo::new(), &eurusd)).unwrap();
+        let spark: Vec<f64> =
+            parsed["spark"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        assert_eq!(spark, vec![1.116, 1.1204, 1.1217], "today once, at the batch's price");
+
+        // A chart fetched after the batch has the fresher price for the day.
+        let fresher = [bar(tuesday, 1.116), bar(wednesday, 1.1204), bar(thursday, 1.1220)];
+        store.write_bars(key, Timeframe::days(1), &fresher);
+        store.backdate(key, Timeframe::days(1), thursday + 7_200);
+        store.backdate_closes(key, thursday + 60);
+        assert_eq!(quote_at(&store, key).unwrap().last, 1.1220);
+    }
+
+    /// FX's session opens at London midnight: 23:00 UTC in summer, 00:00 in
+    /// winter. A stamp from either side of the clock change is the same
+    /// session, where its UTC date would put the two a day apart.
+    #[test]
+    fn a_session_keeps_its_day_across_the_clock_change() {
+        let (thursday_summer, thursday_winter) = (1_792_018_800, 1_792_022_400);
+        assert_eq!(session_day(thursday_summer), session_day(thursday_winter));
+        assert_ne!(thursday_summer.div_euclid(86_400), thursday_winter.div_euclid(86_400));
+    }
+
+    /// A batch that skipped a session: the bars' close in the gap is the
+    /// previous one, not the batch's, which is two sessions old.
+    #[test]
+    fn a_batch_missing_a_session_takes_the_previous_close_from_the_bars() {
+        let store = Store::memory().unwrap();
+        let key = "yahoo:BTC-USD";
+        let bar = |day: i64, close| omacharts_engine::Bar { ts: day * 86_400, open: close, high: close, low: close, close, volume: 1.0 };
+        store.write_bars(key, Timeframe::days(1), &[bar(1, 100.0), bar(2, 110.0)]);
+        store.write_closes(key, &omacharts_engine::Closes {
+            symbol: "BTC-USD".into(), last: 111.0, previous: 100.0, at: 3 * 86_400, previous_at: 86_400,
+        });
+        let q = quote_at(&store, key).unwrap();
+        assert_eq!((q.last, q.change), (111.0, 1.0), "against day 2's close, not day 1's");
+
+        // With no gap the batch's own previous close stands, though the bars
+        // were fetched mid-session and hold an earlier price for that day.
+        store.write_closes(key, &omacharts_engine::Closes {
+            symbol: "BTC-USD".into(), last: 111.0, previous: 109.0, at: 3 * 86_400, previous_at: 2 * 86_400,
+        });
+        assert_eq!(quote_at(&store, key).unwrap().change, 2.0);
     }
 
     #[test]
