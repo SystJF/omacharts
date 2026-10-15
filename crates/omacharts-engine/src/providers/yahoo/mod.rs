@@ -238,16 +238,7 @@ impl Yahoo {
 
         let mut response = match request.call() {
             Ok(response) => response,
-            Err(ureq::Error::StatusCode(429)) => return Err(ProviderError::RateLimited),
-            Err(ureq::Error::StatusCode(404)) => return Err(ProviderError::NotFound),
-            // Yahoo's edge returns these transiently; the caller decides
-            // whether to try again.
-            Err(ureq::Error::StatusCode(code)) if (500..600).contains(&code) => {
-                return Err(ProviderError::Network(format!("HTTP {code}")))
-            }
-            Err(ureq::Error::StatusCode(code)) => {
-                return Err(ProviderError::Malformed(format!("HTTP {code}")))
-            }
+            Err(ureq::Error::StatusCode(code)) => return Err(refusal(code)),
             Err(error) => return Err(could_not_reach(error)),
         };
 
@@ -255,6 +246,32 @@ impl Yahoo {
             .body_mut()
             .read_json()
             .map_err(|e| ProviderError::Malformed(e.to_string()))
+    }
+}
+
+/// What an HTTP status other than success means for the next request.
+///
+/// A 400 or a 422 is an answer about the request itself: a 422 is how Yahoo
+/// says a window is outside what it serves. Asking again half a second later
+/// gets the same one at the price of another request, so it is asked once.
+/// Both used to read as a garbled reply and be tried three times.
+///
+/// A 403 is a refusal of the client rather than the request, and Yahoo
+/// sends them alongside its 429s: it turns some user agents and TLS
+/// fingerprints away regardless of how often they ask. So it starts the
+/// same cooldown as a 429 rather than being tried again at once.
+///
+/// A 5xx, a 408 and a 425 are transient: the edge, a request that took too
+/// long, a connection that was early. Those keep their retries. Anything
+/// else Yahoo has no documented reason to send, and reads as it always has,
+/// as a reply nobody expected.
+fn refusal(code: u16) -> ProviderError {
+    match code {
+        429 | 403 => ProviderError::RateLimited,
+        404 => ProviderError::NotFound,
+        400 | 422 => ProviderError::Unsupported(format!("HTTP {code}")),
+        408 | 425 | 500..=599 => ProviderError::Network(format!("HTTP {code}")),
+        _ => ProviderError::Malformed(format!("HTTP {code}")),
     }
 }
 
@@ -892,6 +909,26 @@ mod tests {
             ProviderError::Offline("no route".into()),
         ] {
             assert_eq!(y.retry_after(&error, 0), None, "{error}");
+        }
+    }
+
+    /// Each status gets the reading the next request needs: a 400 or 422 is
+    /// an answer and asked once, a 403 sits out the cooldown like a 429, only
+    /// the transient ones are tried again, and the rest read as before.
+    #[test]
+    fn each_status_is_read_for_what_it_means_next() {
+        for code in [400, 422] {
+            assert!(matches!(refusal(code), ProviderError::Unsupported(_)), "{code}");
+        }
+        for code in [403, 429] {
+            assert!(matches!(refusal(code), ProviderError::RateLimited), "{code}");
+        }
+        assert!(matches!(refusal(404), ProviderError::NotFound));
+        for code in [408, 425, 500, 503] {
+            assert!(matches!(refusal(code), ProviderError::Network(_)), "{code}");
+        }
+        for code in [401, 410, 451] {
+            assert!(matches!(refusal(code), ProviderError::Malformed(_)), "{code}");
         }
     }
 
