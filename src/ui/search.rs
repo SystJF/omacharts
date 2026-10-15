@@ -48,6 +48,11 @@ impl SymbolSearch {
         let entry = gtk::SearchEntry::new();
         entry.set_placeholder_text(Some("Symbol or name"));
         entry.set_hexpand(true);
+        // Search on every keystroke. The entry holds a change back for 150ms
+        // by default, so "BNO" and Enter in quick succession acted on the
+        // list for "B". The search is a lookup in memory, so there is nothing
+        // to wait for.
+        entry.set_search_delay(0);
 
         let list = gtk::ListBox::new();
         list.set_selection_mode(gtk::SelectionMode::Browse);
