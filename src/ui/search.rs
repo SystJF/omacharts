@@ -175,6 +175,35 @@ impl SymbolSearch {
         });
         self.entry.add_controller(keys);
 
+        // Typing that outruns the dialog opening. The box has the keyboard
+        // from the start, but the dialog only shows its content a couple of
+        // frames after it is presented, and until then GTK drops every key
+        // on the way down: a widget that is not realized yet counts as
+        // having handled it. So "BNO" typed fast searched for "B" or "BO".
+        // Caught on the way down, before it reaches what is not there yet.
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let entry = self.entry.clone();
+        keys.connect_key_pressed(move |keys, key, _, _| {
+            let Some(text) = entry.delegate().and_then(|d| d.downcast::<gtk::Text>().ok()) else {
+                return glib::Propagation::Proceed;
+            };
+            if text.is_mapped() {
+                return glib::Propagation::Proceed;
+            }
+            // Enter is a key binding, and those only run on a widget that is
+            // on screen, so it is said directly instead.
+            if dialogs::is_enter(key) {
+                entry.emit_activate();
+                return glib::Propagation::Stop;
+            }
+            match keys.forward(&text) {
+                true => glib::Propagation::Stop,
+                false => glib::Propagation::Proceed,
+            }
+        });
+        self.dialog.add_controller(keys);
+
         let shown = self.shown.clone();
         let dialog = self.dialog.clone();
         let handler = self.handler.clone();
