@@ -397,6 +397,89 @@ pub fn opens_are_degenerate(bars: &[Bar]) -> bool {
     doji as f64 / measurable.len() as f64 > DEGENERATE
 }
 
+/// How far outside its neighbours a print that never traded may sit and still
+/// be believed. Thin futures settle 1–3% outside the days around them with
+/// no volume, and those are real; the phantoms seen were 7–15% off.
+const PHANTOM_GAP: f64 = 0.05;
+
+/// And how many steps of the grain its prices are quoted in. On a penny
+/// stock 5% is a tick or two, which is an ordinary day's move, not a print
+/// nobody made.
+const PHANTOM_TICKS: f64 = 3.0;
+
+/// Drop prints that never traded and sit well outside the market around them.
+///
+/// Yahoo now and then serves a bar with no volume and one price for all four,
+/// far from the days either side: EXUS.DE on 2025-10-24 is 39.63 flat between
+/// two days that traded around 34.1. Drawn, it is a spike on the daily chart
+/// and the high and the close of the week folded from it.
+///
+/// Applied as a series is read, never as it is stored: the cache keeps what
+/// the provider said, so a bar is judged once both its neighbours are there,
+/// and a change to the rule reaches every series already cached.
+///
+/// A flat bar with no volume is also what a quiet day looks like, every day
+/// of a fund priced once at its NAV, a thin future's settlement, and the one
+/// print a thin listing gets on a crash day. Those stay: a quiet day carries
+/// the last close, a fund's neighbours have no volume either, a settlement
+/// lands within a few percent of the days around it, and a crash is still
+/// down the next day. Only a new price more than [`PHANTOM_GAP`] and
+/// [`PHANTOM_TICKS`] outside both traded neighbours goes, and only when the
+/// next day is back: nearer the day before than half the way to the print.
+///
+/// What is judged follows from that and nothing else: any provider and any
+/// resolution, but only a bar between two that traded. A series that never
+/// reports volume — an index, a currency pair, a ratio, a published series —
+/// is never judged. The last bar is not either, having nothing after it, and
+/// two such bars in a row are both kept, since neither has traded neighbours,
+/// so dropping one never changes whether another is a phantom.
+pub fn drop_phantoms(bars: &mut Vec<Bar>) {
+    let phantoms: Vec<usize> = bars
+        .windows(3)
+        .enumerate()
+        .filter(|(_, w)| is_phantom(&w[0], &w[1], &w[2]))
+        .map(|(i, _)| i + 1)
+        .collect();
+    for i in phantoms.into_iter().rev() {
+        bars.remove(i);
+    }
+}
+
+/// The grain `bars` are quoted in: the coarsest power of ten every price of
+/// theirs is a whole number of, to within the rounding a price stored as a
+/// 32-bit float carries. 0.01 for a penny stock quoted in cents; much finer
+/// for a split-adjusted price, which is a quotient and has no grain at all.
+fn grain(bars: [&Bar; 3]) -> f64 {
+    let prices = || bars.into_iter().flat_map(|b| [b.open, b.high, b.low, b.close]);
+    let Some(lowest) = prices().filter(|p| *p > 0.0).min_by(f64::total_cmp) else {
+        return 0.0;
+    };
+    let top = lowest.log10().floor() as i32;
+    (top - 8..=top)
+        .rev()
+        .map(|power| 10f64.powi(power))
+        .find(|step| prices().all(|p| ((p / step) - (p / step).round()).abs() < 1e-3))
+        .unwrap_or(0.0)
+}
+
+fn is_phantom(prev: &Bar, bar: &Bar, next: &Bar) -> bool {
+    let flat = bar.open == bar.close && bar.high == bar.close && bar.low == bar.close;
+    let traded = prev.volume > 0.0 && next.volume > 0.0;
+    let carried = bar.close == prev.close;
+    if bar.volume != 0.0 || !flat || !traded || carried || bar.close <= 0.0 {
+        return false;
+    }
+    let (high, low) = (prev.high.max(next.high), prev.low.min(next.low));
+    let (gap, edge) = match bar.close {
+        c if c > high => (c - high, high),
+        c if c < low => (low - c, low),
+        _ => return false,
+    };
+    let far = gap > PHANTOM_GAP * edge && (gap / grain([prev, bar, next])).round() >= PHANTOM_TICKS;
+    let back = (next.close - prev.close).abs() < 0.5 * (bar.close - prev.close).abs();
+    far && back
+}
+
 /// Fold `src` into `target`.
 ///
 /// `origin` shifts the bucket boundaries, in seconds. Futures sessions open at
@@ -491,6 +574,74 @@ fn week_start(ts: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_crash_print_and_a_tick_or_two_on_a_penny_are_kept() {
+        let at = |ts, o, h, l, c, v| Bar { ts, open: o, high: h, low: l, close: c, volume: v };
+        let kept = |mut bars: Vec<Bar>| {
+            let n = bars.len();
+            drop_phantoms(&mut bars);
+            bars.len() == n
+        };
+        // 4BRZ.SW on 2020-03-12, as Yahoo serves it: the day's one print was
+        // a quarter down, and the next day was still most of the way there.
+        assert!(kept(vec![
+            at(1, 29.3, 29.3, 29.3, 29.3, 65.0),
+            at(2, 22.135, 22.135, 22.135, 22.135, 0.0),
+            at(3, 24.89, 24.89, 24.89, 24.89, 58.0),
+        ]));
+        // HME.V on 2015-08-24: 0.14 under a low of 0.15 is 7%, and one tick.
+        assert!(kept(vec![
+            at(1, 0.17, 0.17, 0.15, 0.17, 171_700.0),
+            at(2, 0.14, 0.14, 0.14, 0.14, 0.0),
+            at(3, 0.16, 0.16, 0.16, 0.16, 149_500.0),
+        ]));
+
+        // 1127.HK on 2021-07-19: five ticks over two days that traded at
+        // 0.85, and back the next. Nobody paid 0.91.
+        let mut bars = vec![
+            at(1, 0.85, 0.86, 0.85, 0.86, 36_000.0),
+            at(2, 0.91, 0.91, 0.91, 0.91, 0.0),
+            at(3, 0.85, 0.85, 0.85, 0.85, 16_000.0),
+        ];
+        drop_phantoms(&mut bars);
+        assert_eq!(bars.len(), 2);
+    }
+
+    #[test]
+    fn a_flat_print_that_never_traded_is_dropped() {
+        let bar = |ts, low: f64, high: f64, volume| Bar { ts, open: low, high, low, close: high, volume };
+        // EXUS.DE around 2025-10-24, as Yahoo serves it.
+        let mut bars = vec![
+            bar(1, 34.035, 34.155, 79_416.0),
+            bar(2, 39.625, 39.625, 0.0),
+            bar(3, 34.29, 34.385, 124_400.0),
+        ];
+        drop_phantoms(&mut bars);
+        assert_eq!(bars.iter().map(|b| b.ts).collect::<Vec<_>>(), [1, 3]);
+    }
+
+    #[test]
+    fn quiet_days_funds_settlements_and_the_last_bar_are_kept() {
+        let bar = |ts, price, volume| Bar { ts, open: price, high: price + 1.0, low: price - 1.0, close: price, volume };
+        let flat = |ts, price| Bar { ts, open: price, high: price, low: price, close: price, volume: 0.0 };
+        let kept = |mut bars: Vec<Bar>| {
+            let n = bars.len();
+            drop_phantoms(&mut bars);
+            bars.len() == n
+        };
+
+        // Nothing traded, so the last price is carried: inside the range.
+        assert!(kept(vec![bar(1, 100.0, 10.0), flat(2, 100.0), bar(3, 100.5, 10.0)]));
+        // A fund priced once a day at its NAV: no neighbour traded either.
+        assert!(kept(vec![flat(1, 100.0), flat(2, 103.0), flat(3, 100.0)]));
+        // A thin future settling a little outside the days around it.
+        assert!(kept(vec![bar(1, 100.0, 10.0), flat(2, 103.0), bar(3, 100.0, 10.0)]));
+        // The last close carried, however far the next day gaps from it.
+        assert!(kept(vec![bar(1, 100.0, 10.0), flat(2, 100.0), bar(3, 80.0, 10.0)]));
+        // The newest bar has nothing after it to disagree with.
+        assert!(kept(vec![bar(1, 100.0, 10.0), bar(2, 100.0, 10.0), flat(3, 120.0)]));
+    }
 
     #[test]
     fn prices_mark_their_thousands() {

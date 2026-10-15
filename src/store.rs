@@ -476,7 +476,17 @@ impl Store {
         let _ = self.conn.execute("UPDATE quotes SET fetched_at = ?2 WHERE key = ?1", params![key, at]);
     }
 
+    /// The series as it should be drawn: what is stored, less the prints that
+    /// never traded ([`omacharts_engine::drop_phantoms`]). Those stay in the
+    /// cache; they are only kept off the chart.
     pub fn load_bars(&self, key: &str, timeframe: Timeframe) -> Vec<Bar> {
+        let mut bars = self.load_stored_bars(key, timeframe);
+        omacharts_engine::drop_phantoms(&mut bars);
+        bars
+    }
+
+    /// The series exactly as the provider gave it.
+    fn load_stored_bars(&self, key: &str, timeframe: Timeframe) -> Vec<Bar> {
         let row: Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> = self
             .conn
             .query_row(
@@ -517,10 +527,12 @@ impl Store {
     ///
     /// Completed bars are immutable, but the last bar we stored may have been
     /// forming when we saw it, so a bar arriving with a timestamp we already
-    /// hold always wins. Returns the merged series.
+    /// hold always wins. Returns the merged series as [`Self::load_bars`]
+    /// reads it; what is written is everything, phantoms included.
     pub fn merge_bars(&self, key: &str, timeframe: Timeframe, fresh: &[Bar]) -> Vec<Bar> {
-        let mut bars = self.load_bars(key, timeframe);
+        let mut bars = self.load_stored_bars(key, timeframe);
         if fresh.is_empty() {
+            omacharts_engine::drop_phantoms(&mut bars);
             return bars;
         }
         if bars.is_empty() {
@@ -534,6 +546,7 @@ impl Store {
             }
         }
         self.write_bars(key, timeframe, &bars);
+        omacharts_engine::drop_phantoms(&mut bars);
         bars
     }
 
@@ -1318,6 +1331,25 @@ mod tests {
 
         let coverage = store.coverage("yahoo:ES=F", Timeframe::days(1)).unwrap();
         assert_eq!((coverage.first_ts, coverage.last_ts, coverage.count), (100, 300, 3));
+    }
+
+    #[test]
+    fn a_print_that_never_traded_is_cached_but_not_read() {
+        let store = Store::memory().unwrap();
+        let phantom = Bar { ts: 200, open: 40.0, high: 40.0, low: 40.0, close: 40.0, volume: 0.0 };
+        store.write_bars("k", Timeframe::days(1), &[bar(100, 34.0), phantom]);
+
+        // The newest bar has nothing after it yet, so it is drawn.
+        assert_eq!(store.load_bars("k", Timeframe::days(1)).len(), 2);
+
+        // The next day arrives in a fetch that never saw the phantom: judged
+        // now, against the whole series, and kept off what is read.
+        let merged = store.merge_bars("k", Timeframe::days(1), &[bar(300, 34.2)]);
+        assert_eq!(merged.iter().map(|b| b.ts).collect::<Vec<_>>(), [100, 300]);
+        assert_eq!(store.load_bars("k", Timeframe::days(1)), merged);
+
+        // The cache still holds what the provider said.
+        assert_eq!(store.coverage("k", Timeframe::days(1)).map(|c| c.count), Some(3));
     }
 
     #[test]
