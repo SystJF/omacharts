@@ -443,9 +443,10 @@ const CLOSED_REFRESH_SECONDS: i64 = 86_400;
 /// next run. Whatever is stalest goes first, so a few runs cover everything.
 const MAX_REFRESH: usize = 6;
 
-/// Most batches of closes one invocation will send. Sixty rows at Yahoo's
+/// Most batches of closes one widget run will send. Sixty rows at Yahoo's
 /// twenty a request; a longer list takes its stalest first and the rest on
-/// the next run.
+/// the next run. A run is a process of its own, which has to be done before
+/// the next one starts.
 const MAX_BATCHES: usize = 3;
 
 /// How far ahead of UTC a session's own day runs.
@@ -579,6 +580,11 @@ fn row_due(provider: &dyn Provider, instrument: &Instrument, fetched_at: i64, no
 /// later. Without that it sits on the price it had, asked for again and
 /// again in a request that never answers for it.
 ///
+/// At most `max_batches` batches, stalest rows first. A list longer than
+/// that is split across runs, and the split repeats every cycle: the rows
+/// left over fall due a run after the rest, too late to join their batch.
+/// So the cap is for a caller that must be quick, not a budget.
+///
 /// Who sends it depends on where we are running, which is the distinction
 /// [`Live::warm`] exists to make.
 pub fn plan_refresh(
@@ -586,6 +592,7 @@ pub fn plan_refresh(
     provider: &dyn Provider,
     instruments: &[Instrument],
     now: i64,
+    max_batches: usize,
 ) -> Refresh {
     let daily = Timeframe::days(1);
     let batch = provider.max_batch();
@@ -630,7 +637,7 @@ pub fn plan_refresh(
     if any_due {
         batchable.sort_by_key(|(fetched_at, _)| *fetched_at);
         let listings: Vec<Listing> =
-            batchable.into_iter().take(batch * MAX_BATCHES).map(|(_, l)| l).collect();
+            batchable.into_iter().take(batch.saturating_mul(max_batches)).map(|(_, l)| l).collect();
         plan.closes = listings.chunks(batch).map(<[Listing]>::to_vec).collect();
     }
     plan
@@ -685,7 +692,7 @@ pub fn watchlist_json(store: &Store, refresh_first: bool, live: Option<&dyn Live
             .filter_map(|entry| index.find(&entry.symbol, entry.suffix.as_deref()).cloned())
             .collect();
         let now = chrono::Utc::now().timestamp();
-        let plan = plan_refresh(store, provider.as_ref(), &instruments, now);
+        let plan = plan_refresh(store, provider.as_ref(), &instruments, now, MAX_BATCHES);
         match live {
             // Inside the window, on its main loop. Hand the work to the
             // loader thread and answer from the cache, which is all the
@@ -1372,7 +1379,7 @@ mod tests {
         };
         store.write_closes("yahoo:BATCHED", &closes);
         store.backdate_closes("yahoo:BATCHED", OPEN - 60);
-        let plan = plan_refresh(&store, &provider, &rows, OPEN);
+        let plan = plan_refresh(&store, &provider, &rows, OPEN, MAX_BATCHES);
         assert!(plan.bars.is_empty());
         assert_eq!(batched(&plan), vec![vec!["STALE", "HALFWAY"]], "stalest first, one request");
     }
@@ -1384,7 +1391,7 @@ mod tests {
         let provider = Yahoo::new();
         let rows: Vec<Instrument> =
             (0..70).map(|i| cached(&store, &provider, &format!("S{i:02}"), OPEN - 3_600 - i)).collect();
-        let plan = plan_refresh(&store, &provider, &rows, OPEN);
+        let plan = plan_refresh(&store, &provider, &rows, OPEN, MAX_BATCHES);
         let sizes: Vec<usize> = plan.closes.iter().map(Vec::len).collect();
         assert_eq!(sizes, vec![20, 20, 20]);
         assert_eq!(plan.closes[0][0].symbol, "S69", "the stalest go first; the rest next run");
@@ -1406,7 +1413,7 @@ mod tests {
         store.write_bars(&key, Timeframe::days(1), &[bar(86_400), bar(172_800)]);
         store.backdate(&key, Timeframe::days(1), SATURDAY - 3_600);
 
-        let plan = plan_refresh(&store, &provider, &[friday, thursday, coin], SATURDAY);
+        let plan = plan_refresh(&store, &provider, &[friday, thursday, coin], SATURDAY, MAX_BATCHES);
         assert_eq!(batched(&plan), vec![vec!["THU", "BTC-USD"]]);
     }
 
@@ -1421,12 +1428,12 @@ mod tests {
         let key = cache_key(&provider, &row).unwrap();
         store.mark_closes_asked(&key);
         store.backdate_closes(&key, OPEN - 60);
-        let plan = plan_refresh(&store, &provider, std::slice::from_ref(&row), OPEN);
+        let plan = plan_refresh(&store, &provider, std::slice::from_ref(&row), OPEN, MAX_BATCHES);
         assert_eq!(plan.bars.len(), 1, "due by its bars, fetched an hour ago");
         assert!(plan.closes.is_empty());
 
         store.backdate_closes(&key, OPEN - 2 * 86_400);
-        let plan = plan_refresh(&store, &provider, &[row], OPEN);
+        let plan = plan_refresh(&store, &provider, &[row], OPEN, MAX_BATCHES);
         assert_eq!(batched(&plan), vec![vec!["GONE"]]);
     }
 

@@ -50,6 +50,12 @@ use gtk::gio;
 /// cost of the `coverage` queries it takes to find out there is nothing to do.
 const BACKFILL_POLL_SECONDS: u32 = 60;
 
+/// Most batches of closes one rail refresh sends: two hundred rows at
+/// Yahoo's twenty a request. Not a budget — the loader paces them like any
+/// other work nobody is waiting on — but a list longer than this is split,
+/// and a split list keeps falling due in halves a minute apart.
+const RAIL_MAX_BATCHES: usize = 10;
+
 /// How often we ask which charts on screen have gone stale.
 ///
 /// Not the refresh period — that belongs to each chart and comes from its
@@ -77,7 +83,9 @@ fn wants_refresh_timer(delivery: Delivery) -> bool {
 /// delivers and whether the cache already holds any?
 ///
 /// On a polled feed, always: "stale" is a thing a polled feed has, and the
-/// bar widget's refresh is how a row keeps up. On a streamed feed, only a
+/// rail's own refresh and the bar widget's are how a row keeps up — whether
+/// it is due is theirs to decide, see [`crate::cli::plan_refresh`]. On a
+/// streamed feed, only a
 /// row with nothing cached at all, once — the stream keeps the charted
 /// symbols current, and a row that is not charted keeps the quote it was
 /// first fetched with. Fetching it again on the widget's timer would be
@@ -4603,7 +4611,10 @@ impl Window {
                         {
                             rail.refresh_quotes();
                         }
-                        if failure == Some(FetchFailure::RateLimited) {
+                        // Any failure, not only a refusal: a batch that came
+                        // back with nothing leaves every row in it due, and
+                        // the next tick would send it again a minute later.
+                        if failure.is_some() {
                             this.pause_backfill();
                         }
                     }
@@ -5413,22 +5424,30 @@ impl Window {
         });
     }
 
-    /// Ask for daily bars for the rows the rail cannot price yet.
+    /// Ask for what the rail's visible rows are missing: daily bars for the
+    /// rows it cannot price yet, and fresh closes for the rows that have gone
+    /// stale.
     ///
     /// The rail paints from the cache and never fetches — that is its contract
     /// and this does not change it. What changes is that a symbol nobody has
-    /// opened no longer waits to be opened: the window, which already fetches
-    /// on the rail's behalf around the selection, now also covers the rows that
-    /// have nothing at all.
+    /// opened no longer waits to be opened, neither for its first price nor
+    /// for a current one: the window, which already fetches on the rail's
+    /// behalf around the selection, covers the rest of the list too. Until it
+    /// did, a row's price was whatever it was when it was last charted, and a
+    /// list nobody clicked through showed Monday's prices on Thursday.
     ///
-    /// Three things keep it from costing anybody their rate limit. Every
+    /// Four things keep it from costing anybody their rate limit. Every
     /// request is speculative, so the loader holds them [two seconds
     /// apart](crate::loader) and refuses them outright while the provider is
     /// throttling — the same pacing that already fills the neighbourhood,
-    /// not a second mechanism. Only rows with nothing cached are asked for, so this drains
-    /// and goes quiet instead of re-asking for what it just fetched. And only
-    /// visible rows: a collapsed section's symbols are not showing a dash to
-    /// anybody, and get picked up when the section opens.
+    /// not a second mechanism. A row with nothing cached is asked for once,
+    /// so that part drains and goes quiet. A stale row is asked for in a
+    /// batch with the others that are due, twenty to a request on Yahoo: a
+    /// quarter of an hour apart while its market trades, the rule a chart on
+    /// screen keeps to, and once a day while it is shut, see
+    /// [`crate::cli::plan_refresh`]. And only
+    /// visible rows, in a window on screen: a collapsed section's symbols are
+    /// not showing a price to anybody, and get picked up when it opens.
     fn backfill(self: &Rc<Self>) {
         if self.backfill_quiet_until.get().is_some_and(|until| until > std::time::Instant::now()) {
             return;
@@ -5450,10 +5469,29 @@ impl Window {
             })
             .collect();
         // Nothing missing is the steady state, and it has to be silent.
-        if missing.is_empty() {
-            return;
+        if !missing.is_empty() {
+            self.warm(&missing);
         }
-        self.warm(&missing);
+        if self.on_screen() {
+            self.refresh_rail(&rail.flat_order());
+        }
+    }
+
+    /// Bring the stale rows among `rows` up to date, most of them in batches.
+    ///
+    /// The same plan the bar widget makes, so the two never disagree about
+    /// when a price is old and share every batch either of them fetches: a
+    /// row in both lists is asked for once. A row with nothing cached is the
+    /// backfill's above, and asking for it twice queues it once.
+    fn refresh_rail(self: &Rc<Self>, rows: &[Instrument]) {
+        let now = chrono::Utc::now().timestamp();
+        let provider = self.provider();
+        let plan =
+            crate::cli::plan_refresh(&self.store, provider.as_ref(), rows, now, RAIL_MAX_BATCHES);
+        if !plan.bars.is_empty() {
+            self.warm(&plan.bars);
+        }
+        self.warm_closes(plan.closes);
     }
 
     /// Stop offering backfill work for a while, because the provider just
