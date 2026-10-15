@@ -28,7 +28,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use omacharts_engine::{Bar, FetchFailure, Pacing, Provider, ProviderError, Timeframe};
+use omacharts_engine::{
+    Bar, FetchFailure, Pacing, Provider, ProviderError, SharedCooldown, Timeframe,
+};
 
 use crate::store::Store;
 
@@ -230,11 +232,14 @@ impl Loader {
 
         let worker = inner.clone();
         std::thread::spawn(move || {
+            // Before anything is asked: what the last process was told.
+            let mut handed_on = take_up_cooldown(provider.as_ref());
             let rules = || (provider.pacing(), provider.cooldown_until());
             while let Some(dispatch) = worker.take(rules) {
                 let (job, outcome) = match dispatch {
                     Dispatch::Send(job) => {
                         let outcome = attempt(&job.request, provider.as_ref());
+                        handed_on = hand_on_cooldown(provider.as_ref(), handed_on);
                         (job, outcome)
                     }
                     Dispatch::Refuse(job) => {
@@ -876,6 +881,103 @@ fn attempt(request: &Request, provider: &dyn Provider) -> Outcome {
         }
         Err(error) => Outcome::Failed { error, bars: cached },
     }
+}
+
+/// The settings row through which a provider's cooldown outlives the process
+/// that was given it.
+///
+/// A row rather than the provider's memory because the processes that ask
+/// are not one: the bar widget asks from a fresh one every couple of
+/// minutes with no window open, and a command run from a terminal is
+/// another. Each used to start with no cooldown and a backoff at its
+/// bottom, so after a 429 the next run asked again two minutes later and
+/// the doubling never got past its first step.
+fn cooldown_key(provider_id: &str) -> String {
+    format!("cooldown.{provider_id}")
+}
+
+/// How a cooldown reads in its row: when it ends and what the next would
+/// cost, both in seconds.
+fn cooldown_text(cooldown: SharedCooldown) -> String {
+    format!("{} {}", cooldown.until, cooldown.next.as_secs())
+}
+
+/// A handed-on cooldown and the row's text, if one is stored for
+/// `provider_id` and still stands at `now` (unix seconds).
+///
+/// Anything unreadable is no cooldown: the row is reachable from `config
+/// set`, and a typo there must not stop every fetch. A row that reads but
+/// no longer stands is deleted, rather than left in `config list` claiming
+/// a cooldown nobody keeps.
+fn load_cooldown(store: &Store, provider_id: &str, now: i64) -> Option<(SharedCooldown, String)> {
+    let key = cooldown_key(provider_id);
+    let value = store.setting(&key)?;
+    let (until, next) = value.split_once(' ')?;
+    let cooldown = SharedCooldown {
+        until: until.trim().parse().ok()?,
+        next: Duration::from_secs(next.trim().parse().ok()?),
+    };
+    if !cooldown.stands_at(now) {
+        store.remove_setting_if(&key, &value);
+        return None;
+    }
+    Some((cooldown, value))
+}
+
+/// Store `held` for the next process, or clear the row with `None`, and
+/// return what the row now says on this process's behalf.
+///
+/// Clearing deletes the row only while it still says `handed_on`, what this
+/// process last read or wrote there. Another process refused in the meantime
+/// has written its own, and that one still stands.
+fn save_cooldown(
+    store: &Store,
+    provider_id: &str,
+    held: Option<String>,
+    handed_on: Option<&str>,
+) -> Option<String> {
+    let key = cooldown_key(provider_id);
+    match held {
+        Some(text) => {
+            store.set_setting(&key, &text);
+            Some(text)
+        }
+        None => {
+            if let Some(old) = handed_on {
+                store.remove_setting_if(&key, old);
+            }
+            None
+        }
+    }
+}
+
+/// Pick up where another process left the provider's cooldown. Read once,
+/// when the worker starts: while a window is open every command goes
+/// through it, so there is nobody else asking for this to be news from.
+///
+/// Then hand on what the provider made of it, which is what the row said
+/// unless it asked for more than the provider ever gives — a clock put
+/// back, or a hand-typed year — and is rewritten to what will be kept.
+/// Returns the row's text as it now stands, if there is one to clear once
+/// the provider relaxes.
+fn take_up_cooldown(provider: &dyn Provider) -> Option<String> {
+    let store = Store::open().ok()?;
+    let now = chrono::Utc::now().timestamp();
+    let (cooldown, stored) = load_cooldown(&store, provider.id(), now)?;
+    provider.resume_cooldown(cooldown);
+    hand_on_cooldown(provider, Some(stored))
+}
+
+/// After a request: hand the provider's cooldown on, or clear what was
+/// handed on before. Nothing new either way, which is steady state, writes
+/// nothing and opens nothing.
+fn hand_on_cooldown(provider: &dyn Provider, handed_on: Option<String>) -> Option<String> {
+    let held = provider.shared_cooldown().map(cooldown_text);
+    if held == handed_on {
+        return handed_on;
+    }
+    let Ok(store) = Store::open() else { return handed_on };
+    save_cooldown(&store, provider.id(), held, handed_on.as_deref())
 }
 
 /// The reply for a request the queue refused on the provider's behalf: what
@@ -1773,5 +1875,29 @@ mod tests {
         let (inner, _, worker) = parked_on_a_warm_up(Instant::now());
         shutdown(&inner);
         assert!(worker.join().unwrap().is_none());
+    }
+
+    /// What the widget's last run was told reaches its next one, and a row
+    /// that has had its quiet spell is gone once read.
+    #[test]
+    fn a_cooldown_is_handed_on_through_the_store() {
+        let store = Store::memory().unwrap();
+        let cooldown = SharedCooldown { until: 1_000_060, next: Duration::from_secs(120) };
+        save_cooldown(&store, "yahoo", Some(cooldown_text(cooldown)), None);
+        let stored = Some((cooldown, "1000060 120".to_string()));
+        assert_eq!(load_cooldown(&store, "yahoo", 1_000_100), stored, "run out, still climbing");
+        assert_eq!(load_cooldown(&store, "yahoo", 1_000_200), None, "quiet long enough");
+        assert_eq!(store.setting(&cooldown_key("yahoo")), None, "and deleted");
+    }
+
+    /// Two processes share the row. One that relaxes clears what it wrote,
+    /// not a refusal the other has written over it since.
+    #[test]
+    fn clearing_a_cooldown_leaves_one_another_process_wrote_since() {
+        let store = Store::memory().unwrap();
+        let mine = save_cooldown(&store, "yahoo", Some("1000060 120".into()), None);
+        store.set_setting(&cooldown_key("yahoo"), "1000300 240");
+        assert_eq!(save_cooldown(&store, "yahoo", None, mine.as_deref()), None);
+        assert_eq!(store.setting(&cooldown_key("yahoo")).as_deref(), Some("1000300 240"));
     }
 }

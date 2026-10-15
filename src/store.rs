@@ -194,6 +194,15 @@ impl Store {
         );
     }
 
+    /// Forget a setting, so it reads as never written — but only while it
+    /// still says `value`. A row somebody rewrote after it was read is
+    /// theirs, and theirs to clear.
+    pub fn remove_setting_if(&self, key: &str, value: &str) {
+        let _ = self
+            .conn
+            .execute("DELETE FROM settings WHERE key = ?1 AND value = ?2", params![key, value]);
+    }
+
     /// A stored flag, read the way people write one.
     ///
     /// The app writes "1" and "0", but a setting can also be typed —

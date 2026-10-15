@@ -23,7 +23,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::bars::{Bar, Timeframe, Unit};
-use crate::provider::{Capability, Pacing, Provider, ProviderError};
+use crate::provider::{Capability, Pacing, Provider, ProviderError, SharedCooldown};
 use crate::symbols::{Instrument, InstrumentKind};
 
 const ENDPOINT: &str = "https://query1.finance.yahoo.com/v8/finance/chart";
@@ -123,6 +123,52 @@ impl Cooldown {
     /// And relax once it says yes.
     fn succeeded(&mut self) {
         self.length = COOLDOWN_START;
+    }
+
+    /// This cooldown in wall-clock terms, at `now` (`unix` seconds), or
+    /// `None` when there is nothing to hand on: none running, none climbing.
+    ///
+    /// One that has run out keeps the time it ran out, not `now`: that is
+    /// what a reader measures its quiet spell from, and restamping it on
+    /// every request would keep a climbing backoff from ever being forgotten.
+    fn shared(&self, now: Instant, unix: i64) -> Option<SharedCooldown> {
+        let running = self.until.is_some_and(|until| until > now);
+        if !running && self.length == COOLDOWN_START {
+            return None;
+        }
+        let secs = |d: Duration| i64::try_from(d.as_secs()).unwrap_or(i64::MAX);
+        let until = match self.until {
+            // Rounded up, so that another process never reads it as over a
+            // moment early.
+            Some(until) if running => {
+                let left = until - now;
+                unix.saturating_add(secs(left)).saturating_add(i64::from(left.subsec_nanos() > 0))
+            }
+            Some(until) => unix.saturating_sub(secs(now - until)),
+            None => unix,
+        };
+        Some(SharedCooldown { until, next: self.length })
+    }
+
+    /// Carry on from what another process handed on, keeping whichever of
+    /// the two is stricter.
+    ///
+    /// Never for longer than [`COOLDOWN_MAX`]: the row it came from can say
+    /// anything, from `config set` or from a clock that has since been put
+    /// back, and no cooldown of Yahoo's runs longer than that.
+    fn resume(&mut self, shared: SharedCooldown, now: Instant, unix: i64) {
+        let left = shared.until.saturating_sub(unix);
+        let until = if left > 0 {
+            let left = Duration::from_secs(u64::try_from(left).unwrap_or(u64::MAX));
+            Some(now + left.min(COOLDOWN_MAX))
+        } else {
+            // Already run out: kept as when it did, for handing on again.
+            now.checked_sub(Duration::from_secs(left.unsigned_abs()))
+        };
+        if let Some(until) = until {
+            self.until = Some(self.until.map_or(until, |own| own.max(until)));
+        }
+        self.length = self.length.max(shared.next).min(COOLDOWN_MAX);
     }
 }
 
@@ -393,6 +439,17 @@ impl Provider for Yahoo {
 
     fn cooldown_until(&self) -> Option<Instant> {
         self.cooldown.lock().unwrap_or_else(|e| e.into_inner()).until
+    }
+
+    fn shared_cooldown(&self) -> Option<SharedCooldown> {
+        let unix = chrono::Utc::now().timestamp();
+        self.cooldown.lock().unwrap_or_else(|e| e.into_inner()).shared(Instant::now(), unix)
+    }
+
+    fn resume_cooldown(&self, cooldown: SharedCooldown) {
+        let unix = chrono::Utc::now().timestamp();
+        let mut own = self.cooldown.lock().unwrap_or_else(|e| e.into_inner());
+        own.resume(cooldown, Instant::now(), unix);
     }
 
     /// A dropped connection or a 503 on the way through Yahoo's edge is
@@ -881,6 +938,48 @@ mod tests {
             cooldown.throttled(t0);
         }
         assert_eq!(cooldown.length, COOLDOWN_MAX);
+    }
+
+    /// The widget's next run is a new process. What this one was told has to
+    /// reach it, or it asks straight into the same refusal.
+    #[test]
+    fn a_cooldown_handed_on_is_kept_by_the_next_process() {
+        let (t0, unix) = (Instant::now(), 1_000_000);
+        let mut first = Cooldown::new();
+        first.throttled(t0);
+        let shared = first.shared(t0, unix).expect("a running cooldown is handed on");
+        assert_eq!(shared.until, unix + 60);
+        assert_eq!(shared.next, COOLDOWN_START * 2);
+
+        // Twenty seconds later, somewhere else.
+        let (t1, unix1) = (Instant::now(), unix + 20);
+        let mut second = Cooldown::new();
+        second.resume(shared, t1, unix1);
+        assert_eq!(second.until, Some(t1 + Duration::from_secs(40)), "the rest of it");
+
+        // And its next refusal carries on climbing rather than starting over.
+        second.throttled(t1);
+        assert_eq!(second.length, COOLDOWN_START * 4);
+    }
+
+    /// A row written by hand, or by a clock that has since gone back, can put
+    /// the end of a cooldown anywhere. It is still never longer than the
+    /// longest Yahoo hands out, and never a panic.
+    #[test]
+    fn a_cooldown_handed_on_from_far_ahead_lasts_at_most_the_ceiling() {
+        let (now, unix) = (Instant::now(), 1_000_000);
+        for until in [unix + 86_400 * 365 * 100, i64::MAX] {
+            let mut cooldown = Cooldown::new();
+            cooldown.resume(SharedCooldown { until, next: Duration::MAX }, now, unix);
+            assert_eq!(cooldown.until, Some(now + COOLDOWN_MAX), "{until}");
+            assert_eq!(cooldown.length, COOLDOWN_MAX, "{until}");
+            // And hands on what it actually holds, not what it was told.
+            let shared = cooldown.shared(now, unix).unwrap();
+            assert_eq!(shared.until, unix + 900, "{until}");
+        }
+        let mut cooldown = Cooldown::new();
+        cooldown.resume(SharedCooldown { until: i64::MIN, next: Duration::ZERO }, now, unix);
+        assert_eq!(cooldown.length, COOLDOWN_START, "nor from far behind");
     }
 
     /// Two more tries, each twice as far out as the last, and then a final

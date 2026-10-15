@@ -198,6 +198,34 @@ impl Pacing {
     }
 }
 
+/// A provider's cooldown in terms another process can read.
+///
+/// Wall-clock seconds rather than an [`Instant`], which means nothing outside
+/// the process that took it. The bar widget asks from a fresh process every
+/// couple of minutes, and a cooldown that lived and died with each one let
+/// every run walk straight into the refusal the last one had just been given.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SharedCooldown {
+    /// Unix seconds until which nothing may be asked.
+    pub until: i64,
+    /// What the next refusal would cost, so that the backoff keeps climbing
+    /// across processes instead of starting over in each one.
+    pub next: Duration,
+}
+
+impl SharedCooldown {
+    /// Is this still news at `now`?
+    ///
+    /// While it runs, plainly. After it has run out, only for as long again
+    /// as the next one would last: a provider that has been left alone that
+    /// long has had its quiet, and its next refusal starts the climb from
+    /// the bottom rather than from wherever a process last left it.
+    pub fn stands_at(self, now: i64) -> bool {
+        let next = i64::try_from(self.next.as_secs()).unwrap_or(i64::MAX);
+        now < self.until.saturating_add(next)
+    }
+}
+
 /// How new bars reach a chart drawn from a provider.
 ///
 /// A chart is a photograph until something refetches it, and whether anything
@@ -371,6 +399,24 @@ pub trait Provider: Send + Sync {
     /// never block a caller on it. Defaults to never.
     fn cooldown_until(&self) -> Option<Instant> {
         None
+    }
+
+    /// The cooldown as it stands, for another process to carry on from.
+    ///
+    /// `None` when there is nothing worth handing on: no cooldown running
+    /// and none climbing. Defaults to that, for a provider that never sets
+    /// one.
+    fn shared_cooldown(&self) -> Option<SharedCooldown> {
+        None
+    }
+
+    /// Carry on from a cooldown another process handed on.
+    ///
+    /// Taken as the stricter of the two: a cooldown already running here is
+    /// not shortened, and a backoff that has climbed further here is not
+    /// lowered. Does nothing by default.
+    fn resume_cooldown(&self, cooldown: SharedCooldown) {
+        let _ = cooldown;
     }
 
     /// Is a request that failed with `error` on its `attempt`th try, counted
