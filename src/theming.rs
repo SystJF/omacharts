@@ -290,7 +290,11 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
     define("card_fg_color", &ui.text);
     define("dialog_bg_color", &ui.surface);
     define("dialog_fg_color", &ui.text);
-    define("popover_bg_color", &ui.surface_variant);
+    // Menus, popovers, the picker and the question cards on the rail's own
+    // ground: a lighter slab read as something pasted on from another app.
+    // The hairline and the shadow set them apart, and a breath of the text
+    // colour lifts them off it just enough to read as on top.
+    define("popover_bg_color", &format!("mix({}, {}, 0.03)", ui.surface, ui.text));
     define("popover_fg_color", &ui.text);
     define("borders", &ui.border);
 
@@ -371,6 +375,56 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 }
 
 .swatch-button { min-width: 26px; min-height: 26px; padding: 0; border-radius: 6px; }
+
+/* Menus and popovers are one surface. A right-click menu and the link
+   popover open beside each other often enough that two looks for one kind
+   of thing read as two apps. The window's own ground, a hairline edge, a
+   soft shadow, and no arrow — that one is set where each popover is built,
+   since GTK sizes the arrow in code — because a menu opens at the pointer
+   and has nothing to point at. */
+popover.menu > contents,
+popover.background > contents {
+  background-color: @popover_bg_color;
+  border: 1px solid alpha(@window_fg_color, 0.10);
+  border-radius: 10px;
+  box-shadow: 0 6px 18px alpha(black, 0.35), 0 1px 3px alpha(black, 0.2);
+}
+popover.background:not(.menu) > contents { padding: 6px; }
+popover.menu > contents > stack > box,
+popover.menu > contents > scrolledwindow > viewport > stack > box { padding: 4px; }
+/* A menu row is a rail row: 26px, where Adwaita's 32px and its padding made
+   the chart's menu taller than a laptop's chart. The hover is the rail's
+   selection, so the row under the pointer reads the way a chosen symbol
+   does. */
+popover.menu modelbutton {
+  min-height: 26px;
+  padding: 0 8px 0 6px;
+  border-radius: 6px;
+}
+popover.menu modelbutton:hover,
+popover.menu modelbutton:selected { background-color: alpha(@accent_color, 0.22); }
+popover.menu modelbutton:active { background-color: alpha(@accent_color, 0.30); }
+/* Sections part on a hairline, the one the settings rows use. */
+popover.menu separator {
+  margin: 4px 6px;
+  min-height: 1px;
+  background: alpha(@window_fg_color, 0.08);
+}
+/* The key is a reminder, not part of the name: dim, small, and in the face
+   keys are written in, so a column of them lines up. */
+popover.menu accelerator {
+  font-family: monospace;
+  font-size: 0.8em;
+  color: alpha(@popover_fg_color, 0.55);
+}
+/* A choice is a tick in the accent, whether the item is a toggle or one of
+   several: a ring beside every option in a submenu is a column of noise
+   round the one that matters. */
+popover.menu check:checked,
+popover.menu radio:checked { color: @accent_color; }
+popover.menu radio { border: none; padding: 2px; }
+popover.menu radio:checked { -gtk-icon-source: -gtk-icontheme('object-select-symbolic'); }
+popover.menu radio:not(:checked) { -gtk-icon-source: none; }
 
 /* The link toggle is a glyph, not a button: no frame, no fill, not even when
    it is on — a chart that follows the rail says so by the icon being there at
@@ -974,6 +1028,16 @@ mod tests {
         assert!(css.contains(".chart-split .chart-pane.focused { border-color: @omacharts_focus; }"));
         // And the wide handle's two hairlines are gone.
         assert!(css.contains("box-shadow: none;"));
+    }
+
+    /// A menu and a popover are one surface, and a menu row is a rail row.
+    #[test]
+    fn menus_and_popovers_share_one_surface() {
+        let theme = &builtin_themes()[0];
+        let css = stylesheet(theme, &omacharts_engine::theme::theme_bars(theme));
+        assert!(css.contains("popover.menu > contents,\npopover.background > contents {"));
+        assert!(css.contains("popover.menu modelbutton {\n  min-height: 26px;"));
+        assert!(css.contains("popover.menu accelerator {\n  font-family: monospace;"));
     }
 
     #[test]

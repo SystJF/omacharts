@@ -2881,6 +2881,7 @@ impl Watchlist {
         entry.set_placeholder_text(Some("Section name"));
 
         let popover = gtk::Popover::new();
+        popover.set_has_arrow(false);
         popover.set_child(Some(&entry));
         popover.set_parent(anchor);
 

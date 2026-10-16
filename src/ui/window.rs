@@ -4656,6 +4656,9 @@ impl Window {
         let menu_button = gtk::MenuButton::new();
         menu_button.set_icon_name("open-menu-symbolic");
         menu_button.set_menu_model(Some(&menu));
+        if let Some(popover) = menu_button.popover() {
+            popover.set_has_arrow(false);
+        }
         let tip = shortcuts::tooltip_with_key("Main Menu", shortcuts::MAIN_MENU);
         menu_button.set_tooltip_text(Some(&tip));
         // F10 opens the primary menu, and the header bar used to be the only
@@ -5532,6 +5535,7 @@ impl Window {
         // it is about and where the answer will appear. Hanging it off the
         // window would put it over whichever chart happened to be underneath.
         let popover = gtk::Popover::new();
+        popover.set_has_arrow(false);
         popover.set_child(Some(&content));
         // Or, on a chart too narrow to show the strip, to the resolution
         // beside the symbol that stands in for it. Mapped rather than
