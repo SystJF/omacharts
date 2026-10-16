@@ -4380,6 +4380,10 @@ fn candles(
             (&scheme.down, &scheme.down_fill)
         };
 
+        // A hollow body shows what is behind it, so a wick drawn through it
+        // would be seen inside: it stops at the body's edges instead.
+        let hollow = !hairline && colors::is_transparent(fill);
+
         // Wicks.
         cr.set_line_width(1.0);
         colors::set_source(cr, outline);
@@ -4390,8 +4394,24 @@ fn candles(
             }
             any = true;
             let x = columns.x(i).round() + 0.5;
+            let body = hollow.then(|| {
+                let top = to_y(bar.open.max(bar.close)).round();
+                (top, to_y(bar.open.min(bar.close)).round().max(top + 1.0))
+            });
             for (high, low) in columns.wicks(i) {
-                draw_wick(cr, x, to_y(high), to_y(low));
+                let Some((top, bottom)) = body else {
+                    draw_wick(cr, x, to_y(high), to_y(low));
+                    continue;
+                };
+                let (high, low) = (to_y(high).round(), to_y(low).round());
+                if high < top {
+                    cr.move_to(x, high);
+                    cr.line_to(x, top.min(low));
+                }
+                if low > bottom {
+                    cr.move_to(x, bottom.max(high));
+                    cr.line_to(x, low);
+                }
             }
         }
         if any {
@@ -4416,7 +4436,7 @@ fn candles(
             let bottom = to_y(bar.open.min(bar.close)).round();
             cr.rectangle(x.round(), top, body_w.round(), (bottom - top).max(1.0));
         }
-        if colors::is_transparent(fill) {
+        if hollow {
             // Hollow: stroke the outline and leave the background showing.
             colors::set_source(cr, outline);
             let _ = cr.stroke();
@@ -6517,6 +6537,37 @@ mod tests {
             let drawn = frame(10.0, 100.0, |cr| draw_candles(cr, &state, &columns, &to_y));
             assert!(painted(&drawn) > 0, "{style:?} drew nothing");
         }
+    }
+
+    #[test]
+    fn a_hollow_body_has_no_wick_through_it() {
+        let mut state = charted(1);
+        state.scheme.up_fill = "#00000000".into();
+        // Wide enough for a body, and tall enough for wicks either side of it.
+        let bars = [Bar { ts: 0, open: 40.0, high: 90.0, low: 10.0, close: 60.0, volume: 0.0 }];
+        let to_y = |price: f64| 100.0 - price;
+        let columns = Columns::of(&bars, 0, 1, 0.0, 20.0);
+        let x = columns.x(0).round() as usize;
+        let drawn = frame(20.0, 100.0, |cr| draw_candles(cr, &state, &columns, &to_y));
+        let alpha = |y: usize| drawn[(y * 20 + x) * 4 + 3];
+        assert_ne!(alpha(20), 0, "the upper wick is drawn");
+        assert_ne!(alpha(80), 0, "the lower wick is drawn");
+        assert_eq!(alpha(50), 0, "the inside of a hollow body is left empty");
+        assert!((11..40).all(|y| alpha(y) != 0), "the upper wick reaches the body");
+        assert!((61..90).all(|y| alpha(y) != 0), "the lower wick reaches the body");
+    }
+
+    #[test]
+    fn a_hollow_doji_keeps_its_whole_wick() {
+        let mut state = charted(1);
+        state.scheme.up_fill = "#00000000".into();
+        let bars = [Bar { ts: 0, open: 50.0, high: 90.0, low: 10.0, close: 50.0, volume: 0.0 }];
+        let to_y = |price: f64| 100.0 - price;
+        let columns = Columns::of(&bars, 0, 1, 0.0, 20.0);
+        let x = columns.x(0).round() as usize;
+        let drawn = frame(20.0, 100.0, |cr| draw_candles(cr, &state, &columns, &to_y));
+        let alpha = |y: usize| drawn[(y * 20 + x) * 4 + 3];
+        assert!((11..90).all(|y| alpha(y) != 0), "a body with no height leaves no gap");
     }
 
     #[test]
