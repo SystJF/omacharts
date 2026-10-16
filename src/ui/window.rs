@@ -39,6 +39,7 @@ use omacharts_engine::link;
 use omacharts_engine::LinkMode;
 use crate::ui::colors;
 use crate::ui::preferences::Preferences;
+use crate::ui::pick_frame::Over;
 use crate::ui::search::SymbolSearch;
 use crate::ui::shortcuts;
 use crate::ui::watchlist::{Quote, Watchlist, DEFAULTS};
@@ -5473,11 +5474,12 @@ impl Window {
         self.open_search_with("");
     }
 
+    /// Over the focused chart, which is the one a pick changes.
     fn open_search_with(self: &Rc<Self>, query: &str) {
+        let pane = self.focused_pane();
+        let at = self.layout.borrow().leaves().iter().position(|leaf| *leaf == pane.id).unwrap_or(0);
         let this = self.clone();
-        self.search.present_with(&self.window, "Find symbol", query, move |instrument| {
-            this.show(instrument)
-        });
+        self.search.present_with(Over::chart(&pane, at), query, move |instrument| this.show(instrument));
     }
 
     /// The resolution box: type "3", "15", "4h", "1D".

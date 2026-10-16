@@ -7,7 +7,9 @@
 //!
 //! One instance serves every place a symbol is picked — charting it, adding it
 //! to a watchlist section — by swapping the handler at presentation time.
-//! Identical behaviour everywhere, and the index is only built once.
+//! Identical behaviour everywhere, and the index is only built once. Where it
+//! opens is `pick_frame`'s business: over the chart a pick will change, or
+//! centred on the window for a watchlist, which no chart shows.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -16,7 +18,7 @@ use adw::prelude::*;
 use gtk::glib;
 use omacharts_engine::{Instrument, SearchIndex};
 
-use crate::ui::dialogs;
+use crate::ui::pick_frame::{Over, PickFrame};
 
 /// Rows beyond this are noise — nobody scrolls a symbol picker.
 const LIMIT: usize = 24;
@@ -24,65 +26,24 @@ const LIMIT: usize = 24;
 type Handler = Rc<RefCell<Option<Box<dyn Fn(Instrument)>>>>;
 
 pub struct SymbolSearch {
-    dialog: adw::Dialog,
-    list: gtk::ListBox,
-    /// The list's window onto itself, so a selection moved by the
-    /// keyboard can be brought into it.
-    scroller: gtk::ScrolledWindow,
-    entry: gtk::SearchEntry,
+    frame: Rc<PickFrame>,
     index: crate::inventory::Inventory,
     /// Instruments on display, parallel to the list rows.
     shown: Rc<RefCell<Vec<Instrument>>>,
     handler: Handler,
     /// True from the moment the picker is asked to open until it has settled.
     ///
-    /// An entry selects what it holds when it gains focus, and on the first
-    /// open that focus is installed by the dialog being mapped — after
-    /// anything this code can schedule. Rather than race it, the selection is
-    /// undone whenever it appears during this window.
+    /// An entry selects what it holds when it gains focus, and that focus can
+    /// be installed by the frame being mapped — after anything this code can
+    /// schedule. Rather than race it, the selection is undone whenever it
+    /// appears during this window.
     opening: Rc<std::cell::Cell<bool>>,
 }
 
 impl SymbolSearch {
     pub fn new(index: crate::inventory::Inventory) -> Rc<SymbolSearch> {
-        let entry = gtk::SearchEntry::new();
-        entry.set_placeholder_text(Some("Symbol or name"));
-        entry.set_hexpand(true);
-        // The entry holds a change back for 150ms by default, so "BNO" and
-        // Enter in quick succession acted on the list for "B".
-        entry.set_search_delay(0);
-
-        let list = gtk::ListBox::new();
-        list.set_selection_mode(gtk::SelectionMode::Browse);
-        list.add_css_class("navigation-sidebar");
-
-        let scroller = gtk::ScrolledWindow::new();
-        scroller.set_child(Some(&list));
-        scroller.set_vexpand(true);
-        scroller.set_hscrollbar_policy(gtk::PolicyType::Never);
-
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        header.set_margin_top(10);
-        header.set_margin_bottom(10);
-        header.set_margin_start(12);
-        header.set_margin_end(12);
-        header.append(&entry);
-
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        content.append(&header);
-        content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        content.append(&scroller);
-
-        let dialog = adw::Dialog::new();
-        dialog.set_content_width(520);
-        dialog.set_content_height(430);
-        dialog.set_child(Some(&content));
-
         let search = Rc::new(SymbolSearch {
-            dialog,
-            list,
-            scroller,
-            entry,
+            frame: PickFrame::new("Symbol or name"),
             index,
             shown: Rc::new(RefCell::new(Vec::new())),
             handler: Rc::new(RefCell::new(None)),
@@ -94,16 +55,17 @@ impl SymbolSearch {
     }
 
     fn wire(self: &Rc<Self>) {
+        let entry = &self.frame.entry;
         // Undo the select-all an entry does when it gains focus, for as long
         // as the picker is still opening. Typing a letter on the chart opens
         // this with that letter in the box, and a selected letter is one the
         // next keystroke replaces — so "S" then "H" searched for "H".
         //
         // Watching the selection rather than the focus, because the focus that
-        // does this is installed by the dialog's own mapping on the first open
-        // and lands after everything this code can schedule. A selection that
-        // nobody asked for cannot arrive too late to be undone.
-        if let Some(text) = self.entry.delegate().and_then(|d| d.downcast::<gtk::Text>().ok()) {
+        // does this can be installed by the frame's own mapping and land after
+        // everything this code can schedule. A selection that nobody asked
+        // for cannot arrive too late to be undone.
+        if let Some(text) = entry.delegate().and_then(|d| d.downcast::<gtk::Text>().ok()) {
             let opening = self.opening.clone();
             text.connect_notify_local(Some("selection-bound"), move |text, _| {
                 if !opening.get() || text.selection_bounds().is_none() {
@@ -118,115 +80,19 @@ impl SymbolSearch {
 
         // Typing. Every keystroke re-runs the search against memory, which is
         // cheap enough that debouncing would only add latency.
-        let (list, index, shown) = (self.list.clone(), self.index.clone(), self.shown.clone());
-        self.entry.connect_search_changed(move |entry| {
+        let (list, index, shown) = (self.frame.list.clone(), self.index.clone(), self.shown.clone());
+        entry.connect_search_changed(move |entry| {
             repopulate(&list, &index.get(), &shown, &entry.text());
-        });
-
-        // Enter takes the highlighted row, so an exact ticker never needs the
-        // arrow keys or the mouse.
-        let list = self.list.clone();
-        self.entry.connect_activate(move |_| {
-            if let Some(row) = list.selected_row() {
-                row.activate();
-            }
-        });
-
-        // The same from anywhere in the dialog, for a hand that has left the
-        // box for the list. Enter there is the row's own key and means this
-        // too, so the two agree rather than compete.
-        let list = self.list.clone();
-        dialogs::commit_on_ctrl_enter(&self.dialog, move || {
-            if let Some(row) = list.selected_row() {
-                row.activate();
-            }
-        });
-
-        // Only the box needs saying. Escape anywhere else in here already
-        // closes the dialog, which is why there is no controller for it.
-        dialogs::close_on_search_escape(&self.entry, &self.dialog);
-        dialogs::close_on_click_outside(&self.dialog);
-
-        // Up and down move the selection while focus stays in the entry.
-        let keys = gtk::EventControllerKey::new();
-        let list = self.list.clone();
-        let scroller = self.scroller.clone();
-        keys.connect_key_pressed(move |_, key, _, _| {
-            let rows = row_count(&list);
-            if rows == 0 {
-                return glib::Propagation::Proceed;
-            }
-            let current = list.selected_row().map(|r| r.index()).unwrap_or(0);
-            let next = match key {
-                gtk::gdk::Key::Down => (current + 1).min(rows - 1),
-                gtk::gdk::Key::Up => (current - 1).max(0),
-                _ => return glib::Propagation::Proceed,
-            };
-            if let Some(row) = list.row_at_index(next) {
-                list.select_row(Some(&row));
-                // Focus stays in the entry so typing carries on, and
-                // the list does not scroll itself for a selection it
-                // was not given focus for: arrowing past the bottom
-                // moved a highlight nobody could see.
-                reveal(&scroller, &list, &row);
-            }
-            glib::Propagation::Stop
-        });
-        self.entry.add_controller(keys);
-
-        // Typing that outruns the dialog opening. The box has the keyboard
-        // from the start, but the dialog only shows its content a couple of
-        // frames after it is presented, and until then GTK drops every key
-        // on the way down: a widget that is not realized yet counts as
-        // having handled it. So "BNO" typed fast searched for "B" or "BO".
-        // Caught on the way down, before it reaches what is not there yet.
-        let keys = gtk::EventControllerKey::new();
-        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let entry = self.entry.clone();
-        keys.connect_key_pressed(move |keys, key, _, _| {
-            let Some(text) = entry.delegate().and_then(|d| d.downcast::<gtk::Text>().ok()) else {
-                return glib::Propagation::Proceed;
-            };
-            if text.is_mapped() {
-                return glib::Propagation::Proceed;
-            }
-            // Enter is a key binding, and those only run on a widget that is
-            // on screen, so it is said directly instead.
-            if dialogs::is_enter(key) {
-                entry.emit_activate();
-                return glib::Propagation::Stop;
-            }
-            keys.forward(&text).into()
-        });
-        self.dialog.add_controller(keys);
-
-        let shown = self.shown.clone();
-        let dialog = self.dialog.clone();
-        let handler = self.handler.clone();
-        self.list.connect_row_activated(move |_, row| {
-            let index = row.index().max(0) as usize;
-            let picked = shown.borrow().get(index).cloned();
-            if let Some(instrument) = picked {
-                dialog.close();
-                if let Some(handler) = handler.borrow().as_ref() {
-                    handler(instrument);
-                }
-            }
         });
     }
 
     fn populate(&self, query: &str) {
-        repopulate(&self.list, &self.index.get(), &self.shown, query);
+        repopulate(&self.frame.list, &self.index.get(), &self.shown, query);
     }
 
-    /// Open the picker. `title` says what picking will do.
-    pub fn present(
-        &self,
-        parent: &impl IsA<gtk::Widget>,
-        title: &str,
-        on_pick: impl Fn(Instrument) + 'static,
-    ) {
-        self.present_with(parent, title, "", on_pick);
+    /// Open the picker over what it will change.
+    pub fn present(&self, over: Over, on_pick: impl Fn(Instrument) + 'static) {
+        self.present_with(over, "", on_pick);
     }
 
     /// Open it already carrying a query.
@@ -234,23 +100,21 @@ impl SymbolSearch {
     /// Typing a letter on the chart opens this with that letter in the box, so
     /// the keystroke that summoned the picker is not lost — which is what
     /// makes "just start typing" feel like one gesture instead of two.
-    pub fn present_with(
-        &self,
-        parent: &impl IsA<gtk::Widget>,
-        title: &str,
-        query: &str,
-        on_pick: impl Fn(Instrument) + 'static,
-    ) {
+    pub fn present_with(&self, over: Over, query: &str, on_pick: impl Fn(Instrument) + 'static) {
         *self.handler.borrow_mut() = Some(Box::new(on_pick));
         self.opening.set(true);
-        self.dialog.set_title(title);
-        self.entry.set_text(query);
-        self.entry.set_position(-1);
+        let entry = &self.frame.entry;
+        entry.set_text(query);
+        entry.set_position(-1);
         self.populate(query);
-        self.dialog.present(Some(parent));
-        self.entry.grab_focus();
-        self.entry.set_position(-1);
-        // Long enough for the dialog to finish opening and install its own
+        let (shown, handler) = (self.shown.clone(), self.handler.clone());
+        self.frame.open(&over, move |at| {
+            let picked = shown.borrow().get(at).cloned();
+            if let (Some(instrument), Some(handler)) = (picked, handler.borrow().as_ref()) {
+                handler(instrument);
+            }
+        });
+        // Long enough for the frame to finish opening and install its own
         // focus, short enough to be over before anybody reads the first
         // result. After this a selection in the box is one the user made.
         let opening = self.opening.clone();
@@ -301,27 +165,6 @@ fn repopulate(
         {
             scroller.vadjustment().set_value(0.0);
         }
-    }
-}
-
-/// Bring a row into the window, moving as little as will do it.
-///
-/// The row's own bounds within the list, which is the coordinate space
-/// the scroll offset is in. Nothing happens when it is already visible,
-/// so holding Down scrolls one row at a time from the bottom edge
-/// rather than centring the selection and throwing the list about.
-fn reveal(scroller: &gtk::ScrolledWindow, list: &gtk::ListBox, row: &gtk::ListBoxRow) {
-    let Some(bounds) = row.compute_bounds(list) else { return };
-    let adjustment = scroller.vadjustment();
-    let top = bounds.y() as f64;
-    let bottom = top + bounds.height() as f64;
-    let seen = adjustment.value();
-    let page = adjustment.page_size();
-
-    if top < seen {
-        adjustment.set_value(top);
-    } else if bottom > seen + page {
-        adjustment.set_value(bottom - page);
     }
 }
 
@@ -510,14 +353,3 @@ fn row_for(instrument: &Instrument) -> gtk::ListBoxRow {
     row.set_child(Some(&row_box));
     row
 }
-
-fn row_count(list: &gtk::ListBox) -> i32 {
-    let mut n = 0;
-    let mut child = list.first_child();
-    while let Some(widget) = child {
-        n += 1;
-        child = widget.next_sibling();
-    }
-    n
-}
-

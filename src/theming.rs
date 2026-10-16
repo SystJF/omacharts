@@ -426,6 +426,27 @@ popover.menu radio { border: none; padding: 2px; }
 popover.menu radio:checked { -gtk-icon-source: -gtk-icontheme('object-select-symbolic'); }
 popover.menu radio:not(:checked) { -gtk-icon-source: none; }
 
+/* A picker over a chart (see `pick_frame`) is the same surface with no title
+   bar: the search box is its top edge, on a hairline, and the chart it will
+   change is named at the end of it. The box takes no frame of its own, the
+   surface already being one. */
+popover.pick-frame > contents { padding: 0; }
+.pick-query {
+  padding: 4px 12px 4px 4px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.08);
+}
+.pick-query entry,
+.pick-query entry:focus-within {
+  background: none;
+  box-shadow: none;
+  outline: none;
+  font-size: 1.08em;
+}
+.pick-target { font-family: monospace; font-size: 0.78em; opacity: 0.55; }
+.pick-list { padding: 4px; background: none; }
+/* The chart a picker will change, dimmed under it. */
+.pick-shade { background-color: alpha(black, 0.4); }
+
 /* The link toggle is a glyph, not a button: no frame, no fill, not even when
    it is on — a chart that follows the rail says so by the icon being there at
    full strength, and one that does not says so by the icon being nearly gone.
@@ -577,6 +598,9 @@ popover.menu radio:not(:checked) { -gtk-icon-source: none; }
   background: @view_bg_color;
   box-shadow: inset 1px 0 @omacharts_axis;
 }
+/* While a picker dims a chart, no ground: it is the chart's colour undimmed,
+   and over the shade it was a lit square in the corner. */
+.picking .window-corner.over-chart { background: none; }
 /* The drawing tools' corner on the left, the mirror of the one on the right:
    centred over the bar it opens, which is as wide as one of its tools, and
    at the same height, so beside the chart's name it centres on the name. */
