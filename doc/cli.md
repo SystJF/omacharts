@@ -596,9 +596,9 @@ A `chart set` with one bad value changes nothing at all — everything is
 checked before anything is written, so you never get a half-applied chart.
 
 Besides what a chart shows, `chart set` carries how it shows it — `--style`,
-`--bars`, `--session`, `--grid`, `--auto-scale` and `--log-scale` — and those are stored
-with the chart, so a price axis held still with `--auto-scale off` is still
-held the next time the app opens.
+`--bars`, `--session`, `--grid`, `--auto-scale`, `--log-scale` and
+`--show-indicators` — and those are stored with the chart, so a price axis
+held still with `--auto-scale off` is still held the next time the app opens.
 
 `--log-scale on` makes the price axis logarithmic: equal heights are equal
 percentage moves, which is what a chart of twenty years wants. Indicators in
@@ -608,6 +608,15 @@ the axis draws linear and turns logarithmic again once they are off screen.
 
 ```sh
 omacharts chart set --resolution 1W --log-scale on
+```
+
+`--show-indicators off` hides every indicator on the chart, the strips under
+it as well, for a look at the bars alone; `on` brings them back. Each keeps
+its own settings and whether it was hidden on its own, so they come back as
+they were. In the window it is Ctrl+Shift+H.
+
+```sh
+omacharts chart set --show-indicators off
 ```
 
 ## Chartbook templates

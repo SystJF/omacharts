@@ -158,6 +158,10 @@ struct State {
     lead: usize,
     drag: Option<Drag>,
     indicators: Vec<Drawn>,
+    /// Whether the indicators are drawn at all. Off hides every one of them,
+    /// strips and all, without touching each one's own `visible`, so turning
+    /// it back on brings back what was on screen and no more.
+    show_indicators: bool,
     bar_style: BarStyle,
     bars_hidden: bool,
     show_grid: bool,
@@ -1006,9 +1010,8 @@ fn layout(state: &State, width: f64, height: f64) -> Layout {
 
     let wanted = |above: bool| -> Vec<(u32, f64)> {
         state
-            .indicators
-            .iter()
-            .filter(|drawn| drawn.indicator.visible && drawn.indicator.above_price == above)
+            .shown_indicators()
+            .filter(|drawn| drawn.indicator.above_price == above)
             .filter_map(|drawn| drawn.output.pane_height().map(|share| (drawn.indicator.id, share)))
             .collect()
     };
@@ -1111,6 +1114,7 @@ impl State {
             overhang: RIGHT_MARGIN,
             lead: 0,
             indicators: Vec::new(),
+            show_indicators: true,
             bar_style: BarStyle::default(),
             bars_hidden: false,
             show_grid: true,
@@ -1145,6 +1149,11 @@ impl State {
     /// Drop the step most recently remembered, for a change that turned out
     /// not to be one: the step is still the top of the stack, because
     /// nothing else can have been remembered in between.
+    /// The indicators on screen: the ones shown, while the chart shows any.
+    fn shown_indicators(&self) -> impl Iterator<Item = &Drawn> {
+        self.indicators.iter().filter(|drawn| self.show_indicators && drawn.indicator.visible)
+    }
+
     fn forget(&mut self) {
         self.undo.pop();
     }
@@ -1780,9 +1789,7 @@ impl ChartView {
     /// one thing is selected at a time, and the keys act on that one.
     pub fn pick(&self, id: Option<u32>) {
         let id = id.filter(|id| {
-            self.state.borrow().indicators.iter().any(|d| {
-                d.indicator.id == *id && d.indicator.visible && d.indicator.kind.selectable()
-            })
+            self.state.borrow().shown_indicators().any(|d| d.indicator.id == *id && d.indicator.kind.selectable())
         });
         let changed = {
             let mut s = self.state.borrow_mut();
@@ -3233,6 +3240,18 @@ impl ChartView {
     /// them a chart is a shape with no scale.
     pub fn set_show_grid(&self, show: bool) {
         self.state.borrow_mut().show_grid = show;
+        self.redraw();
+    }
+
+    pub fn show_indicators(&self) -> bool {
+        self.state.borrow().show_indicators
+    }
+
+    /// Show or hide every indicator at once, strips included, for a look at
+    /// the bars alone. Each keeps its own `visible`, so they come back as
+    /// they were.
+    pub fn set_show_indicators(&self, show: bool) {
+        self.state.borrow_mut().show_indicators = show;
         self.redraw();
     }
 
@@ -6009,7 +6028,7 @@ fn draw_indicator_fills(
     columns: &Columns,
     to_y: &impl Fn(f64) -> f64,
 ) {
-    for drawn in state.indicators.iter().filter(|d| d.indicator.visible) {
+    for drawn in state.shown_indicators() {
         match &drawn.output {
             Output::Bands(bands) => {
                 // One shaded region, between the first band's own edges: the
@@ -6042,7 +6061,7 @@ fn draw_indicator_lines(
     columns: &Columns,
     to_y: &impl Fn(f64) -> f64,
 ) {
-    for drawn in state.indicators.iter().filter(|d| d.indicator.visible) {
+    for drawn in state.shown_indicators() {
         let lit = state.picked == Some(drawn.indicator.id);
         match &drawn.output {
             Output::Line(values) => {
@@ -6154,7 +6173,7 @@ fn draw_time_ground(cr: &cairo::Context, state: &State, columns: &Columns, plan:
     cr.save().ok();
     cr.rectangle(left, top, plan.plot_w, plan.total_h);
     cr.clip();
-    for drawn in state.indicators.iter().filter(|d| d.indicator.visible) {
+    for drawn in state.shown_indicators() {
         let Output::Time(time) = &drawn.output else { continue };
         for span in time.spans.iter().filter(|s| on_screen_run(columns, s.from, s.to)) {
             let (colour, alpha) =
@@ -7798,6 +7817,31 @@ mod tests {
         assert!(high >= 9.0);
     }
 
+
+    /// Hiding every indicator takes their strips away as well, so the price
+    /// gets the height, and leaves each one's own `visible` as it was.
+    #[test]
+    fn hiding_the_indicators_gives_their_strips_back_to_the_price() {
+        let (w, h) = (600.0, 400.0);
+        let mut state = charted(11);
+        state.bars = ramp(40);
+        let series = state.bars.clone();
+        let indicator = Indicator::new(1, indicators::Kind::Atr);
+        state.indicators = vec![Drawn {
+            color: "#5588ff".to_string(),
+            output: indicators::compute(&indicator, &series, 0, state.timeframe, None),
+            indicator,
+        }];
+        let shown = layout(&state, w, h);
+        assert!(shown.rows.iter().any(|row| row.pane == Some(1)), "the ATR has a strip");
+
+        state.show_indicators = false;
+        let hidden = layout(&state, w, h);
+        assert!(hidden.rows.iter().all(|row| row.pane.is_none()), "no strip while hidden");
+        assert!(hidden.price_h > shown.price_h, "the price takes the room");
+        assert!(state.indicators[0].indicator.visible, "the indicator's own switch is untouched");
+        assert_eq!(state.shown_indicators().count(), 0);
+    }
 
     /// An ATR zoomed into its own warm-up has nothing to scale to and nothing
     /// to draw, and it is the one strip that can be in that position: a fixed

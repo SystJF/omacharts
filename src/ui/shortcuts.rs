@@ -63,6 +63,10 @@ pub const BINDINGS: &[Binding] = &[
     // The gridlines' neighbour: both take a layer off the chart for a look
     // at what is under it. Ctrl+B alone is the watchlist.
     global("chart.bars", &["<Ctrl><Shift>b"]),
+    // H for hide: the indicators, all at once, for a look at the bars.
+    // Ctrl+Shift+I would sit beside Ctrl+I, but the indicator list adds one
+    // with it. Shift, so the bare key is left for the drawings.
+    global("chart.show-indicators", &["<Ctrl><Shift>h"]),
     // O, not P: Ctrl+P is kept for a command palette. A screenshot of the
     // chartbook is the same key with Shift, the way closing one already is.
     global("chart.screenshot", &["<Ctrl>o"]),
