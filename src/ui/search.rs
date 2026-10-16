@@ -168,8 +168,6 @@ fn repopulate(
     }
 }
 
-/// Ticker, name, and what kind of thing it is. Nothing else — a picker is for
-/// picking.
 /// A symbol the inventory does not have, if the query could be one.
 ///
 /// Deliberately strict about shape rather than about existence: the provider
@@ -209,120 +207,16 @@ fn unlisted_row(instrument: &Instrument) -> gtk::ListBoxRow {
     row
 }
 
-/// The badge's box, in logical pixels.
-const BADGE: i32 = 18;
-
-/// A quiet mark for what kind of thing this is.
-///
-/// Drawn rather than lettered, in the row's own colour at half strength: the
-/// kind is already named in words further along the row, so this is there to
-/// be recognised at a glance down the list, not read.
-fn kind_badge(kind: omacharts_engine::InstrumentKind) -> gtk::DrawingArea {
-    let area = gtk::DrawingArea::new();
-    area.set_content_width(BADGE);
-    area.set_content_height(BADGE);
-    area.set_valign(gtk::Align::Center);
-    area.set_draw_func(move |area, cr, w, h| {
-        let c = area.color();
-        let (r, g, b) = (c.red() as f64, c.green() as f64, c.blue() as f64);
-        // Half strength reads as half strength on a dark theme, where the mark
-        // is lighter than its ground. Ink on paper needs a little more to look
-        // equally quiet.
-        let alpha = if 0.3 * r + 0.6 * g + 0.1 * b > 0.5 { 0.5 } else { 0.62 };
-        cr.set_source_rgba(r, g, b, alpha);
-        draw_kind(cr, kind, w as f64, h as f64);
-    });
-    area
-}
-
-/// The glyph itself, in whatever source the caller has already set.
-///
-/// Every mark lives in the same 11-pixel box so none of them out-weighs the
-/// others down a list, and every axis-aligned stroke sits on a half pixel so a
-/// one-pixel line covers one pixel instead of smearing across two.
-fn draw_kind(cr: &gtk::cairo::Context, kind: omacharts_engine::InstrumentKind, w: f64, h: f64) {
-    use omacharts_engine::InstrumentKind as K;
-    // The box: snapped edges, and a centre line that is itself snapped.
-    let snap = |v: f64| v.floor() + 0.5;
-    let (left, top) = (snap(w / 2.0 - 5.5), snap(h / 2.0 - 5.5));
-    let (right, bottom) = (left + 11.0, top + 11.0);
-    let (cx, cy) = (left + 5.5, top + 5.5);
-
-    cr.set_line_width(1.0);
-    cr.set_line_cap(gtk::cairo::LineCap::Round);
-    cr.set_line_join(gtk::cairo::LineJoin::Round);
-    match kind {
-        // A candle: the thing a stock chart is made of.
-        K::Equity => {
-            cr.move_to(cx, top);
-            cr.line_to(cx, bottom);
-            let _ = cr.stroke();
-            cr.rectangle(cx - 3.0, top + 2.0, 6.0, 8.0);
-            let _ = cr.stroke();
-        }
-        // A basket: a ragged list of holdings rather than one price.
-        K::Etf => {
-            for (i, y) in [top + 1.0, cy, bottom - 1.0].into_iter().enumerate() {
-                cr.move_to(left, y);
-                cr.line_to(right - [0.0, 3.0, 5.0][i], y);
-            }
-            let _ = cr.stroke();
-        }
-        // A line going up, which is what an index is a picture of.
-        K::Index => {
-            cr.move_to(left, bottom - 1.0);
-            cr.line_to(left + 4.0, top + 5.0);
-            cr.line_to(left + 7.0, top + 7.0);
-            cr.line_to(right, top + 1.0);
-            let _ = cr.stroke();
-        }
-        // A contract: a ruled sheet with a date on it.
-        K::FutureRoot => {
-            cr.rectangle(left, top + 1.0, 11.0, 9.0);
-            cr.move_to(left, top + 4.0);
-            cr.line_to(right, top + 4.0);
-            let _ = cr.stroke();
-        }
-        // A pair, exchanged.
-        K::Fx => {
-            cr.move_to(left, cy - 2.5);
-            cr.line_to(right, cy - 2.5);
-            cr.move_to(right - 2.5, cy - 5.0);
-            cr.line_to(right, cy - 2.5);
-            cr.line_to(right - 2.5, cy);
-            cr.move_to(right, cy + 2.5);
-            cr.line_to(left, cy + 2.5);
-            cr.move_to(left + 2.5, cy);
-            cr.line_to(left, cy + 2.5);
-            cr.line_to(left + 2.5, cy + 5.0);
-            let _ = cr.stroke();
-        }
-        // A block, the way every chain draws itself.
-        K::Crypto => {
-            let r = 5.5 / (std::f64::consts::PI / 6.0).cos();
-            for i in 0..6 {
-                let a = std::f64::consts::PI / 6.0 + i as f64 * std::f64::consts::TAU / 6.0;
-                let (x, y) = (cx + r * a.cos(), cy + r * a.sin() * 0.88);
-                if i == 0 {
-                    cr.move_to(x, y);
-                } else {
-                    cr.line_to(x, y);
-                }
-            }
-            cr.close_path();
-            let _ = cr.stroke();
-        }
-    }
-}
-
+/// A row the way the rail draws one: ticker, name, where it trades, what
+/// kind of thing it is. Nothing else — a picker is for picking.
 fn row_for(instrument: &Instrument) -> gtk::ListBoxRow {
     let ticker = gtk::Label::new(Some(&instrument.display_symbol()));
-    ticker.add_css_class("symbol-row-ticker");
+    ticker.add_css_class("pick-ticker");
     ticker.set_xalign(0.0);
-    ticker.set_width_chars(9);
+    ticker.set_width_chars(8);
 
     let name = gtk::Label::new(Some(&instrument.full_name()));
-    name.add_css_class("symbol-row-name");
+    name.add_css_class("pick-name");
     name.set_xalign(0.0);
     name.set_hexpand(true);
     name.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -330,7 +224,7 @@ fn row_for(instrument: &Instrument) -> gtk::ListBoxRow {
     // Where it trades, the way TradingView says it: the name alone does not
     // tell you whether BBVA means Madrid or the New York receipt.
     let venue = gtk::Label::new(instrument.exchange_label());
-    venue.add_css_class("symbol-venue");
+    venue.add_css_class("pick-venue");
     venue.set_valign(gtk::Align::Center);
     venue.set_visible(instrument.exchange_label().is_some());
 
@@ -338,12 +232,7 @@ fn row_for(instrument: &Instrument) -> gtk::ListBoxRow {
     kind.add_css_class("symbol-kind");
     kind.set_valign(gtk::Align::Center);
 
-    let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    row_box.set_margin_top(7);
-    row_box.set_margin_bottom(7);
-    row_box.set_margin_start(10);
-    row_box.set_margin_end(10);
-    row_box.append(&kind_badge(instrument.kind));
+    let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row_box.append(&ticker);
     row_box.append(&name);
     row_box.append(&venue);

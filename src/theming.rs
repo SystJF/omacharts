@@ -354,15 +354,15 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 .timeframe-strip button { min-width: 34px; padding: 2px 6px; }
 
 /* Where a symbol trades: quieter than its name, beside what it is. */
-.symbol-venue {
-  font-size: 0.8em;
+.pick-venue {
+  font-family: monospace;
+  font-size: 0.78em;
   opacity: 0.45;
-  font-feature-settings: 'tnum';
 }
 
 /* The row offering a symbol nobody listed. Quieter than a real match, because
    it is a guess rather than an answer. */
-.symbol-row-unlisted .symbol-row-name { opacity: 0.55; font-style: italic; }
+.symbol-row-unlisted .pick-name { font-style: italic; }
 .symbol-row-unlisted .symbol-kind { opacity: 0.4; }
 
 /* Thickness and line style, picked by looking rather than by naming a number.
@@ -444,6 +444,20 @@ popover.pick-frame > contents { padding: 0; }
 }
 .pick-target { font-family: monospace; font-size: 0.78em; opacity: 0.55; }
 .pick-list { padding: 4px; background: none; }
+/* A picker's rows are the rail's: 26px, the ticker in the face numbers and
+   keys are written in, the name a dim reminder beside it, and the rail's
+   tint for the one Enter would take. */
+.pick-list.navigation-sidebar > row {
+  min-height: 26px;
+  padding: 0 8px;
+  margin: 0 0 1px 0;
+  border-radius: 6px;
+}
+.pick-list.navigation-sidebar > row:selected { background-color: alpha(@accent_color, 0.22); }
+.pick-list.navigation-sidebar > row:selected:hover { background-color: alpha(@accent_color, 0.28); }
+.pick-list.navigation-sidebar > row:selected:focus-visible { outline: none; }
+.pick-ticker { font-family: monospace; font-weight: 700; font-size: 0.9em; }
+.pick-name { font-size: 0.9em; opacity: 0.55; }
 /* The chart a picker will change, dimmed under it. */
 .pick-shade { background-color: alpha(black, 0.4); }
 
