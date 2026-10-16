@@ -444,9 +444,16 @@ pub fn parse_chart(body: &serde_json::Value) -> Result<Vec<Bar>, ProviderError> 
 /// current time rather than the session's open. On a daily series that is a
 /// second bar for today, and anything comparing the last two closes — a
 /// change column, say — reads a change of exactly zero.
-fn collapse_days(bars: Vec<Bar>, timeframe: Timeframe) -> Vec<Bar> {
+///
+/// FX is the case a calendar day misses: its days are stamped at London
+/// midnight, 23:00 UTC the evening before in summer, so Friday's session is
+/// Thursday 23:00 and its partial is Friday 09:36. See [`on_the_clock`].
+fn collapse_days(mut bars: Vec<Bar>, timeframe: Timeframe) -> Vec<Bar> {
     if !matches!(timeframe.unit, Unit::Day | Unit::Week) || bars.len() < 2 {
         return bars;
+    }
+    if timeframe.unit == Unit::Day {
+        on_the_clock(&mut bars);
     }
     let day_of = |ts: i64| ts.div_euclid(86_400);
     let mut out: Vec<Bar> = Vec::with_capacity(bars.len());
@@ -466,9 +473,56 @@ fn collapse_days(bars: Vec<Bar>, timeframe: Timeframe) -> Vec<Bar> {
     out
 }
 
+/// Put the partial bar for the session in progress on the series' own clock.
+///
+/// Yahoo stamps it with the time of the last print, so every refresh brings
+/// the same day under a new stamp: the store keeps each as a bar of its own,
+/// and once the day closes, Yahoo's own bar for it lands beside them all.
+/// EURUSD collected seven bars for one Friday that way.
+///
+/// The session it belongs to is the one whose date it falls on, read three
+/// hours forward: that puts London midnight, a New York open and a future's
+/// 04:00 each on their own day.
+/// It takes that session's stamp, a whole number of days from the bar
+/// before it, so the next refresh replaces it and the closed bar does too.
+/// A last bar already on the clock is left alone.
+fn on_the_clock(bars: &mut [Bar]) {
+    const DAY: i64 = 86_400;
+    let [.., before, last] = bars else { return };
+    if (last.ts - before.ts).rem_euclid(DAY) == 0 {
+        return;
+    }
+    let date = |ts: i64| (ts + 3 * 3_600).div_euclid(DAY);
+    last.ts = before.ts + (date(last.ts) - date(before.ts)) * DAY;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// EURUSD on Friday 2026-10-16 at 09:36 UTC: Yahoo's last closed day is
+    /// Thursday's, stamped Wednesday 23:00, and the day in progress comes
+    /// stamped with the time of its last print.
+    #[test]
+    fn an_fx_day_in_progress_takes_its_session_stamp() {
+        let bar = |ts, close| Bar { ts, open: close, high: close, low: close, close, volume: 0.0 };
+        let wed_23 = 1_792_018_800; // 2026-10-14 23:00 UTC
+        let day = 86_400;
+        let at = |minutes_past_wed_23: i64| wed_23 + minutes_past_wed_23 * 60;
+        let fetch = |partial| collapse_days(vec![bar(wed_23 - day, 1.120), bar(wed_23, 1.1195), bar(partial, 1.1255)], Timeframe::days(1));
+
+        let morning = fetch(at(10 * 60 + 36 + 24 * 60));
+        assert_eq!(morning.last().map(|b| b.ts), Some(wed_23 + day), "Thursday 23:00, Friday's own stamp");
+        let later = fetch(at(11 * 60 + 7 + 24 * 60));
+        assert_eq!(later.last().map(|b| b.ts), Some(wed_23 + day), "the next refresh is the same bar");
+        assert_eq!(later.len(), 3);
+
+        // Sunday evening's first prints belong to Monday.
+        let sunday = fetch(wed_23 + 4 * day - 3_600);
+        assert_eq!(sunday.last().map(|b| b.ts), Some(wed_23 + 4 * day));
+        // A bar on the clock stays where it is.
+        assert_eq!(fetch(wed_23 + day).last().map(|b| b.ts), Some(wed_23 + day));
+    }
 
     /// Yahoo has no stream, so a chart drawn from it has to be asked again or
     /// it quietly stops being true. The window polls because this says to,
