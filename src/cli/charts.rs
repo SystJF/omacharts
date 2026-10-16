@@ -375,6 +375,7 @@ pub fn new_pane(
         "auto_scale": true,
         "log_scale": defaults.log_scale,
         "show_indicators": true,
+        "drawings_shown": true,
     })
 }
 

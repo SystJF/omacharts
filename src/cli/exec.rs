@@ -1449,6 +1449,10 @@ fn chart_set(
         chart["show_indicators"] = json!(shown == "on");
         changed.push(format!("indicators {}", if shown == "on" { "shown" } else { "hidden" }));
     }
+    if let Some(shown) = arg(m, "drawings") {
+        chart["drawings_shown"] = json!(shown == "on");
+        changed.push(format!("drawings {}", if shown == "on" { "shown" } else { "hidden" }));
+    }
     match template {
         None => {}
         // The template's indicators replace the chart's own, which go: the
@@ -1474,7 +1478,8 @@ fn chart_set(
     if changed.is_empty() {
         return Err(Fault::usage(
             "nothing to change; pass --symbol, --resolution, --style, --bars, --session, --link, --grid, \
-             --auto-scale, --log-scale, --show-indicators, --show-drawings, --send-drawings or --template"
+             --auto-scale, --log-scale, --show-indicators, --drawings, --show-drawings, \
+             --send-drawings or --template"
                 .into(),
         ));
     }
@@ -3342,6 +3347,7 @@ fn pane_json(pane: &Value) -> String {
         "log_scale": pane["log_scale"].as_bool().unwrap_or(false),
         // And shown, before they could all be hidden at once.
         "show_indicators": pane["show_indicators"].as_bool().unwrap_or(true),
+        "drawings_shown": pane["drawings_shown"].as_bool().unwrap_or(true),
         "link": stored_mode(pane).key(),
         "shows_drawings": pane["shows_drawings"].as_bool().unwrap_or(true),
         "sends_drawings": pane["sends_drawings"].as_bool().unwrap_or(true),
@@ -5779,6 +5785,26 @@ mod tests {
 
         run("chart set --book Macro --show-indicators on", &store);
         assert_eq!(charts(&store)["charts"][0]["show_indicators"], true);
+    }
+
+    /// Hiding a chart's drawings is stored with it and reported back, keeps
+    /// every drawing, and a chart stored before it could be shows them.
+    #[test]
+    fn a_charts_drawings_can_all_be_hidden_from_a_command() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --symbol SPY --switch", &store);
+        let charts = |store: &Store| -> serde_json::Value {
+            serde_json::from_str(&run("chart list --book Macro --json", store).out).unwrap()
+        };
+        assert_eq!(charts(&store)["charts"][0]["drawings_shown"], true, "shown to begin with");
+
+        let off = run("chart set --book Macro --drawings off", &store);
+        assert_eq!(off.code, 0, "{}", off.err);
+        assert!(off.out.contains("drawings hidden"), "{}", off.out);
+        assert_eq!(charts(&store)["charts"][0]["drawings_shown"], false);
+
+        run("chart set --book Macro --drawings on", &store);
+        assert_eq!(charts(&store)["charts"][0]["drawings_shown"], true);
     }
 
     /// A chart stored before the price scale was remembered says nothing

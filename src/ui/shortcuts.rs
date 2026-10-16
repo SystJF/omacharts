@@ -67,6 +67,9 @@ pub const BINDINGS: &[Binding] = &[
     // Ctrl+Shift+I would sit beside Ctrl+I, but the indicator list adds one
     // with it. Shift, so the bare key is left for the drawings.
     global("chart.show-indicators", &["<Ctrl><Shift>h"]),
+    // And bare, the drawings, the chart's own and the shared: what gets in
+    // the way of the bars most often.
+    global("chart.show-drawings", &["<Ctrl>h"]),
     // O, not P: Ctrl+P is kept for a command palette. A screenshot of the
     // chartbook is the same key with Shift, the way closing one already is.
     global("chart.screenshot", &["<Ctrl>o"]),

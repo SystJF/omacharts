@@ -831,6 +831,8 @@ pub const SURFACE: &[Noun] = &[
                         .of(&["on", "off"]),
                     Flag::valued("show-indicators", "BOOL", "draw the chart's indicators, or hide them all")
                         .of(&["on", "off"]),
+                    Flag::valued("drawings", "BOOL", "draw the chart's drawings, its own and the shared, or hide them all")
+                        .of(&["on", "off"]),
                     Flag::valued(
                         "template",
                         "TEMPLATE",
@@ -1310,6 +1312,7 @@ const STORED_FIELDS: &[(&str, &str, &str)] = &[
     ("log_scale", "chart set", "--log-scale"),
     ("template", "chart set", "--template"),
     ("show_indicators", "chart set", "--show-indicators"),
+    ("drawings_shown", "chart set", "--drawings"),
     ("name", "chartbook rename", ""),
     ("layout", "chart split", ""),
     ("focused", "chart focus", ""),

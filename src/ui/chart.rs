@@ -191,6 +191,10 @@ struct State {
     /// What has been drawn on this symbol, in the order it was drawn. The
     /// chart draws what it is handed; the store is where they live.
     drawings: Vec<Drawing>,
+    /// Whether the drawings are drawn. Off hides every one of them, the
+    /// chart's own and the shared, and none answers the pointer or a key;
+    /// they are still held, so turning it back on finds them as they were.
+    show_drawings: bool,
     /// Which of them has the grips, by position in `drawings`.
     /// The drawings that wear grips, in the order they were taken: the last
     /// is the one most recently picked, and what a single-drawing question
@@ -1127,6 +1131,7 @@ impl State {
             price_auto: true,
             price_log: false,
             drawings: Vec::new(),
+            show_drawings: true,
             sticky: false,
             editing: None,
             editing_at: None,
@@ -1396,7 +1401,7 @@ impl State {
     /// Every drawing a box in pixels touches, in list order.
     fn drawings_in(&self, width: f64, height: f64, rect: (f64, f64, f64, f64)) -> Vec<usize> {
         let (first, visible) = self.slice();
-        if visible == 0 {
+        if visible == 0 || !self.show_drawings {
             return Vec::new();
         }
         let plan = layout(self, width, height);
@@ -1411,7 +1416,7 @@ impl State {
     /// The drawing under a pixel, topmost first, and which part of it.
     fn drawing_at(&self, width: f64, height: f64, x: f64, y: f64) -> Option<(usize, Grip)> {
         let (first, visible) = self.slice();
-        if visible == 0 {
+        if visible == 0 || !self.show_drawings {
             return None;
         }
         let plan = layout(self, width, height);
@@ -1956,6 +1961,9 @@ impl ChartView {
             state.placing = None;
             if kind.is_some() {
                 state.selected.clear();
+                // A tool picked up is a drawing about to be made, and one
+                // made out of sight would read as one that never was.
+                state.show_drawings = true;
             }
         }
         // A tool in hand is about to make a drawing, which is selected once
@@ -2168,7 +2176,9 @@ impl ChartView {
     pub fn delete_all(&self) {
         let removed = {
             let mut state = self.state.borrow_mut();
-            if state.drawings.is_empty() {
+            // Hidden, there is nothing on screen to delete: the drawings
+            // are kept for when they come back.
+            if state.drawings.is_empty() || !state.show_drawings {
                 return;
             }
             state.selected.clear();
@@ -2204,6 +2214,10 @@ impl ChartView {
     fn step(&self, back: bool) -> bool {
         let restored = {
             let mut state = self.state.borrow_mut();
+            // A step nobody could see taken is not one to take.
+            if !state.show_drawings {
+                return false;
+            }
             let Some(list) = (if back { state.undo.pop() } else { state.redo.pop() }) else {
                 return false;
             };
@@ -3356,6 +3370,31 @@ impl ChartView {
 
     pub fn set_context_menu_handler(&self, handler: impl Fn(f64, f64) + 'static) {
         *self.on_context_menu.borrow_mut() = Some(Box::new(handler));
+    }
+
+    pub fn show_drawings(&self) -> bool {
+        self.state.borrow().show_drawings
+    }
+
+    /// Show or hide every drawing at once, the chart's own and the shared,
+    /// for a look at the bars. They are kept, not removed: hidden, nothing
+    /// of them is selected or edited, and they come back as they were.
+    pub fn set_show_drawings(&self, show: bool) {
+        if !show {
+            // What was being typed is kept, the way clicking away keeps it.
+            self.end_text_edit(text_editor::Ended::Commit);
+            if self.armed().is_some() {
+                self.arm(None);
+            }
+        }
+        {
+            let mut state = self.state.borrow_mut();
+            state.show_drawings = show;
+            if !show {
+                state.selected.clear();
+            }
+        }
+        self.redraw();
     }
 
     pub fn set_indicators(&self, indicators: Vec<Drawn>) {
@@ -5675,7 +5714,7 @@ const GRIP_HALF: f64 = 3.5;
 /// lines and under the strips, clipped to the price plot so a line drawn
 /// off the top does not cross an RSI.
 fn draw_drawings(cr: &cairo::Context, state: &State, plan: &Layout, scale: &PriceScale) {
-    if state.drawings.is_empty() {
+    if state.drawings.is_empty() || !state.show_drawings {
         return;
     }
     cr.save().ok();
@@ -7174,7 +7213,7 @@ mod tests {
     }
 
     /// Draw something onto a surface of this size and hand back its pixels.
-    fn frame(width: f64, height: f64, paint: impl FnOnce(&cairo::Context)) -> Vec<u8> {
+    pub(super) fn frame(width: f64, height: f64, paint: impl FnOnce(&cairo::Context)) -> Vec<u8> {
         let mut surface =
             cairo::ImageSurface::create(cairo::Format::ARgb32, width as i32, height as i32)
                 .expect("a surface to draw on");
@@ -8358,6 +8397,26 @@ mod drawing_tests {
         state.tool = None;
         state.placing = None;
         assert!(!state.begin_placing(800.0, 400.0, 200.0, 150.0, false));
+    }
+
+    /// A chart that hides its drawings draws none of them, and none answers
+    /// the pointer or a marquee; they are all still held.
+    #[test]
+    fn hidden_drawings_are_neither_drawn_nor_picked() {
+        let mut state = charted(400);
+        let (w, h) = (800.0, 400.0);
+        let a = state.locate(w, h, 200.0, 150.0).unwrap();
+        let b = state.locate(w, h, 500.0, 250.0).unwrap();
+        let bare = super::tests::frame(w, h, |cr| draw(cr, w, h, &state));
+        state.drawings.push(Drawing::new(DrawingKind::Rect, a, b));
+        assert!(state.drawing_at(w, h, 350.0, 200.0).is_some(), "shown, the box answers");
+        assert_ne!(super::tests::frame(w, h, |cr| draw(cr, w, h, &state)), bare, "and is drawn");
+
+        state.show_drawings = false;
+        assert_eq!(state.drawing_at(w, h, 350.0, 200.0), None);
+        assert!(state.drawings_in(w, h, (0.0, 0.0, w, h)).is_empty());
+        assert_eq!(super::tests::frame(w, h, |cr| draw(cr, w, h, &state)), bare, "nothing of it is left on the picture");
+        assert_eq!(state.drawings.len(), 1, "it is still held");
     }
 
     /// The newest drawing is picked first, and a press on an unselected

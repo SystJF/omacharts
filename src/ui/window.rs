@@ -207,6 +207,7 @@ const SHORTCUT_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+Esc", "Reset the view"),
             ("Ctrl+Shift+G", "Show or hide the gridlines"),
             ("Ctrl+Shift+B", "Hide the bars, or show them as they were"),
+            ("Ctrl+H", "Show or hide the drawings"),
             ("Ctrl+Shift+H", "Show or hide the indicators"),
             ("Ctrl+Alt+Shift+1 … 9", "Chart template N, in the order they are listed"),
             ("Ctrl+Alt+Shift+0", "No chart template"),
@@ -607,6 +608,7 @@ mod tests {
                 auto_scale: false,
                 log_scale: true,
                 show_indicators: true,
+                drawings_shown: true,
             }],
             watchlist: Some(4),
             sidebar_shown: Some(false),
@@ -682,6 +684,7 @@ mod tests {
             auto_scale: true,
             log_scale: false,
             show_indicators: true,
+            drawings_shown: true,
         }
     }
 
@@ -1477,6 +1480,11 @@ struct StoredPane {
     /// hidden at once, and every one of those drew them.
     #[serde(default = "yes")]
     show_indicators: bool,
+    /// Whether the chart draws its drawings, its own and the shared, or
+    /// hides them all. Missing from a chart written before they could be
+    /// hidden, and every one of those drew them.
+    #[serde(default = "yes")]
+    drawings_shown: bool,
     /// Whether the chart shows what other charts of its symbol draw, and
     /// whether it sends them what is drawn here. Both on by default, which
     /// is what a book written before either existed gets — and what the
@@ -1863,6 +1871,7 @@ pub struct Window {
     /// The indicator the open indicator menu is about.
     menu_indicator: RefCell<Option<u32>>,
     indicators_action: RefCell<Option<gio::SimpleAction>>,
+    drawings_action: RefCell<Option<gio::SimpleAction>>,
     auto_scale_action: RefCell<Option<gio::SimpleAction>>,
     log_scale_action: RefCell<Option<gio::SimpleAction>>,
     drawing_config_action: RefCell<Option<gio::SimpleAction>>,
@@ -2042,6 +2051,7 @@ impl Window {
             bars_action: RefCell::new(None),
             menu_indicator: RefCell::new(None),
             indicators_action: RefCell::new(None),
+            drawings_action: RefCell::new(None),
             auto_scale_action: RefCell::new(None),
             log_scale_action: RefCell::new(None),
             drawing_config_action: RefCell::new(None),
@@ -2404,6 +2414,14 @@ impl Window {
         pane.view.set_tool_handler(move || {
             if shower.focused.get() == id {
                 shower.sync_drawing_bar();
+                // A tool picked up on a chart with its drawings hidden shows
+                // them again, and that is stored like the key would store it.
+                let hidden = shower.drawings_action.borrow().as_ref().and_then(|a| a.state()).and_then(|v| v.get::<bool>()) == Some(false);
+                if hidden && shower.drawings_shown() {
+                    let pane = shower.focused_pane();
+                    shower.sync_chart_actions(&pane);
+                    shower.save_soon();
+                }
             }
         });
 
@@ -2596,6 +2614,9 @@ impl Window {
         if let Some(action) = self.indicators_action.borrow().as_ref() {
             action.set_state(&pane.view.show_indicators().to_variant());
         }
+        if let Some(action) = self.drawings_action.borrow().as_ref() {
+            action.set_state(&pane.view.show_drawings().to_variant());
+        }
         if let Some(action) = self.auto_scale_action.borrow().as_ref() {
             action.set_state(&pane.view.price_auto().to_variant());
         }
@@ -2657,6 +2678,7 @@ impl Window {
         added.bars_hidden.set(from.bars_hidden.get());
         added.view.set_bars_hidden(from.bars_hidden.get());
         added.view.set_show_indicators(from.view.show_indicators());
+        added.view.set_show_drawings(from.view.show_drawings());
         let next = self.layout.borrow().split(from.id, added.id, horizontal);
         *self.layout.borrow_mut() = next;
         self.rebuild_layout();
@@ -3277,6 +3299,7 @@ impl Window {
                     auto_scale: pane.view.price_auto(),
                     log_scale: pane.view.price_log(),
                     show_indicators: pane.view.show_indicators(),
+                    drawings_shown: pane.view.show_drawings(),
                 }
             })
             .collect();
@@ -3477,6 +3500,7 @@ impl Window {
             pane.bars_hidden.set(stored.bars_hidden);
             pane.view.set_bars_hidden(stored.bars_hidden);
             pane.view.set_show_indicators(stored.show_indicators);
+            pane.view.set_show_drawings(stored.drawings_shown);
             restored.push((pane, stored));
         }
 
@@ -7495,6 +7519,22 @@ impl Window {
         self.save_workspace();
     }
 
+    /// Whether the focused chart draws its drawings.
+    pub fn drawings_shown(&self) -> bool {
+        self.focused_pane().view.show_drawings()
+    }
+
+    /// Hide every drawing on the focused chart, or bring them back: this
+    /// chart only, like its indicators. Nothing is removed, here or on the
+    /// other charts of the symbol.
+    pub fn set_drawings_shown(self: &Rc<Self>, show: bool) {
+        let pane = self.focused_pane();
+        pane.view.set_show_drawings(show);
+        self.sync_chart_actions(&pane);
+        self.sync_drawing_bar();
+        self.save_workspace();
+    }
+
     pub fn auto_scale(&self) -> bool {
         self.focused_pane().view.price_auto()
     }
@@ -8462,6 +8502,7 @@ impl Window {
         // chart has any.
         shortcuts::append(&menu, "Gridlines", "chart.grid");
         shortcuts::append(&menu, "Indicators", "chart.show-indicators");
+        shortcuts::append(&menu, "Drawings", "chart.show-drawings");
 
         // The layout, in its own section: splitting and closing are about the
         // arrangement rather than about what this chart draws.
@@ -8661,6 +8702,12 @@ impl Window {
         shown.connect_activate(move |_, _| this.set_show_indicators(!this.indicators_shown()));
         actions.add_action(&shown);
         *self.indicators_action.borrow_mut() = Some(shown);
+
+        let shown = gio::SimpleAction::new_stateful("show-drawings", None, &self.drawings_shown().to_variant());
+        let this = self.clone();
+        shown.connect_activate(move |_, _| this.set_drawings_shown(!this.drawings_shown()));
+        actions.add_action(&shown);
+        *self.drawings_action.borrow_mut() = Some(shown);
 
         let split_h = gio::SimpleAction::new("split-h", None);
         let this = self.clone();
