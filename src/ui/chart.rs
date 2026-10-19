@@ -5856,18 +5856,15 @@ fn axis_ticks(
 ) -> (Vec<i64>, i64) {
     let times: Vec<Option<chrono::NaiveDateTime>> =
         (0..total).map(|column| wall_clock(time_at(column)?, utc)).collect();
+    // Lazily, so trying a rung that does not fit allocates nothing.
     let ticks = |every: Every| {
-        let mut ticks = Vec::new();
         let mut previous = None;
-        for (column, at) in times.iter().enumerate() {
-            let Some(at) = at else { continue };
-            let period = every.period(*at);
-            if previous.is_some_and(|p| p != period) {
-                ticks.push(column as i64);
-            }
+        times.iter().enumerate().filter_map(move |(column, at)| {
+            let period = every.period((*at)?);
+            let changed = previous.is_some_and(|p| p != period);
             previous = Some(period);
-        }
-        ticks
+            changed.then_some(column as i64)
+        })
     };
     // A session's first bar starts a new stretch, and the round time just
     // after it starts another: 15:30 and 16:00 land two bars apart on a 15m
@@ -5898,13 +5895,12 @@ fn axis_ticks(
         if every.seconds() < step {
             continue;
         }
-        let found = ticks(every);
-        if found.len() <= room {
-            return (spaced(found), every.seconds());
+        if ticks(every).count() <= room {
+            return (spaced(ticks(every).collect()), every.seconds());
         }
         coarsest = every;
     }
-    (spaced(ticks(coarsest)), coarsest.seconds())
+    (spaced(ticks(coarsest).collect()), coarsest.seconds())
 }
 
 /// Label an axis tick at the detail the gap between ticks justifies.
