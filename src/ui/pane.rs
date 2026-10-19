@@ -46,9 +46,13 @@ pub struct ChartPane {
     ///
     /// Shown on the focused chart only: four strips on screen is the same row
     /// of buttons four times, and only one of them is the one you are about to
-    /// press.
+    /// press. The others say their resolution in a word instead.
     pub strip: gtk::Box,
     pub buttons: RefCell<Vec<(Timeframe, gtk::ToggleButton)>>,
+    /// The resolution beside the symbol, which opens every resolution: the
+    /// one way to change it that fits on any chart, however narrow.
+    pub timeframe_menu: gtk::MenuButton,
+    timeframe_label: gtk::Label,
     /// One row per indicator, under the readout. Shown on the focused chart
     /// only, like the strip: four charts each listing their moving averages
     /// over the drawing is the noise the strip already learned to avoid.
@@ -138,6 +142,21 @@ impl ChartPane {
         strip.set_valign(gtk::Align::Center);
         strip.set_visible(false);
 
+        let timeframe_menu = gtk::MenuButton::new();
+        timeframe_menu.add_css_class("flat");
+        timeframe_menu.add_css_class("readout-symbol");
+        timeframe_menu.set_valign(gtk::Align::Center);
+        timeframe_menu.set_tooltip_text(Some("Resolution: click for the list"));
+        // No chevron: a screenshot keeps this label because it is information,
+        // and a chevron would put a control into every picture of a chart. The
+        // flat button's hover is affordance enough, as it is for the symbol.
+        // A label of our own rather than the button's, because a MenuButton
+        // draws the arrow after a plain label whatever it is told, and only
+        // listens when given a child.
+        let timeframe_label = gtk::Label::new(None);
+        timeframe_menu.set_child(Some(&timeframe_label));
+        timeframe_menu.set_always_show_arrow(false);
+
         // Drawn rather than named. Adwaita's "insert-link" is a chain with a
         // downward arrow under it — it means *insert* a link, and the arrow
         // read as a dropdown nobody could open. There is no plain chain in the
@@ -166,10 +185,13 @@ impl ChartPane {
         gear.set_tooltip_text(Some(&shortcuts::tooltip("Chart settings", "chart.settings")));
         gear.set_valign(gtk::Align::Center);
 
-        // The symbol alone on the left, as the chart's title. The controls
-        // go to the opposite corner, where they stay out of the readout.
+        // The symbol and its resolution on the left, as the chart's title:
+        // the resolution stays on every chart, focused or not, and in every
+        // screenshot, because which bars these are is information. The
+        // controls go to the opposite corner, where they stay out of it.
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         bar.append(&symbol_button);
+        bar.append(&timeframe_menu);
         // As tall as the strip, so the symbol reads on the same line as the
         // resolutions. Alone it is shorter than the strip and sat above it.
         // A number rather than a size group, because the strip is hidden on
@@ -240,7 +262,8 @@ impl ChartPane {
 
         // The three are laid over the chart independently, so on a narrow
         // chart the centred strip lands on the symbol. It steps aside rather
-        // than overlap, and the keyboard still sets a resolution. Decided
+        // than overlap, and the resolution beside the symbol offers the same
+        // list. Decided
         // where the overlay places it, the one moment every width involved
         // is known.
         let (legend_box, legend_row, strip_row, corner_box) =
@@ -277,6 +300,8 @@ impl ChartPane {
             symbol_button,
             strip,
             buttons: RefCell::new(Vec::new()),
+            timeframe_menu,
+            timeframe_label,
             indicator_legend,
             gear,
             link,
@@ -300,7 +325,8 @@ impl ChartPane {
         })
     }
 
-    /// Point this chart's strip at the resolution it is showing.
+    /// Point this chart's strip, and the resolution beside its symbol, at the
+    /// resolution it is showing.
     pub fn sync_strip(&self) {
         let current = self.timeframe.get();
         // Keep the keyboard with the resolution it is choosing. Clicking the
@@ -323,6 +349,7 @@ impl ChartPane {
         if let Some(button) = chosen {
             button.grab_focus();
         }
+        self.write_timeframe();
     }
 
     /// Mark this one as the pane that keys and menus act on.
@@ -416,6 +443,15 @@ impl ChartPane {
             .map(|i| i.display_symbol())
             .unwrap_or_default();
         self.symbol_button.set_label(&symbol);
+        self.write_timeframe();
+    }
+
+    /// The resolution, beside the symbol.
+    ///
+    /// Written from the strip as well as from the readout because the
+    /// resolution changes on its own, with the symbol doing nothing.
+    fn write_timeframe(&self) {
+        self.timeframe_label.set_text(&self.timeframe.get().label());
     }
 }
 
