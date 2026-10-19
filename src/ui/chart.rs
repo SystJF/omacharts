@@ -7158,7 +7158,7 @@ mod drawing_tests {
             let (w, h) = (800.0, 400.0);
             let plan = layout(&state, w, h);
             let (first, visible) = state.slice();
-            let scale = price_range(&state, &state.bars[first..first + visible]).unwrap();
+            let scale = price_range(&state, &state.bars[first..first + visible], &plan).unwrap();
             assert_eq!(scale.log, log);
             let bar_w = plan.plot_w / visible as f64;
             let bar = state.bars[40];
@@ -7210,7 +7210,7 @@ mod drawing_tests {
         let (w, h) = (800.0, 400.0);
         let plan = layout(&state, w, h);
         let (first, visible) = state.slice();
-        let scale = price_range(&state, &state.bars[first..first + visible]).unwrap();
+        let scale = price_range(&state, &state.bars[first..first + visible], &plan).unwrap();
         let bar = state.bars[40];
         let x = plan.plot_x + 40.5 * plan.plot_w / visible as f64;
         let y = scale.to_y(bar.high, plan.price_y, plan.price_h) - 1.0;
