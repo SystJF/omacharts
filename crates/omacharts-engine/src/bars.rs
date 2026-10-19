@@ -267,6 +267,26 @@ impl Timeframe {
     pub fn is_calendar(self) -> bool {
         matches!(self.unit, Unit::Month | Unit::Year)
     }
+
+    /// The moment `bars` bars on from one opening at `ts`, or back for a
+    /// negative count. Months and years step by the calendar: an average
+    /// month on from the first lands on the last day of the month before
+    /// as often as not.
+    pub fn shift(self, ts: i64, bars: i64) -> i64 {
+        if self.is_calendar() {
+            let months = self.calendar_months();
+            if let Some(start) = month_of(ts).and_then(|month| month_start(month + bars * months)) {
+                return start;
+            }
+        }
+        ts + bars * self.seconds()
+    }
+
+    /// How many calendar months one bar spans, for a monthly or yearly chart.
+    fn calendar_months(self) -> i64 {
+        let count = i64::from(self.count.max(1));
+        if self.unit == Unit::Year { 12 * count } else { count }
+    }
 }
 
 /// How many decimals a price deserves, given how finely the chart is ruled and
@@ -440,19 +460,24 @@ fn fold(src: &[Bar], bucket_of: impl Fn(&i64) -> i64) -> Vec<Bar> {
 /// rather than depending on where the data begins: 3M is the calendar
 /// quarters, 6M the halves.
 fn calendar_start(ts: i64, target: Timeframe) -> i64 {
-    let Some(at) = Utc.timestamp_opt(ts, 0).single() else {
-        return ts;
-    };
-    let count = i64::from(target.count.max(1));
-    let months = if target.unit == Unit::Year { 12 * count } else { count };
-    let since_1970 = i64::from(at.year() - 1970) * 12 + i64::from(at.month0());
-    let start = since_1970.div_euclid(months) * months;
-    let (year, month0) = (1970 + start.div_euclid(12), start.rem_euclid(12));
-    i32::try_from(year)
-        .ok()
-        .and_then(|year| Utc.with_ymd_and_hms(year, month0 as u32 + 1, 1, 0, 0, 0).single())
-        .map(|start| start.timestamp())
+    let months = target.calendar_months();
+    month_of(ts)
+        .and_then(|month| month_start(month.div_euclid(months) * months))
         .unwrap_or(ts)
+}
+
+/// Months since January 1970 at `ts`, in UTC.
+fn month_of(ts: i64) -> Option<i64> {
+    let at = Utc.timestamp_opt(ts, 0).single()?;
+    Some(i64::from(at.year() - 1970) * 12 + i64::from(at.month0()))
+}
+
+/// Unix second of 00:00 UTC on the first of the month `month` months after
+/// January 1970.
+fn month_start(month: i64) -> Option<i64> {
+    let year = i32::try_from(1970 + month.div_euclid(12)).ok()?;
+    let month0 = month.rem_euclid(12) as u32;
+    Some(Utc.with_ymd_and_hms(year, month0 + 1, 1, 0, 0, 0).single()?.timestamp())
 }
 
 /// Unix second of the Monday 00:00 UTC that `ts` falls in.
@@ -566,6 +591,19 @@ mod tests {
         assert_eq!(bucket_of(leap_day, Timeframe::years(5), 0), 1_577_836_800); // 2020-01-01
         // Before the epoch too.
         assert_eq!(bucket_of(-1, Timeframe::years(1), 0), -31_536_000); // 1969-01-01
+    }
+
+    /// Past the last bar, the columns of a monthly chart are the firsts of
+    /// the months after it, not an average month on — which from 1 October
+    /// is 31 October.
+    #[test]
+    fn calendar_bars_step_by_the_calendar() {
+        let october = 1_727_740_800; // 2024-10-01
+        assert_eq!(Timeframe::months(1).shift(october, 1), 1_730_419_200); // 2024-11-01
+        assert_eq!(Timeframe::months(1).shift(october, -10), 1_701_388_800); // 2023-12-01
+        assert_eq!(Timeframe::months(3).shift(october, 1), 1_735_689_600); // 2025-01-01
+        assert_eq!(Timeframe::years(1).shift(1_704_067_200, 2), 1_767_225_600); // 2026-01-01
+        assert_eq!(Timeframe::days(1).shift(october, 3), october + 3 * 86_400);
     }
 
     #[test]

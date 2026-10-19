@@ -4045,18 +4045,9 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     draw_time_axis(cr, state, &columns.bars, plot_x, plot_w, height, bar_w, bars_x);
     // Shaded things go under the candles; lines go over. A band drawn on top
     // of the bars hides the thing it is describing.
-    //
-    // All of it inside the price box, the way drawings are. The scale fits the
-    // bars, not the overlays, so a 200-day average far below them — or any
-    // bar once the scale is dragged — would otherwise run over the time axis
-    // and the strips beneath.
-    cr.save().ok();
-    cr.rectangle(plot_x, price_y, plot_w, price_h);
-    cr.clip();
     draw_indicator_fills(cr, state, &columns, &to_y);
     draw_candles(cr, state, &columns, &to_y);
     draw_indicator_lines(cr, state, &columns, &to_y);
-    cr.restore().ok();
     draw_drawings(cr, state, &plan, &scale);
 
     for (at, row) in plan.rows.iter().enumerate() {
@@ -4308,10 +4299,11 @@ fn draw_time_axis(
         if step <= 0 {
             return None;
         }
+        let timeframe = state.timeframe;
         if at < 0 {
-            bars.first().map(|b| b.ts + at * step)
+            bars.first().map(|b| timeframe.shift(b.ts, at))
         } else {
-            bars.last().map(|b| b.ts + (at - bars.len() as i64 + 1) * step)
+            bars.last().map(|b| timeframe.shift(b.ts, at - bars.len() as i64 + 1))
         }
     };
     let utc = state.timeframe.is_calendar();
@@ -5620,9 +5612,9 @@ fn time_at_column(state: &State, index: i64) -> Option<i64> {
         return None;
     }
     if index < 0 {
-        state.bars.first().map(|b| b.ts + index * step)
+        state.bars.first().map(|b| state.timeframe.shift(b.ts, index))
     } else {
-        state.bars.last().map(|b| b.ts + (index - len + 1) * step)
+        state.bars.last().map(|b| state.timeframe.shift(b.ts, index - len + 1))
     }
 }
 
@@ -5895,7 +5887,12 @@ fn axis_ticks(
     };
     // Counted before thinning: thinning alone would leave every rung looking
     // like it fits, and the finest one would always win.
-    let room = (plot_w / TIME_LABEL_GAP).max(1.0) as usize;
+    //
+    // A tick never lands on the first column, so n ticks share the plot with
+    // the stretch before the first of them: n + 1 gaps, not n. Counting n
+    // lets evenly spaced ticks — a yearly chart's, every two bars — sit just
+    // under the gap, and thinning them then leaves only the last.
+    let room = (plot_w / TIME_LABEL_GAP).max(2.0) as usize - 1;
     let mut coarsest = Every::Months(240);
     for every in Every::LADDER {
         if every.seconds() < step {
@@ -7480,5 +7477,16 @@ mod drawing_tests {
         );
         assert_ne!(inside, outside, "the box painted nothing");
         assert_ne!(inside, solid, "the box is opaque");
+    }
+
+    /// Twenty-one yearly bars across 922 pixels: ten two-yearly ticks fit by
+    /// count but sit 88 pixels apart, and thinning them left only the last.
+    #[test]
+    fn evenly_spaced_ticks_are_not_thinned_down_to_one() {
+        use chrono::{TimeZone, Utc};
+        let year = |c: i64| Utc.with_ymd_and_hms(2006 + c as i32, 1, 1, 0, 0, 0).unwrap().timestamp();
+        let step = Timeframe::years(1).seconds();
+        let (ticks, _) = axis_ticks(21, 922.0, step, true, |c| Some(year(c)));
+        assert!(ticks.len() > 2, "{ticks:?}");
     }
 }
