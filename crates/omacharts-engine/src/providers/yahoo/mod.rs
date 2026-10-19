@@ -348,7 +348,8 @@ impl Provider for Yahoo {
         match self.fetch(&url) {
             Ok(body) => {
                 self.cooldown.lock().unwrap_or_else(|e| e.into_inner()).succeeded();
-                parse_chart(&body).map(|bars| collapse_days(bars, timeframe))
+                let session = session_start(&body);
+                parse_chart(&body).map(|bars| collapse_days(bars, timeframe, session))
             }
             Err(ProviderError::RateLimited) => {
                 self.cooldown.lock().unwrap_or_else(|e| e.into_inner()).throttled(Instant::now());
@@ -448,12 +449,12 @@ pub fn parse_chart(body: &serde_json::Value) -> Result<Vec<Bar>, ProviderError> 
 /// FX is the case a calendar day misses: its days are stamped at London
 /// midnight, 23:00 UTC the evening before in summer, so Friday's session is
 /// Thursday 23:00 and its partial is Friday 09:36. See [`on_the_clock`].
-fn collapse_days(mut bars: Vec<Bar>, timeframe: Timeframe) -> Vec<Bar> {
+fn collapse_days(mut bars: Vec<Bar>, timeframe: Timeframe, session: Option<i64>) -> Vec<Bar> {
     if !matches!(timeframe.unit, Unit::Day | Unit::Week) || bars.len() < 2 {
         return bars;
     }
     if timeframe.unit == Unit::Day {
-        on_the_clock(&mut bars);
+        on_the_clock(&mut bars, session);
     }
     let day_of = |ts: i64| ts.div_euclid(86_400);
     let mut out: Vec<Bar> = Vec::with_capacity(bars.len());
@@ -480,48 +481,79 @@ fn collapse_days(mut bars: Vec<Bar>, timeframe: Timeframe) -> Vec<Bar> {
 /// and once the day closes, Yahoo's own bar for it lands beside them all.
 /// EURUSD collected seven bars for one Friday that way.
 ///
-/// The session it belongs to is the one whose date it falls on, read three
-/// hours forward: that puts London midnight, a New York open and a future's
-/// 04:00 each on their own day.
-/// It takes that session's stamp, a whole number of days from the bar
-/// before it, so the next refresh replaces it and the closed bar does too.
-/// A last bar already on the clock is left alone.
-fn on_the_clock(bars: &mut [Bar]) {
-    const DAY: i64 = 86_400;
+/// It takes the stamp of the session Yahoo says is current, so the next
+/// refresh replaces it and the closed bar does too. Working that session out
+/// from the clock instead goes wrong at the edges: FX prints until 21:30 UTC
+/// on a Friday and is stamped on Saturdays, and a stamp Yahoo never uses
+/// again is a bar that stays in the cache for good. A last bar already on the
+/// clock is left alone, and so is one Yahoo gives no session for.
+fn on_the_clock(bars: &mut [Bar], session: Option<i64>) {
     let [.., before, last] = bars else { return };
-    if (last.ts - before.ts).rem_euclid(DAY) == 0 {
+    if (last.ts - before.ts).rem_euclid(86_400) == 0 {
         return;
     }
-    let date = |ts: i64| (ts + 3 * 3_600).div_euclid(DAY);
-    last.ts = before.ts + (date(last.ts) - date(before.ts)) * DAY;
+    if let Some(start) = session.filter(|&start| start >= before.ts) {
+        last.ts = start;
+    }
+}
+
+/// When the session in progress began, which is the stamp Yahoo gives its
+/// bar once it has one.
+fn session_start(body: &serde_json::Value) -> Option<i64> {
+    body["chart"]["result"][0]["meta"]["currentTradingPeriod"]["regular"]["start"].as_i64()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// EURUSD on Friday 2026-10-16 at 09:36 UTC: Yahoo's last closed day is
-    /// Thursday's, stamped Wednesday 23:00, and the day in progress comes
-    /// stamped with the time of its last print.
+    /// EURUSD on Monday 2026-10-19 at 20:15 UTC, as Yahoo sent it: the
+    /// session is stamped Sunday 23:00, and its partial comes stamped with
+    /// the time of its last print.
     #[test]
     fn an_fx_day_in_progress_takes_its_session_stamp() {
-        let bar = |ts, close| Bar { ts, open: close, high: close, low: close, close, volume: 0.0 };
-        let wed_23 = 1_792_018_800; // 2026-10-14 23:00 UTC
-        let day = 86_400;
-        let at = |minutes_past_wed_23: i64| wed_23 + minutes_past_wed_23 * 60;
-        let fetch = |partial| collapse_days(vec![bar(wed_23 - day, 1.120), bar(wed_23, 1.1195), bar(partial, 1.1255)], Timeframe::days(1));
+        let body = serde_json::json!({ "chart": { "result": [{
+            "meta": { "currentTradingPeriod": { "regular": { "start": 1_792_364_400 } } },
+            "timestamp": [1_792_105_200, 1_792_364_400, 1_792_440_948],
+            "indicators": { "quote": [{
+                "open": [1.1212, 1.1229, 1.1242],
+                "high": [1.1270, 1.1236, 1.1242],
+                "low": [1.1209, 1.1188, 1.1183],
+                "close": [1.1213, 1.1225, 1.1215],
+                "volume": [0, 0, 0],
+            }] },
+        }] } });
+        let session = session_start(&body);
+        let out = collapse_days(parse_chart(&body).unwrap(), Timeframe::days(1), session);
+        let stamps: Vec<i64> = out.iter().map(|b| b.ts).collect();
+        assert_eq!(stamps, [1_792_105_200, 1_792_364_400], "Monday is one bar, on Sunday 23:00");
+        assert_eq!(out[1].close, 1.1215, "the latest print is its close");
+        assert_eq!(out[1].low, 1.1183, "and the day keeps its extreme");
+    }
 
-        let morning = fetch(at(10 * 60 + 36 + 24 * 60));
-        assert_eq!(morning.last().map(|b| b.ts), Some(wed_23 + day), "Thursday 23:00, Friday's own stamp");
-        let later = fetch(at(11 * 60 + 7 + 24 * 60));
-        assert_eq!(later.last().map(|b| b.ts), Some(wed_23 + day), "the next refresh is the same bar");
-        assert_eq!(later.len(), 3);
-
+    /// Late on a Friday, or on a Saturday, the session Yahoo calls current is
+    /// one it has a stamp for, so nothing lands on a day FX does not trade.
+    #[test]
+    fn a_partial_never_invents_a_stamp() {
+        let bar = |ts| Bar { ts, open: 1.0, high: 1.0, low: 1.0, close: 1.0, volume: 0.0 };
+        let (thu_23, day) = (1_792_105_200, 86_400);
+        let fetch = |partial, session| {
+            collapse_days(vec![bar(thu_23 - day), bar(thu_23), bar(partial)], Timeframe::days(1), session)
+                .iter()
+                .map(|b| b.ts)
+                .collect::<Vec<_>>()
+        };
+        // Friday 21:29 and Saturday 14:08 both fold into Friday.
+        assert_eq!(fetch(thu_23 + 22 * 3_600 + 29 * 60, Some(thu_23)), [thu_23 - day, thu_23]);
+        assert_eq!(fetch(thu_23 + day + 15 * 3_600, Some(thu_23)), [thu_23 - day, thu_23]);
         // Sunday evening's first prints belong to Monday.
-        let sunday = fetch(wed_23 + 4 * day - 3_600);
-        assert_eq!(sunday.last().map(|b| b.ts), Some(wed_23 + 4 * day));
+        let sun_23 = thu_23 + 3 * day;
+        assert_eq!(fetch(sun_23 - 1_800, Some(sun_23)), [thu_23 - day, thu_23, sun_23]);
+        // Without a session, or with one older than the bars, it stays put.
+        assert_eq!(fetch(thu_23 + 3_600, None), [thu_23 - day, thu_23, thu_23 + 3_600]);
+        assert_eq!(fetch(thu_23 + 3_600, Some(thu_23 - day)), [thu_23 - day, thu_23, thu_23 + 3_600]);
         // A bar on the clock stays where it is.
-        assert_eq!(fetch(wed_23 + day).last().map(|b| b.ts), Some(wed_23 + day));
+        assert_eq!(fetch(thu_23 + day, Some(thu_23)), [thu_23 - day, thu_23, thu_23 + day]);
     }
 
     /// Yahoo has no stream, so a chart drawn from it has to be asked again or
@@ -717,7 +749,7 @@ mod tests {
             bar(11 * day, 110.0, 400.0),
             bar(11 * day + 50_000, 112.0, 450.0),
         ];
-        let out = collapse_days(bars, Timeframe::days(1));
+        let out = collapse_days(bars, Timeframe::days(1), None);
         assert_eq!(out.len(), 2, "today must be one bar");
         assert_eq!(out[1].close, 112.0, "the later close wins");
         assert_eq!(out[1].high, 113.0, "the day keeps its extreme");
@@ -731,9 +763,9 @@ mod tests {
     fn intraday_bars_are_left_alone() {
         let bar = |ts| Bar { ts, open: 1.0, high: 1.0, low: 1.0, close: 1.0, volume: 1.0 };
         let bars = vec![bar(0), bar(300), bar(600)];
-        assert_eq!(collapse_days(bars.clone(), Timeframe::minutes(5)).len(), 3);
+        assert_eq!(collapse_days(bars.clone(), Timeframe::minutes(5), None).len(), 3);
         // But a daily series with three stamps on one day is one bar.
-        assert_eq!(collapse_days(bars, Timeframe::days(1)).len(), 1);
+        assert_eq!(collapse_days(bars, Timeframe::days(1), None).len(), 1);
     }
 
     #[test]
