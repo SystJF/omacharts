@@ -77,6 +77,10 @@ impl Scene {
         state.indicators = drawn;
         state.timeframe = timeframe;
         state.visible = visible;
+        // Flush against the live edge rather than wherever a chart comes to
+        // rest, so a change to the resting margin moves no bars in the frame
+        // and is not read as a change in what drawing them costs.
+        state.overhang = 0;
         Some(Scene { state })
     }
 
