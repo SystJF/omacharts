@@ -983,7 +983,7 @@ impl ContrastBand {
 
 /// How far a lightness walk moves per step. Near the quiet end of the scale
 /// one step is about 0.01 of contrast, which is finer than any band is.
-const LIGHTNESS_STEP: f64 = 0.005;
+pub const LIGHTNESS_STEP: f64 = 0.005;
 
 /// Hold `colour` to `band` of contrast against `ground`, with its chroma at
 /// most `max_chroma` if one is given.
@@ -1035,6 +1035,38 @@ pub fn held_to(colour: &str, ground: &str, band: ContrastBand, max_chroma: Optio
         }
     }
     c.hex()
+}
+
+/// APCA lightness contrast, Lc, of `text` on `ground`: the WCAG 3 candidate
+/// measure, version 0.0.98G-4g.
+///
+/// WCAG 2's ratio is symmetric and blind to polarity, so on a mid-tone,
+/// saturated colour it prefers black even where white is what the eye reads
+/// more easily. APCA models that: it weighs dark-on-light and light-on-dark
+/// differently, and it gives a red or a green the light label people see as
+/// the clearer one. Positive for dark text on a light ground, negative for
+/// light on dark; |Lc| 60 is its line for small bold text such as a figure on
+/// a pill, and 90 is near black on white.
+pub fn apca_contrast(text: &str, ground: &str) -> f64 {
+    let y = |hex: &str| -> Option<f64> {
+        let (r, g, b) = rgb(hex)?;
+        let ch = |v: u8| (v as f64 / 255.0).powf(2.4);
+        let y = 0.2126729 * ch(r) + 0.7151522 * ch(g) + 0.0721750 * ch(b);
+        // Soft-clamp near black, where screens and eyes flatten out.
+        Some(if y < 0.022 { y + (0.022 - y).powf(1.414) } else { y })
+    };
+    let (Some(txt), Some(bg)) = (y(text), y(ground)) else { return 0.0 };
+    if (bg - txt).abs() < 0.0005 {
+        return 0.0;
+    }
+    let lc = if bg > txt {
+        let sapc = (bg.powf(0.56) - txt.powf(0.57)) * 1.14;
+        if sapc < 0.1 { 0.0 } else { sapc - 0.027 }
+    } else {
+        let sapc = (bg.powf(0.65) - txt.powf(0.62)) * 1.14;
+        if sapc > -0.1 { 0.0 } else { sapc + 0.027 }
+    };
+    lc * 100.0
 }
 
 /// Luminance as physics counts it: linear light, not gamma-encoded bytes.
@@ -1517,6 +1549,18 @@ mod tests {
         assert_eq!(readable_on("#c900c4"), "#ffffff");
         // And a pale green takes dark text.
         assert_eq!(readable_on("#a7c080"), "#000000");
+    }
+
+    #[test]
+    fn apca_matches_the_reference_values() {
+        // From the APCA 0.0.98G-4g reference implementation's own checks.
+        assert!((apca_contrast("#888888", "#ffffff") - 63.06).abs() < 0.1);
+        assert!((apca_contrast("#ffffff", "#888888") + 68.54).abs() < 0.1);
+        assert!((apca_contrast("#000000", "#aaaaaa") - 58.15).abs() < 0.1);
+        assert!((apca_contrast("#aaaaaa", "#000000") + 56.24).abs() < 0.1);
+        assert!((apca_contrast("#112233", "#ddeeff") - 91.67).abs() < 0.1);
+        assert!((apca_contrast("#ddeeff", "#112233") + 93.07).abs() < 0.1);
+        assert_eq!(apca_contrast("#777777", "#777777"), 0.0);
     }
 
     #[test]

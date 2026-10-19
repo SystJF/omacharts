@@ -269,21 +269,37 @@ fn candles_stand_apart_from_the_furniture_in_every_theme() {
     }
 }
 
-/// Anything painting a label on a direction colour — the chart's price chip —
-/// has to pick its text against that colour.
+/// The figure on a tag — the chart's last-price tag, the bar widget's change
+/// pill, one role — reads in every shipped theme under every scheme a person
+/// can choose: WCAG AA, 4.5:1, and APCA Lc 60, for up, down and flat. The
+/// label is light on every fill that is not light by [`LIGHT_FILL`], as the
+/// pill was designed, and a fill that had to move to carry it kept its hue.
 #[test]
-fn a_label_on_a_direction_colour_is_readable_in_every_theme() {
-    use omacharts_engine::theme::{luminance, readable_on};
+fn a_tag_reads_in_every_theme_under_every_scheme() {
+    use omacharts_engine::ink::{tag_reads, LIGHT_FILL, TAG_LIGHT_LABEL, TEXT_CONTRAST};
+    use omacharts_engine::theme::apca_contrast;
     for (name, theme) in fixtures() {
-        let bars = theme_bars(&theme);
-        for direction in [Direction::Up, Direction::Down, Direction::Flat] {
-            let pill = bars.outline(direction);
-            let text = readable_on(pill);
-            let gap = (luminance(pill) - luminance(text)).abs();
-            assert!(
-                gap > 0.35,
-                "{name}: {text} on {pill} ({direction:?}) is {gap:.2} apart"
-            );
+        for scheme in every_scheme(&theme) {
+            let ink = theme.ink(&scheme);
+            for direction in [Direction::Up, Direction::Down, Direction::Flat] {
+                let tag = ink.tag(direction);
+                let raw = scheme.outline(direction);
+                let at = format!("{name} / {} / {direction:?}: {} on {} (from {raw})", scheme.id, tag.label, tag.fill);
+                let ratio = contrast_ratio(&tag.label, &tag.fill);
+                let lc = apca_contrast(&tag.label, &tag.fill);
+                assert!(ratio >= TEXT_CONTRAST.floor, "{at} is {ratio:.2}:1");
+                assert!(lc.abs() >= 60.0, "{at} is Lc {lc:.1}");
+                let (was, now) = (Oklch::of(raw).unwrap(), Oklch::of(&tag.fill).unwrap());
+                if was.l < LIGHT_FILL {
+                    assert_eq!(tag.label, TAG_LIGHT_LABEL, "{at}: a light label on a fill at L {:.2}", was.l);
+                }
+                if tag_reads(&tag.label, raw) {
+                    assert_eq!(tag.fill, raw, "{at}: the fill moved though the label read on it");
+                } else if was.c > 0.04 {
+                    let gap = hue_gap(was.h, now.h);
+                    assert!(gap < 6.0, "{at}: the fill's hue moved {gap:.1} degrees");
+                }
+            }
         }
     }
 }
@@ -691,6 +707,7 @@ fn candles_clear_the_mark_floor_in_every_theme() {
 #[test]
 fn the_charts_text_is_reported() {
     use omacharts_engine::theme::{mix, readable_on};
+    use omacharts_engine::Tag;
     for (name, theme) in fixtures() {
         let ui = &theme.ui;
         let bars = theme_bars(&theme);
@@ -698,11 +715,15 @@ fn the_charts_text_is_reported() {
         let axis = contrast_ratio(&mix(&ui.background, &ui.text_muted, 0.9), &ui.background);
         let pane = contrast_ratio(&mix(&ui.background, &ui.text_muted, 0.75), &ui.background);
         let chip = |fill: &str| contrast_ratio(readable_on(fill), fill);
+        let tag = |fill: &str| {
+            let tag = Tag::on(fill);
+            contrast_ratio(&tag.label, &tag.fill)
+        };
         eprintln!(
             "{name}: text {:.2}, axis labels {axis:.2}, pane labels {pane:.2}, last-price chip up {:.2} down {:.2}, crosshair chip {:.2}",
             contrast_ratio(&ui.text, &ui.background),
-            chip(&bars.up),
-            chip(&bars.down),
+            tag(&bars.up),
+            tag(&bars.down),
             chip(&ui.crosshair),
         );
     }
