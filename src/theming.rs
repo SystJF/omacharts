@@ -804,12 +804,11 @@ paned.chart-split > separator:active {{ background-color: @omacharts_gutter_hove
   border: {ring}px solid transparent;
 }}
 .chart-split .chart-pane.focused {{ border-color: @omacharts_focus; }}
-.chart-split .chart-pane.focused .ring-cut {{ background: @omacharts_focus; }}
-/* The drawing tools lie flush over the charts' left edge, so they bring
-   their own ground, with the ring's width of it before the tools, so the
-   tools sit where they did when the bar stood inside the ring. Their edge
-   against the charts is the rail's against them: Adwaita's paned separator,
-   a sixth of the text colour over the window's ground. */
+/* The drawing tools stand beside the charts on the window's own ground,
+   with the ring's width of it before the tools, so the toggle above stands
+   centred over them. Their edge against the charts is the rail's against
+   them: Adwaita's paned separator, a sixth of the text colour over the
+   window's ground. */
 .drawing-tools {{
   background: @window_bg_color;
   padding: {ring}px 0 0 {ring}px;

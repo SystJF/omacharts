@@ -30,9 +30,6 @@ use omacharts_engine::drawings::Kind;
 
 /// The width of a tool button, which is also the bar's.
 const TOOL: i32 = 36;
-/// The bar's width inside its padding: one tool, and the column's four
-/// pixels either side.
-pub const WIDTH: i32 = TOOL + 8;
 
 /// Which band of the bar a tool belongs to.
 ///

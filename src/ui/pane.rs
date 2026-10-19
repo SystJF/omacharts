@@ -64,10 +64,6 @@ pub struct ChartPane {
     /// on the chart: with four charts open, four of these drawn all the time
     /// is four more things between you and the prices.
     pub expand: gtk::Button,
-    /// The focus ring's left side when the drawing tools lie over this
-    /// chart: a line along the bar's right edge, so the ring closes round
-    /// what is left of the chart rather than running under the bar.
-    ring_cut: gtk::Box,
     expand_icon: gtk::DrawingArea,
     /// Which way the expand glyph points, and which word its tooltip uses.
     expand_state: Rc<Cell<bool>>,
@@ -252,13 +248,6 @@ impl ChartPane {
         overlay.add_overlay(&legend);
         overlay.add_overlay(&top);
         overlay.add_overlay(&corner);
-        let ring_cut = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        ring_cut.add_css_class("ring-cut");
-        ring_cut.set_halign(gtk::Align::Start);
-        ring_cut.set_size_request(omacharts_engine::frame::RING_WIDTH as i32, -1);
-        ring_cut.set_can_target(false);
-        ring_cut.set_visible(false);
-        overlay.add_overlay(&ring_cut);
 
         // The three are laid over the chart independently, so on a narrow
         // chart the centred strip lands on the symbol. It steps aside rather
@@ -306,7 +295,6 @@ impl ChartPane {
             gear,
             link,
             expand,
-            ring_cut,
             expand_icon,
             expand_state,
             instrument: RefCell::new(None),
@@ -396,17 +384,6 @@ impl ChartPane {
         if let Some(legend) = self.symbol_button.parent().and_then(|bar| bar.parent()) {
             legend.set_margin_start(LEGEND_MARGIN + clearance);
         }
-    }
-
-    /// Close the focus ring along the drawing tools while they lie over
-    /// this chart, or round the whole chart when they don't. The bar covers
-    /// the ring's own left side; nothing under it moves.
-    pub fn set_under_tools(&self, under: bool) {
-        self.ring_cut.set_visible(under);
-        // The bar is the ring's width of padding and then the tools, and the
-        // chart's own layers start inside the ring: the line starts where
-        // the tools end.
-        self.ring_cut.set_margin_start(crate::ui::drawing_bar::WIDTH);
     }
 
     /// Offer the maximize corner at all, which is a question of whether

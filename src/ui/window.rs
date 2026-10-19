@@ -1835,11 +1835,11 @@ impl Window {
         split.set_shrink_end_child(false);
         watchlist.widget.set_visible(store.setting_bool(SHOW_WATCHLIST, true));
 
-        // The tools lie over the left of the charts rather than pushing them
-        // aside: pushed, every chart reflowed as they came and went, and the
-        // centred resolutions drifted with it. Over them, nothing on the
-        // charts moves at all. They are not part of the split, so the
-        // divider between charts and rail is still the only divider.
+        // The tools stand beside the charts and push them over, the way the
+        // rail does on the right: laid over them, they hid the first bars and
+        // the strips' names under a chart down the left edge. They are not
+        // part of the split, so the divider between charts and rail is still
+        // the only divider.
         let bar = crate::ui::drawing_bar::DrawingBar::new(
             {
                 let this = this.clone();
@@ -1859,14 +1859,9 @@ impl Window {
                 move || this.toggle_drawing_tools()
             },
         );
-        let with_tools = gtk::Overlay::new();
-        with_tools.set_child(Some(&chart_host));
-        // Flush with the window's edges, over the focus ring's left side:
-        // a focused chart down the left closes its ring along the bar
-        // instead (`ChartPane::set_under_tools`), so the bar stands outside
-        // the chart rather than inside its frame.
-        bar.root.set_halign(gtk::Align::Start);
-        with_tools.add_overlay(&bar.root);
+        let with_tools = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        with_tools.append(&bar.root);
+        with_tools.append(&chart_host);
         bar.set_shown(store.setting_bool(SHOW_DRAWING_TOOLS, false));
         *this.drawing_bar.borrow_mut() = Some(bar);
         split.set_start_child(Some(&with_tools));
@@ -2628,16 +2623,15 @@ impl Window {
             pane.set_corner_clearance(margin);
         }
 
-        // The same on the left, for the drawing tools' toggle and the bar
-        // under it, which is as wide: the bar lies over the charts, so the
-        // names step past it whether it is out or not, and opening it moves
-        // nothing. Every chart down the window's left edge steps its name
-        // over by the same amount, not only the one under the toggle, so the
-        // names stand in one column. A chart further right has nothing to
-        // clear.
+        // The same on the left, for the drawing tools' toggle, which drops
+        // onto the charts while the bar is put away and stands over the bar
+        // while it is out. Every chart down the window's left edge steps its
+        // name over by the same amount, not only the one under the toggle,
+        // so the names stand in one column. A chart further right, or any
+        // chart while the bar is out, has nothing to clear.
         let tooled = self.drawing_bar.borrow().as_ref().is_some_and(|bar| bar.is_shown());
         let start = self.start_corner.borrow().as_ref().and_then(|corner| corner.child());
-        let clearance = if start.is_some() { START_CLEARANCE } else { 0 };
+        let clearance = if start.is_some() && !tooled { START_CLEARANCE } else { 0 };
         if let Some(cluster) = &start {
             match tooled {
                 true => cluster.remove_css_class("over-chart"),
@@ -2647,7 +2641,6 @@ impl Window {
         for pane in self.panes.borrow().iter() {
             let edge = rects.get(&pane.id).is_some_and(|(x, _, _, _)| at(*x, 0.0));
             pane.set_start_clearance(if edge { clearance } else { 0 });
-            pane.set_under_tools(edge && tooled);
         }
     }
 
