@@ -161,14 +161,30 @@
     .install { gap: .5em; padding: .6em .8em; }
     .install code { white-space: normal; }
   }
+  /* The hint is a glyph rather than a word: a clipboard that turns into a
+     tick for a moment once the command is on it. Quiet until the line is
+     pointed at, so it reads as an affordance, not a second label. */
   .install .hint {
-    color: rgba(243, 236, 220, .45);
-    font-size: .8em;
-    letter-spacing: .08em;
-    text-transform: uppercase;
-    user-select: none;
+    display: inline-flex;
+    color: var(--bright);
+    opacity: .4;
+    transition: opacity .18s ease, color .18s ease;
   }
-  .install[data-copied] .hint { color: var(--amber); }
+  .install .hint svg {
+    width: .95em;
+    height: .95em;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .install:hover .hint,
+  .install:focus-visible .hint { opacity: .7; }
+  .install .done,
+  .install[data-copied] .clip { display: none; }
+  .install[data-copied] .done { display: block; }
+  .install[data-copied] .hint { color: var(--amber); opacity: 1; }
 
   .repo {
     margin-top: clamp(.9rem, 1.8vw, 1.8rem);
@@ -198,7 +214,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     .tagline a { transition: none; }
-    .install { transition: none; }
+    .install, .install .hint { transition: none; }
     .repo { transition: none; }
     .repo:hover { transform: none; }
   }
@@ -208,10 +224,13 @@
   <main>
     <h1>Omacharts</h1>
     <p class="tagline">Beautiful charting software for <a href="https://omarchy.org">Omarchy</a></p>
-    <button class="install" type="button" data-command="omarchy pkg add omacharts">
+    <button class="install" type="button" data-command="omarchy pkg add omacharts" title="Copy to clipboard">
       <span class="prompt" aria-hidden="true">$</span>
       <code>omarchy pkg add omacharts</code>
-      <span class="hint">copy</span>
+      <span class="hint" role="img" aria-label="Copy to clipboard">
+        <svg class="clip" viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+        <svg class="done" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+      </span>
     </button>
     <a class="repo" href="https://github.com/jorgemanrubia/omacharts">View on GitHub</a>
   </main>
@@ -227,10 +246,10 @@
         return;
       }
       install.dataset.copied = '';
-      hint.textContent = 'copied';
+      hint.setAttribute('aria-label', 'Copied');
       setTimeout(() => {
         delete install.dataset.copied;
-        hint.textContent = 'copy';
+        hint.setAttribute('aria-label', 'Copy to clipboard');
       }, 1600);
     });
   </script>
