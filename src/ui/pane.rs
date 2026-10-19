@@ -169,6 +169,10 @@ impl ChartPane {
         // is told not to, and a chain with an arrow under it was the exact
         // thing the drawn icon exists to avoid.
         link.set_always_show_arrow(false);
+        link.connect_active_notify(|link| match link.is_active() {
+            true => link.add_css_class("open"),
+            false => link.remove_css_class("open"),
+        });
         set_link_look(&link, linked);
 
         let gear = gtk::Button::from_icon_name("emblem-system-symbolic");
@@ -177,13 +181,18 @@ impl ChartPane {
         gear.set_tooltip_text(Some(&shortcuts::tooltip("Chart settings", "chart.settings")));
         gear.set_valign(gtk::Align::Center);
 
-        // The link sits with the symbol, because that is what it is about:
-        // whether this chart follows the rail's symbol or keeps its own.
+        // The symbol and its resolution on the left, as the chart's title:
+        // the resolution stays on every chart, focused or not, and in every
+        // screenshot, because which bars these are is information. The
+        // controls go to the opposite corner, where they stay out of it.
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         bar.append(&symbol_button);
-        bar.append(&link);
         bar.append(&timeframe_menu);
-        bar.append(&gear);
+        // As tall as the strip, so the symbol reads on the same line as the
+        // resolutions. Alone it is shorter than the strip and sat above it.
+        // A number rather than a size group, because the strip is hidden on
+        // every chart but the focused one and the symbol would jump on focus.
+        bar.set_height_request(SYMBOL_ROW_HEIGHT);
 
         let indicator_legend = gtk::Box::new(gtk::Orientation::Vertical, 0);
         indicator_legend.set_halign(gtk::Align::Start);
@@ -192,7 +201,7 @@ impl ChartPane {
         let legend = gtk::Box::new(gtk::Orientation::Vertical, 0);
         legend.set_halign(gtk::Align::Start);
         legend.set_valign(gtk::Align::Start);
-        legend.set_margin_start(12);
+        legend.set_margin_start(LEGEND_MARGIN);
         legend.set_margin_top(6);
         legend.append(&bar);
         legend.append(&indicator_legend);
@@ -224,7 +233,12 @@ impl ChartPane {
         corner.set_halign(gtk::Align::End);
         corner.set_valign(gtk::Align::Start);
         corner.set_margin_top(6);
-        corner.set_margin_end(CORNER_MARGIN);
+        // The symbol's row's height, so the link and the gear centre on the
+        // line the symbol is written on rather than a few pixels above it.
+        corner.set_height_request(SYMBOL_ROW_HEIGHT);
+        corner.set_margin_end(corner_margin(0));
+        corner.append(&link);
+        corner.append(&gear);
         corner.append(&expand);
 
         let overlay = gtk::Overlay::new();
@@ -238,14 +252,17 @@ impl ChartPane {
         // The three are laid over the chart independently, so on a narrow
         // chart the centred strip lands on the symbol. It steps aside rather
         // than overlap, and the resolution beside the symbol offers the same
-        // list. Decided where the overlay places it, the one moment every
-        // width involved is known.
-        let legend_margin = legend.margin_start();
-        let (legend_row, strip_row, corner_box) = (bar.clone(), top.clone(), corner.clone());
+        // list. Decided
+        // where the overlay places it, the one moment every width involved
+        // is known.
+        let (legend_box, legend_row, strip_row, corner_box) =
+            (legend.clone(), bar.clone(), top.clone(), corner.clone());
         overlay.connect_get_child_position(move |overlay, child| {
             if child == strip_row.upcast_ref::<gtk::Widget>() {
                 let natural = |w: &gtk::Widget| w.preferred_size().1.width();
-                let left = legend_margin + natural(legend_row.upcast_ref());
+                // Read here, not once: a chart on the window's left edge
+                // steps its legend past the drawing toggle after it is built.
+                let left = legend_box.margin_start() + natural(legend_row.upcast_ref());
                 let right = natural(corner_box.upcast_ref()) + corner_box.margin_end();
                 strip_row.set_child_visible(strip_fits(
                     overlay.width(),
@@ -328,12 +345,6 @@ impl ChartPane {
     /// A ring rather than anything louder: with four charts on screen the
     /// focused one has to be obvious at a glance and invisible the moment you
     /// stop looking for it.
-    ///
-    /// The resolution beside the symbol stays put either way. The strip appears
-    /// here and says the same thing, so the label used to stand down for it —
-    /// but a legend that drops a line the moment you focus the chart reads
-    /// differently depending on which pane you are on, and saying the
-    /// resolution twice on one chart is cheaper than that.
     pub fn set_focused(&self, focused: bool) {
         if focused {
             self.root.add_css_class("focused");
@@ -360,7 +371,18 @@ impl ChartPane {
     /// something else that wants the same corner.
     pub fn set_corner_clearance(&self, clearance: i32) {
         if let Some(corner) = self.expand.parent() {
-            corner.set_margin_end(CORNER_MARGIN + clearance);
+            corner.set_margin_end(corner_margin(clearance));
+        }
+    }
+
+    /// The same for the legend and the window's top-left corner, which
+    /// holds the drawing tools' toggle and drops onto the top-left chart
+    /// while the tools are put away. Every chart down the left edge takes
+    /// the same step, so their names line up rather than only the top-left
+    /// one moving.
+    pub fn set_start_clearance(&self, clearance: i32) {
+        if let Some(legend) = self.symbol_button.parent().and_then(|bar| bar.parent()) {
+            legend.set_margin_start(LEGEND_MARGIN + clearance);
         }
     }
 
@@ -404,20 +426,34 @@ impl ChartPane {
     /// The resolution, beside the symbol.
     ///
     /// Written from the strip as well as from the readout because the
-    /// resolution changes on its own, with the symbol doing nothing. Reaching
-    /// it only through the readout left the label right by luck — the legend is
-    /// rebuilt when the resolution changes, for the sake of a promoted reset
-    /// period, and that is what happened to rewrite it. The day that rebuild
-    /// becomes conditional the label would go on naming whichever resolution
-    /// the chart was on when its symbol last arrived.
+    /// resolution changes on its own, with the symbol doing nothing.
     fn write_timeframe(&self) {
         self.timeframe_label.set_text(&self.timeframe.get().label());
     }
 }
 
-/// How far the maximize corner sits in from the chart's right edge. The same
-/// gap the legend keeps on the left, so the two corners are a pair.
-const CORNER_MARGIN: i32 = 12;
+/// How far the legend sits in from the chart's left edge. The corner on the
+/// right keeps the same gap past the window's controls, so the two corners
+/// are a pair.
+const LEGEND_MARGIN: i32 = 12;
+/// The strip's height: its buttons plus the padding around them.
+const SYMBOL_ROW_HEIGHT: i32 = 32;
+
+/// The corner's margin with `clearance` to leave. With none, it still
+/// clears the price axis: the link and the gear are always on screen, and
+/// over the axis they sat on its labels.
+///
+/// Past the window's controls, which are wider than the axis, it leaves a
+/// few pixels more than the legend's gap. The two pairs stand in one row,
+/// and at the plain gap the space between them was not much wider than the
+/// space inside the window's pair, so the row read as four buttons rather
+/// than two groups of two.
+fn corner_margin(clearance: i32) -> i32 {
+    match clearance {
+        0 => crate::ui::chart::PRICE_AXIS_W as i32 + 6,
+        _ => clearance + LEGEND_MARGIN + 4,
+    }
+}
 
 /// Whether a strip `strip` wide, centred in `width`, clears what sits at
 /// either edge — `left` and `right` of it — with a little air on each side.
@@ -551,9 +587,9 @@ fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     cr.close_path();
 }
 
-/// The legend stays out of the way, so an unlinked chart's toggle is nearly
-/// invisible. A linked one is not: following the rail is the state worth being
-/// able to see across four charts without looking for it.
+/// The legend stays out of the way, so an unlinked chart's toggle is only
+/// there under the pointer. A linked one is not: following the rail is the
+/// state worth being able to see across four charts without looking for it.
 fn set_link_look(link: &gtk::MenuButton, group: LinkGroup) {
     let linked = group.is_linked();
     link.set_tooltip_text(Some(&match group {
@@ -561,10 +597,13 @@ fn set_link_look(link: &gtk::MenuButton, group: LinkGroup) {
         other => format!("Linked · {}", other.label()),
     }));
     // Two states that cannot be confused, from one icon: Adwaita has a chain
-    // and no broken chain, so the difference has to be carried by weight
+    // and no broken chain, so the difference has to be carried by presence
     // rather than by a second glyph. A linked chart says so plainly; an
-    // unlinked one keeps a faint handle you can find when you want it.
-    link.set_opacity(if linked { 1.0 } else { 0.28 });
+    // unlinked one keeps a handle that shows when the pointer is on it.
+    match linked {
+        true => link.remove_css_class("quiet"),
+        false => link.add_css_class("quiet"),
+    }
 }
 
 /// How the panes are arranged.
