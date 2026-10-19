@@ -1035,12 +1035,6 @@ impl State {
         }
     }
 
-    /// What a snapped anchor can land on: the prices the chart draws of a
-    /// bar.
-    fn snap_prices(&self, bar: &Bar) -> [f64; 4] {
-        [bar.open, bar.high, bar.low, bar.close]
-    }
-
     /// Where a pixel is in the chart's own units: the moment of the bar
     /// under it and the price at that height. `None` when there is nothing
     /// on the chart to measure against.
@@ -1067,15 +1061,14 @@ impl State {
         let plan = layout(self, width, height);
         let scale = price_range(self, &self.bars[first..first + visible])?;
         let price = scale.price_at(y, plan.price_y, plan.price_h);
-        let to_y = |price: f64| plan.price_y + plan.price_h * (high - price) / (high - low);
         // A column's width, the room at either end counted: the plot's
         // first column may stand before the first bar.
         let bar_w = plan.plot_w / self.columns().max(1) as f64;
         let index = (first as f64 - lead as f64 + (x - plan.plot_x) / bar_w - 0.5).round();
         let price = match snap && index >= 0.0 {
             true => self.bars.get(index as usize).map_or(price, |bar| {
-                let off = |price: f64| (to_y(price) - y).abs();
-                self.snap_prices(bar)
+                let off = |price: f64| (scale.to_y(price, plan.price_y, plan.price_h) - y).abs();
+                [bar.open, bar.high, bar.low, bar.close]
                     .into_iter()
                     .min_by(|a, b| off(*a).total_cmp(&off(*b)))
                     .unwrap_or(price)
@@ -7097,34 +7090,38 @@ mod drawing_tests {
     }
 
     /// With Ctrl, an anchor on a candle takes whichever of its open, high,
-    /// low and close is nearest the pointer; past the last bar there is no
-    /// candle and the price is left where the pointer is.
+    /// low and close is nearest the pointer, on either price axis; past the
+    /// last bar there is no candle and the price is left where the pointer
+    /// is.
     #[test]
     fn a_snapped_anchor_lands_on_the_nearest_price_of_its_candle() {
-        let mut state = charted(100);
-        state.visible = 100;
-        state.overhang = 0;
-        let (w, h) = (800.0, 400.0);
-        let plan = layout(&state, w, h);
-        let (first, visible) = state.slice();
-        let (low, high) = price_range(&state, &state.bars[first..first + visible]).unwrap();
-        let bar_w = plan.plot_w / visible as f64;
-        let to_y = |price: f64| plan.price_y + plan.price_h * (high - price) / (high - low);
-        let bar = state.bars[40];
-        let x = plan.plot_x + 40.5 * bar_w;
-        // A pixel above the high, a pixel below the low, and a pixel
-        // off the open and the close, which make up the body.
-        for (target, nudge) in [(bar.high, -1.0), (bar.low, 1.0), (bar.open, 1.0), (bar.close, -1.0)] {
-            let y = to_y(target) + nudge;
-            let free = state.locate(w, h, x, y).unwrap();
-            assert_ne!(free.price, target, "without Ctrl the hand is followed");
-            let snapped = state.locate_with(w, h, x, y, true).unwrap();
-            assert_eq!(snapped.ts, bar.ts);
-            assert_eq!(snapped.price, target, "aimed at {target}");
+        for log in [false, true] {
+            let mut state = charted(100);
+            state.visible = 100;
+            state.overhang = 0;
+            state.price_log = log;
+            let (w, h) = (800.0, 400.0);
+            let plan = layout(&state, w, h);
+            let (first, visible) = state.slice();
+            let scale = price_range(&state, &state.bars[first..first + visible]).unwrap();
+            assert_eq!(scale.log, log);
+            let bar_w = plan.plot_w / visible as f64;
+            let bar = state.bars[40];
+            let x = plan.plot_x + 40.5 * bar_w;
+            // A pixel above the high, a pixel below the low, and a pixel
+            // off the open and the close, which make up the body.
+            for (target, nudge) in [(bar.high, -1.0), (bar.low, 1.0), (bar.open, 1.0), (bar.close, -1.0)] {
+                let y = scale.to_y(target, plan.price_y, plan.price_h) + nudge;
+                let free = state.locate(w, h, x, y).unwrap();
+                assert_ne!(free.price, target, "without Ctrl the hand is followed");
+                let snapped = state.locate_with(w, h, x, y, true).unwrap();
+                assert_eq!(snapped.ts, bar.ts);
+                assert_eq!(snapped.price, target, "aimed at {target}, log {log}");
+            }
+            let past = plan.plot_x + 120.5 * bar_w;
+            let free = state.locate(w, h, past, 100.0).unwrap();
+            assert_eq!(state.locate_with(w, h, past, 100.0, true), Some(free));
         }
-        let past = plan.plot_x + 120.5 * bar_w;
-        let free = state.locate(w, h, past, 100.0).unwrap();
-        assert_eq!(state.locate_with(w, h, past, 100.0, true), Some(free));
     }
 
     /// Ctrl snaps only while an anchor is being put somewhere: a tool in
@@ -7158,10 +7155,10 @@ mod drawing_tests {
         let (w, h) = (800.0, 400.0);
         let plan = layout(&state, w, h);
         let (first, visible) = state.slice();
-        let (low, high) = price_range(&state, &state.bars[first..first + visible]).unwrap();
+        let scale = price_range(&state, &state.bars[first..first + visible]).unwrap();
         let bar = state.bars[40];
         let x = plan.plot_x + 40.5 * plan.plot_w / visible as f64;
-        let y = plan.price_y + plan.price_h * (high - bar.high) / (high - low) - 1.0;
+        let y = scale.to_y(bar.high, plan.price_y, plan.price_h) - 1.0;
         state.tool = Some(DrawingKind::Line);
         assert!(state.begin_placing(w, h, 100.0, 100.0, false));
         state.drag = None;
