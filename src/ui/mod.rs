@@ -15,6 +15,7 @@ pub mod palette;
 pub mod part_list;
 pub mod pick_frame;
 pub mod preferences;
+pub mod range_card;
 pub mod screenshot;
 pub mod search;
 pub mod shortcuts;

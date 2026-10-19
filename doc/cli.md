@@ -945,6 +945,78 @@ tos      thinkorswim · US listings, from your thinkorswim account · live, as e
   [exit 0]
 ```
 
+## Showing a stretch of the calendar
+
+```
+$ omacharts chart range ytd
+showing year to date on pos:0 AAPL 1D in "Macro"
+  [exit 0]
+```
+
+`chart range` lays the focused chart across a stretch of time, written as a
+count and a unit the way vim takes a motion, and no count is one. The case of
+the unit says which sort:
+
+- small letters roll back from today: `6m` six months, `3y` three years,
+  `2w` two weeks, `10d` ten days, `q` three months;
+- capitals count whole periods to date: `Y` the year to date, `2Y` that and
+  the year before, so from 1 January last year, and `W`, `M` and `Q` the
+  same. `ytd`, `mtd`, `qtd` and `wtd`, and `2ytd`, say it in any case;
+- four digits are a calendar year, `2025`, and a year and a month one month,
+  `2026-09`. These are the ones that stop before today: the chart shows that
+  year or that month edge to edge, and new bars do not move it;
+- a colon slices, the way pandas slices dates, with both ends included:
+  `2025:` from 1 January 2025 to today, `2024:2025-06` from the start of 2024
+  to the end of June 2025, `:2020` from the first bar to the end of 2020, and
+  `2026-03-21:2026-09-30` between two days. An end can be an offset back from
+  today, `-2y:-1y` being the year before last. A slice open at the end stays
+  live, so new bars still arrive in it;
+- `all`, or `:` alone, is the whole series.
+
+Today is the day of the last bar, so a series that stopped trading still has a
+year before its end, and the week to date on a Sunday is the week that just
+traded.
+
+The chart holds the range until the view is moved by hand: a new symbol, new
+bars and a new day are laid across it again, so the year to date stays the
+year to date whether the chart shows a stock with 200 bars in it or bitcoin
+with 290. The range shows in the corner under the price axis while it holds,
+and goes when a zoom or a pan ends it. It is not stored, so a window opened
+again, or a command that rewrites the arrangement such as `chart set`, starts
+the view over: set the range last.
+
+The resolution stays unless the range does not fit it: between 50 and 400
+bars, and within what the feed keeps. Otherwise it moves to the nearest on the
+strip that fits. A year of five-minute bars is past what the feed keeps and
+an hour makes 1,700, so it moves to daily; a month from last spring is short,
+but the feed keeps five-minute bars for sixty days, so it moves too; a month
+of daily bars is 21 candles, so it moves to hourly. Nothing on the strip
+fitting takes the one closest to fitting. `--resolution` names one instead, and the range is shown at it whether
+it fits or not:
+
+```
+$ omacharts chart range 2025: --resolution 1W
+showing from 2025 to today on pos:0 AAPL 1W in "Macro"
+  [exit 0]
+```
+
+In the window, Ctrl+G opens a card over the chart, where the symbol picker
+opens: a box, the first and last day the range lands on, and the resolution
+with the bars it makes, `1D · 131 bars`. The card keeps that shape whatever is
+typed, and the box turns red only for text no further key could make a range.
+Space or `?` on an empty box, or Down, drops a list over it: the common ranges
+with nothing typed, what the text could mean once something is, each with the
+day it starts. Tab goes into From and To, where Left and Right pick the day,
+month or year, and Up and Down, digits or a month's first letters set it; the
+box then says the slice that makes, `2026-03-21:`. Tab once more reaches the
+resolution, which Up and Down or the wheel step along the strip, a key such as
+`4h` or `W` sets, and Backspace hands back to the window's pick. A click on it,
+or Space, lists the strip's resolutions with the bars each makes, and which
+reach back far enough. Enter from anywhere in the
+card shows it. A digit typed on a chart opens the same card for the
+resolution alone. A range is of the chart on screen, so with nothing running
+the command exits `6`.
+
 ## Signing in to a feed that charts your own account
 
 Yahoo needs nothing. thinkorswim charts your Schwab account, so it has to be

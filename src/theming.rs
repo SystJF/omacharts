@@ -461,6 +461,63 @@ popover.pick-frame > contents { padding: 0; }
 /* The chart a picker will change, dimmed under it. */
 .pick-shade { background-color: alpha(black, 0.4); }
 
+/* A picker that takes something typed — Ctrl+G's range, a digit's resolution:
+   a header, a framed box with the text centred, and under it what the answer
+   comes to. Nothing under the box comes or goes with typing; the list drops
+   down over it in a popover of its own. */
+popover.pick-bare > contents { padding: 0 0 4px 0; }
+popover.pick-bare .pick-header { padding: 10px 14px 2px 14px; }
+popover.pick-bare .pick-title { font-weight: 600; font-size: 0.9em; }
+popover.pick-bare .pick-query { padding: 6px 12px 4px 12px; border-bottom: none; }
+popover.pick-bare .pick-query entry {
+  min-height: 34px;
+  border-radius: 6px;
+  font-family: monospace;
+  background: alpha(@window_fg_color, 0.05);
+  box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.14);
+}
+popover.pick-bare .pick-query entry:focus-within { box-shadow: inset 0 0 0 2px @accent_color; }
+popover.pick-bare .pick-query entry.error { box-shadow: inset 0 0 0 2px @error_color; }
+.pick-tip { font-size: 0.78em; opacity: 0.45; margin-right: 10px; }
+popover.pick-drop > contents { padding: 0; }
+
+.range-dates { padding: 6px 12px 0 12px; }
+.range-cell-name { font-size: 0.72em; letter-spacing: 0.08em; opacity: 0.5; }
+.range-today { font-size: 0.72em; color: @success_color; }
+.range-arrow { opacity: 0.4; margin-bottom: 6px; }
+.range-date {
+  font-family: monospace;
+  font-size: 0.9em;
+  font-feature-settings: 'tnum';
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: alpha(@window_fg_color, 0.05);
+  box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.10);
+}
+.range-date:focus { box-shadow: inset 0 0 0 2px @accent_color; outline: none; }
+.range-date.idle { color: alpha(@window_fg_color, 0.6); }
+.range-date.error { box-shadow: inset 0 0 0 2px @error_color; }
+.range-part { padding: 0 1px; border-radius: 3px; }
+.range-date:focus .range-part.on { background: @accent_color; color: @accent_fg_color; }
+
+.range-res { padding: 8px 12px 8px 12px; font-family: monospace; font-size: 0.85em; }
+.range-chip {
+  padding: 1px 7px;
+  border-radius: 5px;
+  font-weight: 700;
+  background: alpha(@window_fg_color, 0.05);
+  box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.18);
+}
+.range-chip:focus { box-shadow: inset 0 0 0 2px @accent_color; outline: none; }
+.range-chip.bumped { color: @warning_color; }
+.range-chip:hover { box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.35); }
+.range-caret { font-size: 0.8em; opacity: 0.5; margin-left: 1px; }
+.range-auto { font-family: sans-serif; font-weight: 400; font-size: 0.85em; opacity: 0.55; }
+.range-dot { opacity: 0.4; }
+.range-count { opacity: 0.75; }
+.range-count.many { color: @warning_color; opacity: 1; }
+.range-count.short { color: @error_color; opacity: 1; }
+
 /* The link toggle is a glyph, not a button: no frame, no fill, not even when
    it is on — a chart that follows the rail says so by the icon being there at
    full strength, and one that does not says so by the icon being nearly gone.

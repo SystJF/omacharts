@@ -796,6 +796,16 @@ pub const SURFACE: &[Noun] = &[
                 workspace: true,
             },
             Verb {
+                name: "range",
+                about: "Show a stretch of the calendar on the focused chart, such as the year to date, and keep showing it until the view is moved",
+                args: &[Arg::req("RANGE", "a count and a unit: small letters roll back (6m, 3y, 2w, 10d), capitals count whole periods to date (Y, 2Y, M, Q, or ytd), a year or a month (2025, 2026-09), a slice with both ends included (2025:, 2024:2025-06, :2020, -2y:-1y), or all (:)")],
+                flags: &[Flag::valued("resolution", "TF", "show it at this resolution rather than the one the range fits, such as 1W")],
+                example: "omacharts chart range ytd",
+                json: false,
+                writes: false,
+                workspace: false,
+            },
+            Verb {
                 name: "set",
                 about: "Change what a chart shows",
                 args: &[],

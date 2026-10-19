@@ -12,7 +12,7 @@
 //! A pick that changes no chart — a symbol for a watchlist — dims nothing
 //! and names the list.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -64,6 +64,7 @@ fn window_content(from: &impl IsA<gtk::Widget>) -> gtk::Widget {
 }
 
 type OnPick = Rc<dyn Fn(usize)>;
+type OnEnter = Rc<dyn Fn()>;
 
 pub struct PickFrame {
     pub popover: gtk::Popover,
@@ -73,6 +74,8 @@ pub struct PickFrame {
     /// can be brought into it.
     pub scroller: gtk::ScrolledWindow,
     content: gtk::Box,
+    /// The search row: the box and the chart it acts on.
+    query: gtk::Box,
     /// "→ pos:1": which chart a pick will change.
     target: gtk::Label,
     shade: RefCell<Option<gtk::Widget>>,
@@ -82,6 +85,16 @@ pub struct PickFrame {
     /// window it is on. Only there while the frame is open.
     catcher: RefCell<Option<(glib::WeakRef<gtk::Widget>, gtk::EventControllerKey)>>,
     on_pick: RefCell<Option<OnPick>>,
+    /// The list as a dropdown under the box, shown only when asked for; see
+    /// [`PickFrame::drop_list`]. `None` for a frame whose list is always
+    /// there.
+    drop: RefCell<Option<gtk::Popover>>,
+    /// What Enter does while the dropdown is folded away.
+    on_enter: RefCell<Option<OnEnter>>,
+    /// A word at the end of a bare box, for the key that shows the list.
+    tip: RefCell<Option<gtk::Label>>,
+    /// The width a frame keeps whatever the window's, when it has one.
+    width: Cell<Option<i32>>,
 }
 
 impl PickFrame {
@@ -130,11 +143,16 @@ impl PickFrame {
             list,
             scroller,
             content,
+            query,
             target,
             shade: RefCell::new(None),
             back: RefCell::new(None),
             catcher: RefCell::new(None),
             on_pick: RefCell::new(None),
+            drop: RefCell::new(None),
+            on_enter: RefCell::new(None),
+            tip: RefCell::new(None),
+            width: Cell::new(None),
         });
         frame.wire();
         frame
@@ -142,21 +160,22 @@ impl PickFrame {
 
     fn wire(self: &Rc<Self>) {
         // Enter takes the highlighted row, so an exact match never needs the
-        // arrow keys or the mouse.
-        let list = self.list.clone();
+        // arrow keys or the mouse. With the list folded away, it is the
+        // frame's own to say.
+        let weak = Rc::downgrade(self);
         self.entry.connect_activate(move |_| {
-            if let Some(row) = list.selected_row() {
-                row.activate();
+            if let Some(frame) = weak.upgrade() {
+                frame.enter();
             }
         });
 
         // The same from anywhere in the frame, for a hand that has left the
         // box for the list. Enter there is the row's own key and means this
         // too, so the two agree rather than compete.
-        let list = self.list.clone();
+        let weak = Rc::downgrade(self);
         dialogs::commit_on_ctrl_enter(&self.popover, move || {
-            if let Some(row) = list.selected_row() {
-                row.activate();
+            if let Some(frame) = weak.upgrade() {
+                frame.enter();
             }
         });
 
@@ -165,17 +184,24 @@ impl PickFrame {
         // one left open is a second Escape to press. Anywhere else in the
         // frame the popover's own Escape does it; a click outside, its
         // autohide.
-        let popover = self.popover.downgrade();
+        // A dropdown that is down folds first.
+        let weak = Rc::downgrade(self);
         self.entry.connect_stop_search(move |_| {
-            if let Some(popover) = popover.upgrade() {
-                popover.popdown();
+            let Some(frame) = weak.upgrade() else { return };
+            match frame.drop.borrow().as_ref().filter(|drop| drop.is_visible()) {
+                Some(drop) => drop.popdown(),
+                None => frame.popover.popdown(),
             }
         });
 
         // Up and down move the selection while focus stays in the entry.
         let keys = gtk::EventControllerKey::new();
         let (list, scroller) = (self.list.clone(), self.scroller.clone());
-        keys.connect_key_pressed(move |_, key, _, _| step(&list, &scroller, key));
+        let weak = Rc::downgrade(self);
+        keys.connect_key_pressed(move |_, key, _, _| match weak.upgrade() {
+            Some(frame) if frame.list_shown() => step(&list, &scroller, key),
+            _ => glib::Propagation::Proceed,
+        });
         self.entry.add_controller(keys);
 
         // A pick closes the frame first and acts once the keyboard is back
@@ -196,6 +222,117 @@ impl PickFrame {
                 frame.finish();
             }
         });
+    }
+
+    /// Enter: the highlighted row while the list shows, the frame's own
+    /// answer while it is folded away.
+    fn enter(&self) {
+        if self.list_shown() {
+            if let Some(row) = self.list.selected_row() {
+                row.activate();
+            }
+            return;
+        }
+        let on_enter = self.on_enter.borrow().clone();
+        if let Some(on_enter) = on_enter {
+            on_enter();
+        }
+    }
+
+    /// A box for something typed rather than searched: no magnifier, the
+    /// text centred, and over it a header with `title` on the left and the
+    /// chart it acts on on the right. `tip` sits at the end of the box while
+    /// it is empty.
+    pub fn set_bare(&self, title: &str, tip: &str) {
+        let mut child = self.entry.first_child();
+        while let Some(widget) = child {
+            if widget.is::<gtk::Image>() {
+                widget.set_visible(false);
+                break;
+            }
+            child = widget.next_sibling();
+        }
+        self.entry.set_alignment(0.5);
+        self.popover.add_css_class("pick-bare");
+
+        let name = gtk::Label::new(Some(title));
+        name.add_css_class("pick-title");
+        name.set_xalign(0.0);
+        name.set_hexpand(true);
+        self.query.remove(&self.target);
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        header.add_css_class("pick-header");
+        header.append(&name);
+        header.append(&self.target);
+        self.content.prepend(&header);
+
+        // Over the box rather than beside it, so the text stays centred.
+        let label = gtk::Label::new(Some(tip));
+        label.add_css_class("pick-tip");
+        label.set_halign(gtk::Align::End);
+        label.set_valign(gtk::Align::Center);
+        label.set_can_target(false);
+        self.query.remove(&self.entry);
+        let overlay = gtk::Overlay::new();
+        overlay.set_hexpand(true);
+        overlay.set_child(Some(&self.entry));
+        overlay.add_overlay(&label);
+        self.query.append(&overlay);
+        *self.tip.borrow_mut() = Some(label);
+    }
+
+    pub fn show_tip(&self, on: bool) {
+        if let Some(tip) = self.tip.borrow().as_ref() {
+            tip.set_visible(on);
+        }
+    }
+
+    /// Keep the list folded away until asked for, and drop it down over
+    /// whatever is under the box then, so the frame keeps its shape.
+    pub fn drop_list(&self) {
+        self.content.remove(&self.scroller);
+        let drop = gtk::Popover::new();
+        drop.add_css_class("pick-drop");
+        drop.set_has_arrow(false);
+        drop.set_autohide(false);
+        drop.set_position(gtk::PositionType::Bottom);
+        drop.set_child(Some(&self.scroller));
+        drop.set_parent(&self.query);
+        *self.drop.borrow_mut() = Some(drop);
+    }
+
+    /// Whether the rows can be seen: always, unless they drop down.
+    pub fn list_shown(&self) -> bool {
+        self.drop.borrow().as_ref().is_none_or(|drop| drop.is_visible())
+    }
+
+    pub fn show_list(&self, on: bool) {
+        let Some(drop) = self.drop.borrow().clone() else { return };
+        if on {
+            self.scroller.set_size_request(self.query.width() - 8, -1);
+            drop.popup();
+        } else {
+            drop.popdown();
+        }
+    }
+
+    /// Add a row under the box.
+    pub fn append(&self, widget: &impl IsA<gtk::Widget>) {
+        self.content.append(widget);
+    }
+
+    /// What Enter does while the list is folded away.
+    pub fn on_enter(&self, enter: impl Fn() + 'static) {
+        *self.on_enter.borrow_mut() = Some(Rc::new(enter));
+    }
+
+    /// Keep this width rather than one taken from the window.
+    pub fn set_width(&self, width: i32) {
+        self.width.set(Some(width));
+    }
+
+    pub fn close(&self) {
+        self.popover.popdown();
     }
 
     /// Open over `over`. `on_pick` is handed the index of the row picked,
@@ -240,7 +377,9 @@ impl PickFrame {
         }
 
         let (width, height) = (anchor.width(), anchor.height());
-        self.content.set_size_request((width - 32).clamp(MIN_WIDTH, MAX_WIDTH), -1);
+        let wide = self.width.get().unwrap_or_else(|| (width - 32).clamp(MIN_WIDTH, MAX_WIDTH));
+        self.content.set_size_request(wide, -1);
+        self.show_list(false);
         let rows = ((height - top - 3 * ROW) / ROW).clamp(FEWEST_ROWS, MOST_ROWS);
         // As tall as the rows, up to that: three matches are a short list,
         // not three rows at the top of an empty box.
@@ -312,6 +451,7 @@ impl PickFrame {
 
     /// Put everything back once the frame has closed, however it closed.
     fn finish(&self) {
+        self.show_list(false);
         if let Some(shade) = self.shade.borrow_mut().take() {
             shade.set_visible(false);
             if let Some(root) = shade.root() {
