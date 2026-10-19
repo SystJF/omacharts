@@ -31,6 +31,7 @@ use crate::ui::text_editor;
 use omacharts_engine::drawings::{
     self, Anchor, Configurations, Drawing, Grip, Kind as DrawingKind, Projected, Scope,
 };
+use omacharts_engine::bars::Unit;
 use omacharts_engine::indicators::{self as indicators, BandSeries, Output, Profile};
 use omacharts_engine::{
     grouped_decimals, Bar, BarScheme, BarStyle, Direction, FetchFailure, Indicator, Instrument,
@@ -4307,13 +4308,15 @@ fn draw_time_axis(
         if step <= 0 {
             return None;
         }
+        let timeframe = state.timeframe;
         if at < 0 {
-            bars.first().map(|b| b.ts + at * step)
+            bars.first().map(|b| timeframe.shift(b.ts, at))
         } else {
-            bars.last().map(|b| b.ts + (at - bars.len() as i64 + 1) * step)
+            bars.last().map(|b| timeframe.shift(b.ts, at - bars.len() as i64 + 1))
         }
     };
-    let (ticks, tick_seconds) = axis_ticks(total, plot_w, step, time_at);
+    let utc = state.timeframe.is_calendar();
+    let (ticks, tick_seconds) = axis_ticks(total, plot_w, step, utc, time_at);
     for column in ticks {
         let Some(ts) = time_at(column) else { continue };
         let x = plot_x + (column as f64 + 0.5) * bar_w;
@@ -4327,7 +4330,7 @@ fn draw_time_axis(
             let _ = cr.stroke();
         }
 
-        let label = format_axis_time(ts, tick_seconds, state.timeframe.is_intraday());
+        let label = format_axis_time(ts, tick_seconds, state.timeframe.is_intraday(), utc);
         colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.9);
         if let Ok(extents) = cr.text_extents(&label) {
             cr.move_to(x - extents.width() / 2.0, height - 7.0);
@@ -5618,9 +5621,9 @@ fn time_at_column(state: &State, index: i64) -> Option<i64> {
         return None;
     }
     if index < 0 {
-        state.bars.first().map(|b| b.ts + index * step)
+        state.bars.first().map(|b| state.timeframe.shift(b.ts, index))
     } else {
-        state.bars.last().map(|b| b.ts + (index - len + 1) * step)
+        state.bars.last().map(|b| state.timeframe.shift(b.ts, index - len + 1))
     }
 }
 
@@ -5824,7 +5827,9 @@ impl Every {
             Every::Minutes(n) => n * 60,
             Every::Day => DAY,
             Every::Week => 7 * DAY,
-            Every::Months(n) => n * 30 * DAY,
+            // An average month, the length a monthly chart steps by, so a
+            // monthly chart does not skip the one-month rung as too fine.
+            Every::Months(n) => n * Timeframe::months(1).seconds(),
         }
     }
 
@@ -5855,27 +5860,20 @@ fn axis_ticks(
     total: i64,
     plot_w: f64,
     step: i64,
+    utc: bool,
     time_at: impl Fn(i64) -> Option<i64>,
 ) -> (Vec<i64>, i64) {
-    use chrono::{Local, TimeZone};
-    let times: Vec<Option<chrono::NaiveDateTime>> = (0..total)
-        .map(|column| {
-            let ts = time_at(column)?;
-            Some(Local.timestamp_opt(ts, 0).single()?.naive_local())
-        })
-        .collect();
+    let times: Vec<Option<chrono::NaiveDateTime>> =
+        (0..total).map(|column| wall_clock(time_at(column)?, utc)).collect();
+    // Lazily, so trying a rung that does not fit allocates nothing.
     let ticks = |every: Every| {
-        let mut ticks = Vec::new();
         let mut previous = None;
-        for (column, at) in times.iter().enumerate() {
-            let Some(at) = at else { continue };
-            let period = every.period(*at);
-            if previous.is_some_and(|p| p != period) {
-                ticks.push(column as i64);
-            }
+        times.iter().enumerate().filter_map(move |(column, at)| {
+            let period = every.period((*at)?);
+            let changed = previous.is_some_and(|p| p != period);
             previous = Some(period);
-        }
-        ticks
+            changed.then_some(column as i64)
+        })
     };
     // A session's first bar starts a new stretch, and the round time just
     // after it starts another: 15:30 and 16:00 land two bars apart on a 15m
@@ -5895,19 +5893,23 @@ fn axis_ticks(
     };
     // Counted before thinning: thinning alone would leave every rung looking
     // like it fits, and the finest one would always win.
-    let room = (plot_w / TIME_LABEL_GAP).max(1.0) as usize;
+    //
+    // A tick never lands on the first column, so n ticks share the plot with
+    // the stretch before the first of them: n + 1 gaps, not n. Counting n
+    // lets evenly spaced ticks — a yearly chart's, every two bars — sit just
+    // under the gap, and thinning them then leaves only the last.
+    let room = (plot_w / TIME_LABEL_GAP).max(2.0) as usize - 1;
     let mut coarsest = Every::Months(240);
     for every in Every::LADDER {
         if every.seconds() < step {
             continue;
         }
-        let found = ticks(every);
-        if found.len() <= room {
-            return (spaced(found), every.seconds());
+        if ticks(every).count() <= room {
+            return (spaced(ticks(every).collect()), every.seconds());
         }
         coarsest = every;
     }
-    (spaced(ticks(coarsest)), coarsest.seconds())
+    (spaced(ticks(coarsest).collect()), coarsest.seconds())
 }
 
 /// Label an axis tick at the detail the gap between ticks justifies.
@@ -5916,9 +5918,8 @@ fn axis_ticks(
 /// fortnight apart, and labelling each of them "Mar 2026" prints the same
 /// thing three times running. What decides the format is how far apart two
 /// neighbouring labels are, because that is what has to tell them apart.
-fn format_axis_time(ts: i64, tick_seconds: i64, intraday: bool) -> String {
-    use chrono::{Local, TimeZone};
-    let Some(dt) = Local.timestamp_opt(ts, 0).single() else {
+fn format_axis_time(ts: i64, tick_seconds: i64, intraday: bool, utc: bool) -> String {
+    let Some(dt) = wall_clock(ts, utc) else {
         return String::new();
     };
     const DAY: i64 = 86_400;
@@ -5939,14 +5940,25 @@ fn format_axis_time(ts: i64, tick_seconds: i64, intraday: bool) -> String {
 /// The crosshair label always carries the year — it is the one place you look
 /// to know exactly which bar you are on.
 fn format_time_full(ts: i64, timeframe: Timeframe) -> String {
-    use chrono::{Local, TimeZone};
-    let Some(dt) = Local.timestamp_opt(ts, 0).single() else {
+    let Some(dt) = wall_clock(ts, timeframe.is_calendar()) else {
         return String::new();
     };
-    if timeframe.is_intraday() {
-        dt.format("%d %b %Y %H:%M").to_string()
+    match timeframe.unit {
+        _ if timeframe.is_intraday() => dt.format("%d %b %Y %H:%M").to_string(),
+        Unit::Month => dt.format("%b %Y").to_string(),
+        Unit::Year => dt.format("%Y").to_string(),
+        _ => dt.format("%a %d %b %Y").to_string(),
+    }
+}
+
+/// What a clock on the wall read at `ts`: the local one, or UTC for bars that
+/// open on a UTC calendar boundary (see [`Timeframe::is_calendar`]).
+fn wall_clock(ts: i64, utc: bool) -> Option<chrono::NaiveDateTime> {
+    use chrono::{Local, TimeZone, Utc};
+    if utc {
+        Some(Utc.timestamp_opt(ts, 0).single()?.naive_utc())
     } else {
-        dt.format("%a %d %b %Y").to_string()
+        Some(Local.timestamp_opt(ts, 0).single()?.naive_local())
     }
 }
 
@@ -6678,17 +6690,17 @@ mod tests {
 
         // Years apart: years only. This is the case that read "01 Jun" for
         // every tick before the spacing was taken into account.
-        let decade = format_axis_time(ts, 400 * DAY, false);
+        let decade = format_axis_time(ts, 400 * DAY, false, false);
         assert_eq!(decade.len(), 4, "{decade}");
         assert!(decade.chars().all(|c| c.is_ascii_digit()), "{decade}");
 
         // A year or two: month and year.
-        assert!(format_axis_time(ts, 30 * DAY, false).contains("20"), "months get a year");
+        assert!(format_axis_time(ts, 30 * DAY, false, false).contains("20"), "months get a year");
         // A few days apart: day and month, no year.
-        assert!(!format_axis_time(ts, 5 * DAY, false).contains("20"));
+        assert!(!format_axis_time(ts, 5 * DAY, false, false).contains("20"));
         // Intraday always carries a clock, however far apart the ticks.
-        assert!(format_axis_time(ts, 3600, true).contains(':'));
-        assert!(format_axis_time(ts, 30 * DAY, true).contains(':'));
+        assert!(format_axis_time(ts, 3600, true, false).contains(':'));
+        assert!(format_axis_time(ts, 30 * DAY, true, false).contains(':'));
     }
 
     #[test]
@@ -6697,7 +6709,7 @@ mod tests {
         // date-only label printed the same thing over and over.
         let tick = 6 * 3600;
         let labels: Vec<String> = (0..6)
-            .map(|i| format_axis_time(1_700_000_000 + i * tick, tick, true))
+            .map(|i| format_axis_time(1_700_000_000 + i * tick, tick, true, false))
             .collect();
         let mut unique = labels.clone();
         unique.sort();
@@ -6712,7 +6724,7 @@ mod tests {
         const DAY: i64 = 86_400;
         let tick = 14 * DAY;
         let labels: Vec<String> = (0..18)
-            .map(|i| format_axis_time(1_767_225_600 + i * tick, tick, false))
+            .map(|i| format_axis_time(1_767_225_600 + i * tick, tick, false, false))
             .collect();
         let mut unique = labels.clone();
         unique.sort();
@@ -6720,12 +6732,36 @@ mod tests {
         assert_eq!(unique.len(), labels.len(), "repeated labels: {labels:?}");
     }
 
+    /// A monthly bar opens at 00:00 UTC on the first, which a clock west of
+    /// Greenwich reads as the last evening of the month before.
+    #[test]
+    fn a_monthly_bar_is_named_for_its_own_month_in_any_zone() {
+        let february = 1_706_745_600; // 2024-02-01 00:00 UTC
+        assert_eq!(format_time_full(february, Timeframe::months(1)), "Feb 2024");
+        assert_eq!(format_time_full(1_704_067_200, Timeframe::years(1)), "2024");
+        assert_eq!(format_axis_time(february, 31 * 86_400, false, true), "Feb 2024");
+    }
+
+    #[test]
+    fn monthly_bars_get_a_tick_a_month_when_there_is_room() {
+        use chrono::{TimeZone, Utc};
+        let month = |column: i64| {
+            let (year, month0) = (2000 + column.div_euclid(12), column.rem_euclid(12));
+            Utc.with_ymd_and_hms(year as i32, month0 as u32 + 1, 1, 0, 0, 0).unwrap()
+        };
+        let step = Timeframe::months(1).seconds();
+        let (ticks, every) =
+            axis_ticks(12, 12.0 * TIME_LABEL_GAP, step, true, |c| Some(month(c).timestamp()));
+        assert_eq!(every, step);
+        assert_eq!(ticks.len(), 11, "{ticks:?}");
+    }
+
     #[test]
     fn two_ticks_a_decade_apart_get_different_labels() {
         const DAY: i64 = 86_400;
         let tick = 400 * DAY;
-        let a = format_axis_time(1_200_000_000, tick, false);
-        let b = format_axis_time(1_700_000_000, tick, false);
+        let a = format_axis_time(1_200_000_000, tick, false, false);
+        let b = format_axis_time(1_700_000_000, tick, false, false);
         assert_ne!(a, b);
     }
 
@@ -6740,7 +6776,7 @@ mod tests {
             let at = Local.timestamp_opt(time_at(column).unwrap(), 0).unwrap();
             (at.year(), at.month())
         };
-        let (ticks, _) = axis_ticks(520, 3_120.0, WEEK, time_at);
+        let (ticks, _) = axis_ticks(520, 3_120.0, WEEK, false, time_at);
         assert!(ticks.len() > 5, "{ticks:?}");
         for column in ticks {
             assert_ne!(month(column), month(column - 1), "column {column} is mid-month");
@@ -6767,7 +6803,7 @@ mod tests {
 
         let total = stamps.len() as i64;
         let plot_w = 2_400.0;
-        let (ticks, _) = axis_ticks(total, plot_w, STEP, |column| {
+        let (ticks, _) = axis_ticks(total, plot_w, STEP, false, |column| {
             stamps.get(column as usize).copied()
         });
 
@@ -7446,5 +7482,16 @@ mod drawing_tests {
         );
         assert_ne!(inside, outside, "the box painted nothing");
         assert_ne!(inside, solid, "the box is opaque");
+    }
+
+    /// Twenty-one yearly bars across 922 pixels: ten two-yearly ticks fit by
+    /// count but sit 88 pixels apart, and thinning them left only the last.
+    #[test]
+    fn evenly_spaced_ticks_are_not_thinned_down_to_one() {
+        use chrono::{TimeZone, Utc};
+        let year = |c: i64| Utc.with_ymd_and_hms(2006 + c as i32, 1, 1, 0, 0, 0).unwrap().timestamp();
+        let step = Timeframe::years(1).seconds();
+        let (ticks, _) = axis_ticks(21, 922.0, step, true, |c| Some(year(c)));
+        assert!(ticks.len() > 2, "{ticks:?}");
     }
 }
