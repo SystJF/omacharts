@@ -121,7 +121,7 @@
 
   /* The install line is the one thing on the page a visitor is meant to take
      away, so it looks like what it is: a prompt, in the terminal's own
-     letterforms, sitting above the link rather than competing with it. */
+     letterforms. */
   .install {
     margin: clamp(1.6rem, 3.4vw, 4rem) 0 0;
     display: inline-flex;
@@ -186,37 +186,38 @@
   .install[data-copied] .done { display: block; }
   .install[data-copied] .hint { color: var(--amber); opacity: 1; }
 
+  /* The repository is a mark in the corner rather than a second button in
+     the hero: quiet like the clipboard glyph, brighter when pointed at, and
+     a full finger's width to tap. */
   .repo {
-    margin-top: clamp(.9rem, 1.8vw, 1.8rem);
-    padding: .72em 1.5em;
-    border: 1px solid rgba(243, 236, 220, .28);
+    position: fixed;
+    top: calc(clamp(.75rem, 2vw, 1.5rem) + env(safe-area-inset-top, 0px));
+    right: calc(clamp(.75rem, 2vw, 1.5rem) + env(safe-area-inset-right, 0px));
+    display: grid;
+    place-items: center;
+    width: 2.75rem;
+    height: 2.75rem;
     border-radius: 999px;
-    background: rgba(13, 17, 20, .42);
-    color: var(--quiet);
-    font-size: clamp(.9rem, 1.3vw, 1.6rem);
-    font-weight: 500;
-    letter-spacing: .04em;
-    text-decoration: none;
-    transition: transform .18s ease, border-color .18s ease,
-                color .18s ease, background-color .18s ease;
-  }
-  .repo:hover {
-    transform: translateY(-2px);
-    border-color: rgba(243, 236, 220, .6);
-    background: rgba(13, 17, 20, .62);
     color: var(--bright);
   }
+  .repo svg {
+    width: 1.3rem;
+    height: 1.3rem;
+    fill: currentColor;
+    opacity: .4;
+    transition: opacity .18s ease;
+  }
+  .repo:hover svg,
+  .repo:focus-visible svg { opacity: .7; }
   .repo:focus-visible {
     outline: 2px solid var(--amber);
-    outline-offset: 4px;
-    color: var(--bright);
+    outline-offset: 2px;
   }
 
   @media (prefers-reduced-motion: reduce) {
     .tagline a { transition: none; }
     .install, .install .hint { transition: none; }
-    .repo { transition: none; }
-    .repo:hover { transform: none; }
+    .repo svg { transition: none; }
   }
 </style>
 </head>
@@ -232,8 +233,10 @@
         <svg class="done" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
       </span>
     </button>
-    <a class="repo" href="https://github.com/jorgemanrubia/omacharts">View on GitHub</a>
   </main>
+  <a class="repo" href="https://github.com/jorgemanrubia/omacharts" aria-label="Omacharts on GitHub" title="Omacharts on GitHub">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+  </a>
   <script>
     /* Progressive: with no clipboard and no script the command is still there
        to read and select, which is all it has to be. */
