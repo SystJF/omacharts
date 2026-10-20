@@ -546,11 +546,17 @@ enum Due {
 }
 
 /// Is a row with something cached worth asking about again at `now`?
-fn row_due(provider: &dyn Provider, instrument: &Instrument, fetched_at: i64, now: i64) -> Due {
+///
+/// By its age and its market alone, as if every feed were polled. Whether a
+/// streamed feed may be polled at all is the sender's to decide: the window
+/// keeps a streamed row to what the stream gives it ([`Live::warm`]), while
+/// a widget process with no window has no stream running, and a quote it
+/// never refetched would stay at its first price for good.
+fn row_due(instrument: &Instrument, fetched_at: i64, now: i64) -> Due {
     use omacharts_engine::refresh::{self, Held};
     let timeframe = Timeframe::days(1);
     let candidate = refresh::Candidate {
-        delivery: provider.delivery(),
+        delivery: omacharts_engine::Delivery::Polled,
         visible: true,
         at_latest: true,
         timeframe,
@@ -616,7 +622,7 @@ pub fn plan_refresh(
             && store.load_closes(&key).is_none();
         let fetched_at =
             if left_out { coverage.fetched_at } else { coverage.fetched_at.max(asked.unwrap_or(0)) };
-        let due = row_due(provider, instrument, fetched_at, now);
+        let due = row_due(instrument, fetched_at, now);
         if batch == 0 || left_out {
             if due == Due::Now {
                 bars.push((fetched_at, instrument));
@@ -1415,6 +1421,18 @@ mod tests {
 
         let plan = plan_refresh(&store, &provider, &[friday, thursday, coin], SATURDAY, MAX_BATCHES);
         assert_eq!(batched(&plan), vec![vec!["THU", "BTC-USD"]]);
+    }
+
+    /// thinkorswim streams, but not into a widget process with no window: a
+    /// stale row there is fetched by its bars, as it always was, or its
+    /// price would stop at the first one fetched.
+    #[test]
+    fn a_streamed_feed_still_plans_its_stale_rows() {
+        let store = Store::memory().unwrap();
+        let provider = omacharts_engine::providers::Tos::new();
+        let row = cached(&store, &provider, "AAPL", OPEN - 3_600);
+        let plan = plan_refresh(&store, &provider, std::slice::from_ref(&row), OPEN, MAX_BATCHES);
+        assert_eq!((plan.bars.len(), plan.closes.len()), (1, 0));
     }
 
     /// A row the batch left out goes to its bars, at the cadence a chart
