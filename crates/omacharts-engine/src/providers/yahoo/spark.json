@@ -1,0 +1,52 @@
+{
+ "AAPL": {
+  "timestamp": [
+   1791466200,
+   1791552600,
+   1791811800,
+   1791898200,
+   1791984600
+  ],
+  "end": null,
+  "symbol": "AAPL",
+  "start": null,
+  "close": [
+   340.42,
+   336.64,
+   340.97,
+   341.27,
+   342.96
+  ],
+  "fulldayChange": 2.975,
+  "fulldayChangePercent": 0.867,
+  "fulldayPrice": 345.935,
+  "previousClose": null,
+  "chartPreviousClose": 336.67,
+  "dataGranularity": 300
+ },
+ "EURUSD=X": {
+  "timestamp": [
+   1791500400,
+   1791759600,
+   1791846000,
+   1791932400,
+   1792061850
+  ],
+  "end": null,
+  "symbol": "EURUSD=X",
+  "start": null,
+  "close": [
+   1.1213,
+   1.1205,
+   1.116,
+   1.1204,
+   1.1217
+  ],
+  "fulldayChange": 0.006,
+  "fulldayChangePercent": 0.5384,
+  "fulldayPrice": 1.1217,
+  "previousClose": null,
+  "chartPreviousClose": 1.1213,
+  "dataGranularity": 300
+ }
+}

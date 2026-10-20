@@ -28,7 +28,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use omacharts_engine::{Bar, FetchFailure, Pacing, Provider, ProviderError, Timeframe};
+use omacharts_engine::{
+    Bar, FetchFailure, Pacing, Provider, ProviderError, SharedCooldown, Timeframe,
+};
 
 use crate::store::Store;
 
@@ -59,7 +61,18 @@ pub struct Request {
     pub timeframe: Timeframe,
 }
 
+/// One symbol in a batch of closes: the cache key its answer is stored
+/// under, and the provider's own spelling to ask for.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Listing {
+    pub key: String,
+    pub symbol: String,
+}
+
 pub enum Response {
+    /// A batch of closes is in the store. `keys` are the listings it brought
+    /// closes back for; `failure` is why it brought none, if it failed.
+    Closes { keys: Vec<String>, failure: Option<FetchFailure> },
     /// Bars at the *native* timeframe. The caller folds to what it is showing.
     Bars { key: String, timeframe: Timeframe, bars: Vec<Bar> },
     /// Nothing new arrived. `bars` is whatever the cache already had, and
@@ -203,6 +216,19 @@ struct Job {
     /// queued, where everything more wanted overtakes it and any arrival can
     /// interrupt the wait, rather than slept out inside a call.
     not_before: Option<Instant>,
+    /// Set for a batch of closes rather than one series' bars. The request
+    /// then only names the batch, so that asking for the same one twice
+    /// queues it once, and carries its pacing.
+    closes: Option<Batch>,
+}
+
+/// A batch of closes as queued: what it names, and when it was asked for.
+#[derive(Debug)]
+struct Batch {
+    listings: Vec<Listing>,
+    /// Unix seconds. A listing another batch brought back since is left out
+    /// when this one is sent, see [`attempt_closes`].
+    asked_at: i64,
 }
 
 impl Loader {
@@ -230,15 +256,24 @@ impl Loader {
 
         let worker = inner.clone();
         std::thread::spawn(move || {
+            // Before anything is asked: what the last process was told.
+            let mut handed_on = take_up_cooldown(provider.as_ref());
             let rules = || (provider.pacing(), provider.cooldown_until());
             while let Some(dispatch) = worker.take(rules) {
                 let (job, outcome) = match dispatch {
                     Dispatch::Send(job) => {
-                        let outcome = attempt(&job.request, provider.as_ref());
+                        let outcome = match &job.closes {
+                            Some(batch) => attempt_closes(batch, provider.as_ref()),
+                            None => attempt(&job.request, provider.as_ref()),
+                        };
+                        handed_on = hand_on_cooldown(provider.as_ref(), handed_on);
                         (job, outcome)
                     }
                     Dispatch::Refuse(job) => {
-                        let outcome = refused(&job.request);
+                        let outcome = match job.closes {
+                            Some(_) => Outcome::Done(closes_failed(FetchFailure::RateLimited)),
+                            None => refused(&job.request),
+                        };
                         (job, outcome)
                     }
                 };
@@ -254,6 +289,9 @@ impl Loader {
                                 let not_before = Some(Instant::now() + backoff);
                                 worker.again(Job { attempt: job.attempt + 1, not_before, ..job });
                                 continue;
+                            }
+                            None if job.closes.is_some() => {
+                                closes_failed(FetchFailure::from(&error))
                             }
                             None => failed(&job.request, bars, FetchFailure::from(&error)),
                         }
@@ -280,6 +318,28 @@ impl Loader {
     pub fn fetch(&self, request: Request, priority: u32) {
         let mut queue = self.inner.queue.lock().unwrap_or_else(|e| e.into_inner());
         let queued = enqueue(&mut queue, request, priority);
+        drop(queue);
+        if queued {
+            self.inner.wake.notify_one();
+        }
+    }
+
+    /// Queue one request for the latest closes of each of `listings`.
+    ///
+    /// Speculative, always: nobody is waiting on a list of prices the way
+    /// they wait on a chart. Kept to what one request may name by the caller,
+    /// which knows the provider's [`Provider::max_batch`]. Asking for the same
+    /// batch while it is queued queues it once.
+    pub fn fetch_closes(&self, listings: Vec<Listing>, priority: u32) {
+        let keys: Vec<&str> = listings.iter().map(|l| l.key.as_str()).collect();
+        let request = Request {
+            speculative: true,
+            key: format!("closes:{}", keys.join(",")),
+            symbol: String::new(),
+            timeframe: Timeframe::days(1),
+        };
+        let mut queue = self.inner.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let queued = enqueue_job(&mut queue, request, priority, Some(listings));
         drop(queue);
         if queued {
             self.inner.wake.notify_one();
@@ -768,6 +828,16 @@ fn warm_up_is_worth_reporting(failed: bool, claimed: bool) -> bool {
 /// Add a job, or improve the one already there. True when the worker has
 /// something new to wake up for.
 fn enqueue(queue: &mut Queue, request: Request, priority: u32) -> bool {
+    enqueue_job(queue, request, priority, None)
+}
+
+/// [`enqueue`], for a series or for a batch of closes.
+fn enqueue_job(
+    queue: &mut Queue,
+    request: Request,
+    priority: u32,
+    closes: Option<Vec<Listing>>,
+) -> bool {
     // Somebody has asked for the resolution a warm-up is already fetching.
     // Join that reply instead of queueing a second request for the same
     // series: one fetch, whose answer — bars or failure — is now the chart's,
@@ -796,7 +866,9 @@ fn enqueue(queue: &mut Queue, request: Request, priority: u32) -> bool {
     }
     let seq = queue.next_seq;
     queue.next_seq += 1;
-    queue.jobs.push(Job { request, priority, seq, attempt: 0, not_before: None });
+    let closes =
+        closes.map(|listings| Batch { listings, asked_at: chrono::Utc::now().timestamp() });
+    queue.jobs.push(Job { request, priority, seq, attempt: 0, not_before: None, closes });
     true
 }
 
@@ -876,6 +948,154 @@ fn attempt(request: &Request, provider: &dyn Provider) -> Outcome {
         }
         Err(error) => Outcome::Failed { error, bars: cached },
     }
+}
+
+/// Send one batch of closes and store what came back.
+///
+/// Only the listings no other batch has brought back since this one was
+/// asked for: the bar widget and the rail each plan from the same rows, and
+/// a row on both queues twice before either is sent. The rest go; when
+/// nothing is left, nothing is asked.
+///
+/// Every listing sent is marked as asked, answered or not. One the provider
+/// left out has nothing to show, and is fetched by its bars after this, see
+/// [`crate::cli::plan_refresh`]. A provider that knows none of them says so
+/// with [`ProviderError::NotFound`], which leaves them all out the same way
+/// rather than failing the batch and having it asked again.
+fn attempt_closes(batch: &Batch, provider: &dyn Provider) -> Outcome {
+    let Ok(store) = Store::open() else {
+        return Outcome::Done(closes_failed(FetchFailure::LocalCache));
+    };
+    let listings: Vec<&Listing> = batch
+        .listings
+        .iter()
+        .filter(|l| store.closes_fetched_at(&l.key).is_none_or(|at| at < batch.asked_at))
+        .collect();
+    if listings.is_empty() {
+        return Outcome::Done(Response::Closes { keys: Vec::new(), failure: None });
+    }
+    let symbols: Vec<&str> = listings.iter().map(|l| l.symbol.as_str()).collect();
+    let answer = match provider.closes(&symbols) {
+        Err(ProviderError::NotFound) => Ok(Vec::new()),
+        answer => answer,
+    };
+    match answer {
+        Ok(answer) => {
+            let mut keys = Vec::with_capacity(answer.len());
+            for listing in listings {
+                match answer.iter().find(|closes| closes.symbol == listing.symbol) {
+                    Some(closes) => {
+                        store.write_closes(&listing.key, closes);
+                        keys.push(listing.key.clone());
+                    }
+                    None => store.mark_closes_asked(&listing.key),
+                }
+            }
+            Outcome::Done(Response::Closes { keys, failure: None })
+        }
+        Err(error) => Outcome::Failed { error, bars: Vec::new() },
+    }
+}
+
+fn closes_failed(failure: FetchFailure) -> Response {
+    Response::Closes { keys: Vec::new(), failure: Some(failure) }
+}
+
+/// The settings row through which a provider's cooldown outlives the process
+/// that was given it.
+///
+/// A row rather than the provider's memory because the processes that ask
+/// are not one: the bar widget asks from a fresh one every couple of
+/// minutes with no window open, and a command run from a terminal is
+/// another. Each used to start with no cooldown and a backoff at its
+/// bottom, so after a 429 the next run asked again two minutes later and
+/// the doubling never got past its first step.
+fn cooldown_key(provider_id: &str) -> String {
+    format!("cooldown.{provider_id}")
+}
+
+/// How a cooldown reads in its row: when it ends and what the next would
+/// cost, both in seconds.
+fn cooldown_text(cooldown: SharedCooldown) -> String {
+    format!("{} {}", cooldown.until, cooldown.next.as_secs())
+}
+
+/// A handed-on cooldown and the row's text, if one is stored for
+/// `provider_id` and still stands at `now` (unix seconds).
+///
+/// Anything unreadable is no cooldown: the row is reachable from `config
+/// set`, and a typo there must not stop every fetch. A row that reads but
+/// no longer stands is deleted, rather than left in `config list` claiming
+/// a cooldown nobody keeps.
+fn load_cooldown(store: &Store, provider_id: &str, now: i64) -> Option<(SharedCooldown, String)> {
+    let key = cooldown_key(provider_id);
+    let value = store.setting(&key)?;
+    let (until, next) = value.split_once(' ')?;
+    let cooldown = SharedCooldown {
+        until: until.trim().parse().ok()?,
+        next: Duration::from_secs(next.trim().parse().ok()?),
+    };
+    if !cooldown.stands_at(now) {
+        store.remove_setting_if(&key, &value);
+        return None;
+    }
+    Some((cooldown, value))
+}
+
+/// Store `held` for the next process, or clear the row with `None`, and
+/// return what the row now says on this process's behalf.
+///
+/// Clearing deletes the row only while it still says `handed_on`, what this
+/// process last read or wrote there. Another process refused in the meantime
+/// has written its own, and that one still stands.
+fn save_cooldown(
+    store: &Store,
+    provider_id: &str,
+    held: Option<String>,
+    handed_on: Option<&str>,
+) -> Option<String> {
+    let key = cooldown_key(provider_id);
+    match held {
+        Some(text) => {
+            store.set_setting(&key, &text);
+            Some(text)
+        }
+        None => {
+            if let Some(old) = handed_on {
+                store.remove_setting_if(&key, old);
+            }
+            None
+        }
+    }
+}
+
+/// Pick up where another process left the provider's cooldown. Read once,
+/// when the worker starts: while a window is open every command goes
+/// through it, so there is nobody else asking for this to be news from.
+///
+/// Then hand on what the provider made of it, which is what the row said
+/// unless it asked for more than the provider ever gives — a clock put
+/// back, or a hand-typed year — and is rewritten to what will be kept.
+/// Returns the row's text as it now stands, if there is one to clear once
+/// the provider relaxes.
+fn take_up_cooldown(provider: &dyn Provider) -> Option<String> {
+    let store = Store::open().ok()?;
+    let now = chrono::Utc::now().timestamp();
+    let (cooldown, stored) = load_cooldown(&store, provider.id(), now)?;
+    provider.resume_cooldown(cooldown);
+    hand_on_cooldown(provider, Some(stored))
+}
+
+/// After a request: hand the provider's cooldown on, or clear what was
+/// handed on before. Nothing new either way, which is steady state, writes
+/// nothing and opens nothing.
+fn hand_on_cooldown(provider: &dyn Provider, handed_on: Option<String>) -> Option<String> {
+    let held = provider.shared_cooldown().map(cooldown_text);
+    if held == handed_on {
+        return handed_on;
+    }
+    let Ok(store) = Store::open() else { return handed_on };
+    save_cooldown(&store, provider.id(), held, handed_on.as_deref())
 }
 
 /// The reply for a request the queue refused on the provider's behalf: what
@@ -980,6 +1200,7 @@ mod tests {
             seq,
             attempt: 0,
             not_before: None,
+            closes: None,
         }
     }
 
@@ -1390,7 +1611,7 @@ mod tests {
     fn unasked_of(response: &Response) -> bool {
         match response {
             Response::Failed { unasked, .. } => *unasked,
-            Response::Bars { .. } => panic!("expected a failure"),
+            Response::Bars { .. } | Response::Closes { .. } => panic!("expected a failure"),
         }
     }
 
@@ -1643,6 +1864,7 @@ mod tests {
             seq: 0,
             attempt: 1,
             not_before: None,
+            closes: None,
         });
 
         let queue = inner.queue.lock().unwrap();
@@ -1665,6 +1887,7 @@ mod tests {
             seq: 0,
             attempt: 1,
             not_before: Some(Instant::now() + ms(400)),
+            closes: None,
         });
 
         let queue = inner.queue.lock().unwrap();
@@ -1773,5 +1996,29 @@ mod tests {
         let (inner, _, worker) = parked_on_a_warm_up(Instant::now());
         shutdown(&inner);
         assert!(worker.join().unwrap().is_none());
+    }
+
+    /// What the widget's last run was told reaches its next one, and a row
+    /// that has had its quiet spell is gone once read.
+    #[test]
+    fn a_cooldown_is_handed_on_through_the_store() {
+        let store = Store::memory().unwrap();
+        let cooldown = SharedCooldown { until: 1_000_060, next: Duration::from_secs(120) };
+        save_cooldown(&store, "yahoo", Some(cooldown_text(cooldown)), None);
+        let stored = Some((cooldown, "1000060 120".to_string()));
+        assert_eq!(load_cooldown(&store, "yahoo", 1_000_100), stored, "run out, still climbing");
+        assert_eq!(load_cooldown(&store, "yahoo", 1_000_200), None, "quiet long enough");
+        assert_eq!(store.setting(&cooldown_key("yahoo")), None, "and deleted");
+    }
+
+    /// Two processes share the row. One that relaxes clears what it wrote,
+    /// not a refusal the other has written over it since.
+    #[test]
+    fn clearing_a_cooldown_leaves_one_another_process_wrote_since() {
+        let store = Store::memory().unwrap();
+        let mine = save_cooldown(&store, "yahoo", Some("1000060 120".into()), None);
+        store.set_setting(&cooldown_key("yahoo"), "1000300 240");
+        assert_eq!(save_cooldown(&store, "yahoo", None, mine.as_deref()), None);
+        assert_eq!(store.setting(&cooldown_key("yahoo")).as_deref(), Some("1000300 240"));
     }
 }

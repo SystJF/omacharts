@@ -27,8 +27,8 @@ pub use bars::{
 pub use indicators::{palette_colors, Indicator, Kind as IndicatorKind, Output, Params, Reset};
 pub use link::LinkGroup;
 pub use provider::{
-    Capability, Delivery, FetchFailure, Pacing, Provider, ProviderError, Sink, Stream,
-    Subscription, Update,
+    Capability, Closes, Delivery, FetchFailure, Pacing, Provider, ProviderError, SharedCooldown,
+    Sink, Stream, Subscription, Update,
 };
 pub use session::Session;
 pub use symbols::{Instrument, InstrumentKind, SearchHit, SearchIndex};

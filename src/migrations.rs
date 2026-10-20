@@ -38,7 +38,7 @@ use rusqlite::{params, Connection};
 
 /// How far the migrations go. A database claiming more than this was written
 /// by a newer Omacharts than the one opening it.
-pub const LATEST: i32 = 2;
+pub const LATEST: i32 = 3;
 
 /// What went wrong before the database was usable.
 #[derive(Debug)]
@@ -184,6 +184,29 @@ Migration {
          );
          CREATE INDEX drawings_by_symbol ON drawings (symbol, suffix);",
     ),
+},
+Migration {
+    version: 3,
+    name: "quotes",
+    risky: false,
+    // The latest two closes of a symbol, fetched many to a request for the bar
+    // widget. Beside `bar_series` rather than in it: a close alone is not a
+    // bar, and one written as a bar would be compared against the real
+    // session later and read as history rewritten. Keyed like `bar_series`.
+    // `last` is null for a symbol the provider left out of its answer, so
+    // that `fetched_at` still records that it was asked. `previous_at` is how
+    // a batch that skipped a session is told from one that did not: its
+    // previous close is then older than a session the bars hold.
+    step: Step::Sql(
+        "CREATE TABLE quotes (
+             key         TEXT PRIMARY KEY,
+             last        REAL,
+             previous    REAL,
+             at          INTEGER,
+             fetched_at  INTEGER NOT NULL,
+             previous_at INTEGER
+         );",
+    ),
 }];
 
 /// Bring a database up to [`LATEST`], or say why it cannot be.
@@ -275,6 +298,7 @@ mod tests {
                 "custom_themes:id,json",
                 "drawings:id,symbol,suffix,json",
                 "meta:key,value",
+                "quotes:key,last,previous,at,fetched_at,previous_at",
                 "settings:key,value",
                 "watchlist_entries:section_id,symbol,suffix,position",
                 "watchlist_sections:id,name,position,collapsed,watchlist_id",

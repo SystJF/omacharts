@@ -5103,6 +5103,7 @@ mod tests {
         fn reload_watchlists(&self) {}
         fn adopt_theming(&self) {}
         fn warm(&self, _instruments: &[omacharts_engine::Instrument]) {}
+        fn warm_closes(&self, _batches: Vec<Vec<crate::loader::Listing>>) {}
 
         /// No window means no index to borrow, so whoever needs one builds it.
         fn symbols(&self) -> Option<std::rc::Rc<omacharts_engine::SearchIndex>> {
