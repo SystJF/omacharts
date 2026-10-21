@@ -100,10 +100,10 @@ afterwards:
 omacharts chart split vertical
 omacharts chart split horizontal --chart pos:0
 omacharts chart split horizontal --chart pos:2
-omacharts chart set --chart pos:0 --symbol SPY --resolution 15m
-omacharts chart set --chart pos:1 --symbol QQQ --resolution 15m
-omacharts chart set --chart pos:2 --symbol DIA --resolution 15m
-omacharts chart set --chart pos:3 --symbol IWM --resolution 15m
+omacharts chart set --chart pos:0 --symbol SPY --resolution 15m --link focus
+omacharts chart set --chart pos:1 --symbol QQQ --resolution 15m --link focus
+omacharts chart set --chart pos:2 --symbol DIA --resolution 15m --link focus
+omacharts chart set --chart pos:3 --symbol IWM --resolution 15m --link focus
 omacharts chart indicator add rsi --chart pos:0 --period 14
 omacharts chart indicator add rsi --chart pos:1 --period 14
 omacharts chart indicator add rsi --chart pos:2 --period 14
@@ -122,27 +122,28 @@ omacharts template indicator set Momentum rsi --period 21
 ```
 
 **Each chart has a link mode**, which is what a click in the watchlist does
-to it. `focus` (the default) takes the click while it is the focused chart, so
-splitting a chart and clicking a symbol puts it on the new chart and leaves the
-old one alone. `follow` takes every click. `pinned` takes none — for context
-charts like SPY beside a stock. Following is within the open chartbook only.
+to it. `follow` (the default) takes every click, so a split shows one symbol at
+two resolutions that walk the watchlist together. `focus` takes the click only
+while it is the focused chart, for charts showing different symbols. `pinned`
+takes none — for context charts like SPY beside a stock. Following is within
+the open chartbook only.
 
 **Do not make four charts showing four different symbols `follow`.** Follow
-charts show the *same* instrument, so the four above stay `focus`. Follow is
-for one symbol across several resolutions — a daily and an hourly that move
-together as you walk a watchlist:
+charts show the *same* instrument, so the four above are made `focus`. Follow
+is for one symbol across several resolutions — a daily and an hourly that move
+together as you walk a watchlist — and it is what a new chart already is, so
+splitting copies the symbol and only the resolution needs setting:
 
 ```
+omacharts chart set --chart pos:0 --symbol SPY --resolution 1D
 omacharts chart split vertical
-omacharts chart set --chart pos:0 --symbol SPY --resolution 1D --link follow
-omacharts chart set --chart pos:1 --resolution 1h --link follow
+omacharts chart set --chart pos:1 --resolution 1h
 ```
 
 **A chart made `follow` leads.** What it shows becomes what every other Follow
-chart in the chartbook shows. So `--link follow` goes on the chart that is
-already showing what you want, which is why `--symbol` and `--link` go together
-on the first line above. Leaving follow (`--link focus` or `--link pinned`)
-changes nobody else.
+chart in the chartbook shows, so `--link follow` goes on the chart that is
+already showing what you want. Leaving follow (`--link focus` or `--link
+pinned`) changes nobody else.
 
 **A chartbook is the whole screen, saved** — an arrangement with its own
 watchlist beside it. Build a setup once and switch back to it later:

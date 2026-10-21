@@ -189,7 +189,7 @@ const SHORTCUT_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+Alt+V", "Split vertically"),
             ("Ctrl+Alt+X", "Close this chart"),
             ("Ctrl+M", "Give this chart the window, or put it back"),
-            ("Ctrl+L", "Pin this chart, or unpin it"),
+            ("Ctrl+Shift+P", "Pin this chart, or unpin it"),
             ("Ctrl+O", "Screenshot this chart"),
             ("Alt+← → ↑ ↓", "Focus the chart that way"),
             ("Ctrl+Alt+Shift+← → ↑ ↓", "Resize this chart"),
@@ -2113,7 +2113,7 @@ impl Window {
             defaults.colouring,
             defaults.session,
             defaults.show_grid,
-            LinkMode::Focus,
+            LinkMode::default(),
         );
         pane.template.set(template.map(|t| t.id));
         self.show_header_on(&pane);
@@ -2905,6 +2905,33 @@ impl Window {
         if mode == LinkMode::Follow && before != mode && let Some(instrument) = showing {
             self.spread_to_followers(&instrument, mode, Some(id));
         }
+        self.save_workspace();
+    }
+
+    /// Pin a chart, or unpin it back to the default.
+    ///
+    /// Unpinned into Follow, it joins the Follow charts rather than leading
+    /// them: it was pinned to hold something they were not showing, so leading
+    /// would put that on every one of them, which is not what a key pressed on
+    /// one chart asks for.
+    fn toggle_pin(self: &Rc<Self>, pane: &Rc<ChartPane>) {
+        let mode = pane.mode().pin_toggled();
+        let joining = (mode == LinkMode::Follow)
+            .then(|| {
+                self.panes
+                    .borrow()
+                    .iter()
+                    .filter(|p| p.id != pane.id && p.mode() == LinkMode::Follow)
+                    .find_map(|p| p.instrument.borrow().clone())
+            })
+            .flatten();
+        let Some(instrument) = joining else {
+            self.set_pane_mode(pane.id, mode);
+            return;
+        };
+        pane.set_mode(mode, mode.colour(&self.theming.borrow().theme()));
+        self.sync_chart_actions(pane);
+        self.show_in(pane, instrument);
         self.save_workspace();
     }
 
@@ -4451,11 +4478,11 @@ impl Window {
                     this.focus_towards(0, 1);
                     return glib::Propagation::Stop;
                 }
-                // Ctrl+L: pin the focused chart, or unpin it. Only off a box,
-                // where Ctrl+L is the box's.
-                Key::l | Key::L if ctrl && !alt && !shift && !this.is_typing() => {
-                    let pane = this.focused_pane();
-                    this.set_pane_mode(pane.id, pane.mode().pin_toggled());
+                // Ctrl+Shift+P: pin the focused chart, or unpin it. A letter,
+                // so it is the same key on every layout; Ctrl+P is kept for a
+                // command palette.
+                Key::p | Key::P if ctrl && shift && !alt => {
+                    this.toggle_pin(&this.focused_pane());
                     return glib::Propagation::Stop;
                 }
                 // Back to the chart, from wherever the keyboard ended up —
@@ -5211,9 +5238,9 @@ impl Window {
     /// Chart what the rail just picked.
     ///
     /// The Follow charts take it, and so does the focused chart if it is a
-    /// Focus chart — which is what makes "split, then click" put the symbol
-    /// on the new chart and leave the old one alone. A Pinned chart takes
-    /// nothing, focused or not.
+    /// Focus chart — which is what makes "split, make the new chart Focus,
+    /// then click" put the symbol on that chart and leave the old one alone.
+    /// A Pinned chart takes nothing, focused or not.
     ///
     /// A click that moves nothing at all — a Pinned chart in front of you and
     /// no Follow charts — lights the pin rather than doing nothing silently,

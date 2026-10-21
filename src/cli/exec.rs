@@ -4756,15 +4756,15 @@ mod tests {
     }
 
     /// A chartbook made from a terminal starts the way one made in the window
-    /// does: its chart on Focus, so picking in the rail moves it.
+    /// does: its chart on Follow, so picking in the rail moves it.
     #[test]
-    fn a_new_chartbooks_chart_starts_on_focus() {
+    fn a_new_chartbooks_chart_starts_on_follow() {
         let store = bare();
         run("chartbook create Macro --symbol SPY --switch", &store);
 
         let listed = run("chart list --book Macro --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
-        assert_eq!(parsed["charts"][0]["link"], "focus", "{}", listed.out);
+        assert_eq!(parsed["charts"][0]["link"], "follow", "{}", listed.out);
     }
 
     #[test]
@@ -5372,6 +5372,8 @@ mod tests {
         let store = bare();
         run("chartbook create Macro --symbol AAPL --switch", &store);
         run("chart split horizontal --book Macro", &store);
+        // Split charts start on Follow; the second is taken out to join.
+        run("chart set --book Macro --chart pos:1 --link focus", &store);
         run("chart set --book Macro --chart pos:0 --symbol NVDA --link follow", &store);
         run("chart set --book Macro --chart pos:1 --symbol AMD", &store);
 
@@ -5393,6 +5395,8 @@ mod tests {
         let store = bare();
         run("chartbook create Macro --symbol AAPL --switch", &store);
         run("chart split horizontal --book Macro", &store);
+        // Split charts start on Follow; the second is taken out to join.
+        run("chart set --book Macro --chart pos:1 --link focus", &store);
         run("chart set --book Macro --chart pos:0 --symbol NVDA --link follow", &store);
 
         run("chart set --book Macro --chart pos:1 --symbol AMD --link follow", &store);
@@ -5412,6 +5416,8 @@ mod tests {
         let store = bare();
         run("chartbook create Macro --symbol AAPL --switch", &store);
         run("chart split horizontal --book Macro", &store);
+        // Split charts start on Follow; the second is taken out to join.
+        run("chart set --book Macro --chart pos:1 --link focus", &store);
         run("chart set --book Macro --chart pos:0 --symbol NVDA --link follow", &store);
         run("chart set --book Macro --chart pos:1 --symbol AMD --link follow", &store);
         // Both on AMD now. Put one of them somewhere else by hand, then re-pick
@@ -5434,6 +5440,8 @@ mod tests {
         let store = bare();
         run("chartbook create Macro --symbol AAPL --switch", &store);
         run("chart split horizontal --book Macro", &store);
+        // Split charts start on Follow; the second is taken out to join.
+        run("chart set --book Macro --chart pos:1 --link focus", &store);
         run("chart set --book Macro --chart pos:0 --symbol NVDA --link follow", &store);
         run("chart set --book Macro --chart pos:1 --symbol AMD --link follow", &store);
         run("chart set --book Macro --chart pos:1 --symbol AMD", &store);

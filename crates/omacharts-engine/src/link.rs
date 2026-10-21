@@ -1,11 +1,11 @@
 //! Link modes: what a chart does when a symbol is picked in the watchlist.
 //!
-//! The choice belongs on the chart, not on the list. Split a chart and click a
-//! symbol, and the new chart should take it while the old one keeps what it
-//! had — two actions, and it only works while the click goes to the focused
-//! chart. A chart that should track the list has to be able to say so without
-//! taking that away from every other chart, and a chart holding context (SPY
-//! beside a stock) has to be able to refuse the click outright.
+//! The choice belongs on the chart, not on the list. Charts follow the list
+//! out of the box, because the usual reason to split is one symbol at several
+//! resolutions. A chart for comparing tickers has to be able to take the click
+//! only while it is focused, without taking following away from the rest, and
+//! a chart holding context (SPY beside a stock) has to be able to refuse the
+//! click outright.
 //!
 //! So each chart has one of three modes, and every list drives the same
 //! charts: the Follow ones, plus the focused chart when it is a Focus chart.
@@ -22,10 +22,10 @@ use crate::theme::Theme;
 pub enum LinkMode {
     /// Takes the rail's click while it is the focused chart. A symbol typed
     /// on it moves only itself.
-    #[default]
     Focus,
     /// Takes every rail click, and a symbol typed on it moves every other
     /// Follow chart.
+    #[default]
     Follow,
     /// Takes nothing from the rail.
     Pinned,
@@ -41,10 +41,10 @@ impl LinkMode {
     /// watchlist beside it drove. A chart in that group moved on every click
     /// in the list, which is what Follow does. A chart in any other group
     /// shared its symbol with charts the list never moved, a pool that no
-    /// longer exists, so it goes back to the default: Follow would put it
-    /// under a list that never drove it, and Pinned would have it refuse
-    /// clicks nobody asked it to refuse. An unlinked chart is the default
-    /// already.
+    /// longer exists, and an unlinked chart took a click only while focused,
+    /// so both become Focus: Follow would put them under a list that never
+    /// drove them, and Pinned would have them refuse clicks nobody asked them
+    /// to refuse.
     pub fn from_group(group: u8, driven: Option<u8>) -> LinkMode {
         match group {
             0 => LinkMode::Focus,
@@ -53,16 +53,11 @@ impl LinkMode {
         }
     }
 
-    /// What pinning or unpinning a chart makes it, which is what Ctrl+L does.
-    ///
-    /// A pinned chart goes back to the default, and any other is pinned. Never
-    /// Follow: a chart made Follow leads, and every other Follow chart moves
-    /// to its symbol, so a key that could land there would move charts nobody
-    /// pressed it on. A Follow chart pinned leaves the Follow set quietly, the
-    /// way leaving Follow always does.
+    /// What pinning or unpinning a chart makes it, which is what Ctrl+Shift+P
+    /// does: a pinned chart goes back to the default, and any other is pinned.
     pub fn pin_toggled(self) -> LinkMode {
         match self {
-            LinkMode::Pinned => LinkMode::Focus,
+            LinkMode::Pinned => LinkMode::default(),
             LinkMode::Focus | LinkMode::Follow => LinkMode::Pinned,
         }
     }
@@ -73,8 +68,8 @@ impl LinkMode {
     /// across four charts.
     pub fn colour(self, theme: &Theme) -> Option<String> {
         match self {
-            LinkMode::Focus => None,
-            LinkMode::Follow | LinkMode::Pinned => Some(theme.ui.accent.clone()),
+            LinkMode::Follow => None,
+            LinkMode::Focus | LinkMode::Pinned => Some(theme.ui.accent.clone()),
         }
     }
 
@@ -121,7 +116,7 @@ impl Serialize for LinkMode {
     }
 }
 
-/// Read from its key, and anything else is Focus.
+/// Read from its key, and anything else is the default.
 ///
 /// Lenient rather than fallible on purpose: this is read out of the stored
 /// arrangement, and a mode from a newer version, or a hand-edited one, should
@@ -181,22 +176,20 @@ mod tests {
     }
 
     #[test]
-    fn a_mode_this_version_does_not_know_is_focus_and_nothing_worse() {
+    fn a_mode_this_version_does_not_know_is_the_default_and_nothing_worse() {
         // A newer version's mode, or a hand-edited one. Losing the mode is
         // recoverable in one click; refusing to parse would take the whole
         // layout down with it.
         for json in ["\"sideways\"", "3", "true", "null", "-1", "1.5"] {
-            assert_eq!(serde_json::from_str::<LinkMode>(json).unwrap(), LinkMode::Focus, "{json}");
+            assert_eq!(serde_json::from_str::<LinkMode>(json).unwrap(), LinkMode::Follow, "{json}");
         }
     }
 
     #[test]
-    fn pinning_from_the_keyboard_never_lands_on_follow() {
-        // Landing on Follow makes the chart lead and moves every other Follow
-        // chart, which is the jump a pin key must not cause.
+    fn unpinning_goes_back_to_the_default() {
         for (from, to) in [
             (LinkMode::Focus, LinkMode::Pinned),
-            (LinkMode::Pinned, LinkMode::Focus),
+            (LinkMode::Pinned, LinkMode::Follow),
             (LinkMode::Follow, LinkMode::Pinned),
         ] {
             assert_eq!(from.pin_toggled(), to, "{from:?}");
