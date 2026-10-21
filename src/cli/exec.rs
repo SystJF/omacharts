@@ -17,7 +17,7 @@ use omacharts_engine::indicators::{
 };
 use omacharts_engine::providers;
 use omacharts_engine::theme::{
-    ColorChoice, SWATCH_NAMES, THEME_BARS_ID, THEME_MONO_ID, THEME_RED_UP_ID,
+    ColorChoice, SWATCH_NAMES, THEME_MONO_ID, THEME_RED_UP_ID,
 };
 use omacharts_engine::{
     link, BarStyle, Indicator, IndicatorKind, LinkGroup, Reset, Session, Timeframe,
@@ -25,6 +25,7 @@ use omacharts_engine::{
 
 use super::charts::{self, Workspace};
 use super::{parser, Caller, Fault, Live, Outcome, EXIT_USAGE};
+use crate::chart_defaults::ChartDefaults;
 use crate::store::{Entry, Section, Store, DEFAULT_WATCHLIST};
 
 /// Parse and run.
@@ -1153,7 +1154,7 @@ fn charts_verb(
                 "name": name,
                 "layout": {"leaf": id},
                 "focused": id,
-                "panes": [charts::new_pane(id, &symbol, None)],
+                "panes": [charts::new_pane(id, &symbol, None, &ChartDefaults::load(store))],
                 "watchlist": watchlist,
             });
             let at = workspace.push(book);
@@ -1226,7 +1227,7 @@ fn chart_verb(
                 .iter()
                 .find(|p| p["id"].as_u64() == Some(pane as u64))
                 .cloned()
-                .unwrap_or_else(|| charts::new_pane(added, "SPY", None));
+                .unwrap_or_else(|| charts::new_pane(added, "SPY", None, &ChartDefaults::load(store)));
             let target = workspace.book_mut(at)?;
             target["layout"] = charts::split_leaf(&target["layout"], pane, added, horizontal);
             charts::panes_mut(target)?.push(charts::copy_pane(&from, added));
@@ -1315,6 +1316,13 @@ fn chart_set(
                 .ok_or_else(|| Fault::usage(format!("{text:?} is not a bar style")))?,
         ),
     };
+    let colouring = match arg(m, "colouring") {
+        None => None,
+        Some(text) => Some(
+            omacharts_engine::BarColouring::from_key(text)
+                .ok_or_else(|| Fault::usage(format!("{text:?} is not a bar colouring")))?,
+        ),
+    };
     let session = match arg(m, "session") {
         None => None,
         Some(text) => Some(
@@ -1358,6 +1366,10 @@ fn chart_set(
     if let Some(style) = style {
         chart["bar_style"] = json!(style.key());
         changed.push(format!("style {}", style.key()));
+    }
+    if let Some(colouring) = colouring {
+        chart["colouring"] = json!(colouring.key());
+        changed.push(format!("colouring {}", colouring.key()));
     }
     if let Some(session) = session {
         chart["session"] = json!(session.key());
@@ -2542,6 +2554,8 @@ struct Edits {
     rows: Option<Option<u64>>,
     value_area: Option<f64>,
     poc_color: Option<ColorChoice>,
+    up_color: Option<ColorChoice>,
+    down_color: Option<ColorChoice>,
     color: Option<ColorChoice>,
     width: Option<f64>,
     style: Option<LineStyle>,
@@ -2588,6 +2602,8 @@ impl Edits {
             },
             value_area: bounded(m, "value-area", 0.0, 1.0)?,
             poc_color: colour(m, "poc-color")?,
+            up_color: colour(m, "up-color")?,
+            down_color: colour(m, "down-color")?,
             color: colour(m, "color")?,
             width: number(m, "width")?,
             style: match arg(m, "style") {
@@ -2643,6 +2659,8 @@ impl Edits {
             && self.rows.is_none()
             && self.value_area.is_none()
             && self.poc_color.is_none()
+            && self.up_color.is_none()
+            && self.down_color.is_none()
             && self.color.is_none()
             && self.width.is_none()
             && self.style.is_none()
@@ -2751,6 +2769,17 @@ impl Edits {
             match kind == IndicatorKind::VolumeProfile {
                 true => params["poc_color"] = to_value(colour)?,
                 false => return Err(refuse("point of control")),
+            }
+        }
+        for (colour, key, what) in [
+            (&self.up_color, "up_color", "rising volume colour"),
+            (&self.down_color, "down_color", "falling volume colour"),
+        ] {
+            if let Some(colour) = colour {
+                match kind == IndicatorKind::Volume {
+                    true => params[key] = to_value(colour)?,
+                    false => return Err(refuse(what)),
+                }
             }
         }
         // The pair may not cross: a band whose floor is above its ceiling is
@@ -2925,6 +2954,7 @@ fn pane_json(pane: &Value) -> String {
         "display": spell(pane["symbol"].as_str().unwrap_or(""), pane["suffix"].as_str()),
         "resolution": pane["timeframe"],
         "style": pane["bar_style"],
+        "colouring": pane["colouring"],
         "session": pane["session"],
         "grid": pane["show_grid"],
         // Missing from a chart stored before it was remembered, and every one
@@ -3418,9 +3448,7 @@ fn config_set(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<Stri
 
 /// Where the scheme to go back to when the colour is put back is remembered.
 ///
-/// The same key the preferences dialog writes, whose own constant is private
-/// to it — `the_scheme_this_remembers_is_the_one_the_dialog_remembers` pins
-/// the spelling. Monochrome is a scheme like any other, so choosing it without
+/// Monochrome is a scheme like any other, so choosing it without
 /// writing this down would throw away a palette somebody had picked and leave
 /// them on the default when they changed their mind.
 const COLOURED_BARS: &str = "coloured_bar_scheme";
@@ -3431,16 +3459,21 @@ const COLOURED_BARS: &str = "coloured_bar_scheme";
 /// `config set bar_scheme theme-mono` reaches the same scheme, and is not the
 /// same command: it does not remember what to go back to, so putting the
 /// colour back lands on the default rather than on the scheme that was in use.
-/// This is the question the preferences dialog asks, so the terminal asks it
-/// too.
 fn config_bars(
     store: &Store,
     m: &clap::ArgMatches,
     as_json: bool,
     live: Option<&dyn Live>,
 ) -> Result<String, Fault> {
-    let current =
-        store.setting(crate::theming::SETTING_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string());
+    // Spelled as a colouring, whatever an older version wrote: a scheme id
+    // that is not one names colours that now live in a theme.
+    let colouring = |id: Option<String>| {
+        omacharts_engine::BarColouring::from_key(id.as_deref().unwrap_or(""))
+            .unwrap_or_default()
+            .key()
+            .to_string()
+    };
+    let current = colouring(store.setting(crate::theming::SETTING_BARS));
     let Some(state) = arg(m, "STATE") else {
         return match as_json {
             true => Ok(format!("{}\n", json!({"bars": spell_bars(&current), "scheme": current}))),
@@ -3455,15 +3488,19 @@ fn config_bars(
         // "coloured": stay on the palette in use if it already carries the
         // direction, and otherwise go back to the one it was left from.
         _ if spell_bars(&current) == "coloured" => current.clone(),
-        _ => store.setting(COLOURED_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string()),
+        _ => colouring(store.setting(COLOURED_BARS)),
     };
     // Leaving a palette somebody picked: remember it to come back to.
     if scheme != current && spell_bars(&current) == "coloured" {
         store.set_setting(COLOURED_BARS, &current);
     }
     store.set_setting(crate::theming::SETTING_BARS, &scheme);
-    // A candle has no row to reload: an open window paints from the scheme it
-    // read, so it is told to read it again.
+    // Charts are painted one by one now, so the question asked of the whole
+    // app is answered on every chart as well as for the next one — what
+    // "Apply to all charts" does with the same choice in the preferences.
+    let mut workspace = charts::Workspace::load(store);
+    workspace.set_on_every_pane("colouring", json!(scheme));
+    workspace.save(store);
     if let Some(live) = live {
         live.adopt_theming();
     }
@@ -4772,7 +4809,7 @@ mod tests {
         // remembered is still the one somebody picked.
         assert_eq!(run("config bars monochrome", &store).code, 0);
         assert_eq!(run("config bars coloured", &store).code, 0);
-        assert_eq!(run("config get bar_scheme", &store).out.trim(), "hollow");
+        assert_eq!(run("config get bar_scheme", &store).out.trim(), "theme-hollow");
     }
 
     #[test]
@@ -4788,21 +4825,8 @@ mod tests {
         assert_eq!(run("config bars coloured", &store).code, 0);
         assert_eq!(
             run("config get bar_scheme", &store).out.trim(),
-            "hollow",
+            "theme-hollow",
             "the scheme that was in use has to come back, not the default"
-        );
-    }
-
-    /// The preferences dialog remembers the coloured scheme under this key and
-    /// its own constant is private to it, so a rename there would leave the two
-    /// quietly disagreeing: the dialog would put back a scheme the terminal
-    /// never wrote.
-    #[test]
-    fn the_scheme_this_remembers_is_the_one_the_dialog_remembers() {
-        let dialog = include_str!("../ui/preferences.rs");
-        assert!(
-            dialog.contains(&format!("\"{COLOURED_BARS}\"")),
-            "the preferences dialog does not mention {COLOURED_BARS}"
         );
     }
 
