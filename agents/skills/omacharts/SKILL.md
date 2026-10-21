@@ -10,12 +10,12 @@ description: >-
   average on this", "add AMD to my semis list", "what have I got open". Also
   for indicators (moving average, VWAP, Bollinger bands, volume profile,
   RSI, MACD, ATR), resolutions and sessions, bar styles and colours, watchlists and their
-  sections, chartbooks, link groups, the instrument search, and the cached
+  sections, chartbooks, link modes, the instrument search, and the cached
   price data. Also for marking a chart up — "draw the trendline", "box the
   range", "circle that gap", "mark the breakout", "label this high" — which
   is lines, horizontal levels, arrows, zig-zags, boxes, circles and words.
   Use it for any mention of omacharts, and whenever the user speaks about
-  charts, watchlists, chartbooks or link groups as things already on their
+  charts, watchlists, chartbooks or linked charts as things already on their
   screen.
 ---
 
@@ -100,10 +100,10 @@ afterwards:
 omacharts chart split vertical
 omacharts chart split horizontal --chart pos:0
 omacharts chart split horizontal --chart pos:2
-omacharts chart set --chart pos:0 --symbol SPY --resolution 15m
-omacharts chart set --chart pos:1 --symbol QQQ --resolution 15m
-omacharts chart set --chart pos:2 --symbol DIA --resolution 15m
-omacharts chart set --chart pos:3 --symbol IWM --resolution 15m
+omacharts chart set --chart pos:0 --symbol SPY --resolution 15m --link focus
+omacharts chart set --chart pos:1 --symbol QQQ --resolution 15m --link focus
+omacharts chart set --chart pos:2 --symbol DIA --resolution 15m --link focus
+omacharts chart set --chart pos:3 --symbol IWM --resolution 15m --link focus
 omacharts chart indicator add rsi --chart pos:0 --period 14
 omacharts chart indicator add rsi --chart pos:1 --period 14
 omacharts chart indicator add rsi --chart pos:2 --period 14
@@ -121,34 +121,29 @@ omacharts chart set --chart pos:1 --template Momentum
 omacharts template indicator set Momentum rsi --period 21
 ```
 
-**Do not link four charts showing four different symbols.** A group is charts
-that show the *same* instrument, so the four above belong in no group at all.
-Link groups are for one symbol across several resolutions — a daily, an hourly
-and a 5-minute that move together as you walk a watchlist:
+**Each chart has a link mode**, which is what a click in the watchlist does
+to it. `follow` (the default) takes every click, so a split shows one symbol at
+two resolutions that walk the watchlist together. `focus` takes the click only
+while it is the focused chart, for charts showing different symbols. `pinned`
+takes none — for context charts like SPY beside a stock. Following is within
+the open chartbook only.
+
+**Do not make four charts showing four different symbols `follow`.** Follow
+charts show the *same* instrument, so the four above are made `focus`. Follow
+is for one symbol across several resolutions — a daily and an hourly that move
+together as you walk a watchlist — and it is what a new chart already is, so
+splitting copies the symbol and only the resolution needs setting:
 
 ```
+omacharts chart set --chart pos:0 --symbol SPY --resolution 1D
 omacharts chart split vertical
-omacharts chart set --chart pos:0 --symbol SPY --resolution 1D --link 2
-omacharts chart set --chart pos:1 --resolution 1h --link 2
+omacharts chart set --chart pos:1 --resolution 1h
 ```
 
-**A chart put in a group leads it.** What that chart shows becomes the group's
-symbol, and the rest of the group follows — including charts in chartbooks that
-are not open. So `--link` goes on the chart that is already showing what you
-want the group on, which is why `--symbol` and `--link` go together on the first
-line above. `--link none` takes a chart out and changes nobody.
-
-**A watchlist drives a group too**, and that is the other half of what groups
-are for: picking a symbol in the list moves every chart in the group rather than
-the one chart that happens to be focused. From a command this only sets the
-group — which row a list is on is the rail's own state — so the list follows
-whatever its new group is showing. A group drives at most one watchlist, and a
-second is refused rather than moved:
-
-```
-omacharts watchlist link Semis 3
-omacharts chart set --chart pos:0 --link 3
-```
+**A chart made `follow` leads.** What it shows becomes what every other Follow
+chart in the chartbook shows, so `--link follow` goes on the chart that is
+already showing what you want. Leaving follow (`--link focus` or `--link
+pinned`) changes nobody else.
 
 **A chartbook is the whole screen, saved** — an arrangement with its own
 watchlist beside it. Build a setup once and switch back to it later:

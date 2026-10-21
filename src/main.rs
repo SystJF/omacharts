@@ -10,6 +10,7 @@ use gtk::gio::prelude::ApplicationCommandLineExt;
 use gtk::glib;
 use omacharts::cli;
 use omacharts::store::Store;
+use omacharts::ui::window::NotShown;
 use omacharts::ui::Window;
 
 const APP_ID: &str = "com.jorgemanrubia.Omacharts";
@@ -239,14 +240,28 @@ fn main() -> glib::ExitCode {
                         symbols.get(1).map(String::as_str),
                         watchlist.as_ref().map(|(id, _)| *id),
                     );
-                    // By its name, which is what the rail shows: the bar
-                    // names the list as `id:1`.
-                    if !shown && let Some((_, name)) = &watchlist {
-                        command_line.printerr_literal(&format!(
-                            "omacharts: {} is not in watchlist {name:?}\n",
-                            symbols.iter().map(|s| s.to_uppercase()).collect::<Vec<_>>().join(" "),
-                        ));
-                        code = glib::ExitCode::from(cli::EXIT_NOT_FOUND);
+                    let named = symbols.iter().map(|s| s.to_uppercase()).collect::<Vec<_>>().join(" ");
+                    match shown {
+                        // By its name, which is what the rail shows: the bar
+                        // names the list as `id:1`.
+                        Err(NotShown::Unlisted) => {
+                            if let Some((_, name)) = &watchlist {
+                                command_line.printerr_literal(&format!(
+                                    "omacharts: {named} is not in watchlist {name:?}\n"
+                                ));
+                                code = glib::ExitCode::from(cli::EXIT_NOT_FOUND);
+                            }
+                        }
+                        // Selected in the list and taken by nothing, which is
+                        // not success: the chart in front kept its symbol.
+                        Err(NotShown::Refused) => {
+                            command_line.printerr_literal(&format!(
+                                "omacharts: {named} not shown; the focused chart is pinned \
+                                 and no chart follows the watchlist\n"
+                            ));
+                            code = glib::ExitCode::from(cli::EXIT_REFUSED);
+                        }
+                        Ok(()) => {}
                     }
                 }
                 None => {

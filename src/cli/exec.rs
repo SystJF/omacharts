@@ -20,7 +20,7 @@ use omacharts_engine::theme::{
     ColorChoice, SWATCH_NAMES, THEME_MONO_ID, THEME_RED_UP_ID,
 };
 use omacharts_engine::{
-    link, BarStyle, Indicator, IndicatorKind, LinkGroup, Reset, Session, Timeframe,
+    BarStyle, Indicator, IndicatorKind, LinkMode, Reset, Session, Timeframe,
 };
 
 use super::charts::{self, Workspace};
@@ -114,7 +114,6 @@ pub fn dispatch(
         ("watchlist", "add") => watchlist_add(store, m, json, true),
         ("watchlist", "remove") => watchlist_add(store, m, json, false),
         ("watchlist", "move") => watchlist_move(store, m, json),
-        ("watchlist", "link") => watchlist_link(store, m, json),
         ("watchlist", "sort") => watchlist_sort(store, m, json),
         ("watchlist", "feed") => Ok(super::watchlist_json(store, flag(m, "refresh"), live)),
         ("watchlist", "export") => watchlist_export(store, m),
@@ -377,78 +376,11 @@ fn list_or_default(store: &Store, m: &clap::ArgMatches) -> Result<(i64, String),
     }
 }
 
-/// A link group as a chart and a watchlist both spell one: `1`-`9`, or `none`.
-fn link_group(text: &str) -> Result<u8, Fault> {
-    if text.eq_ignore_ascii_case("none") {
-        return Ok(0);
-    }
-    text.parse::<u8>()
-        .ok()
-        .filter(|group| (1..=link::GROUP_COUNT).contains(group))
-        .ok_or_else(|| {
-            Fault::usage(format!(
-                "{text:?} is not a link group; use 1-{} or none",
-                link::GROUP_COUNT
-            ))
-        })
-}
-
-/// Where a watchlist's link group is written down.
-///
-/// Against the watchlist's id, because the group belongs to the list rather
-/// than to the rail: the same list driving group 3 under one chartbook drives
-/// group 3 under the next. The rail's own helper for this key is private to
-/// the window, so the spelling is here as well — and
-/// `the_group_a_command_sets_is_the_one_the_rail_reads` writes through this
-/// one and reads back through that one, so the two cannot drift apart
-/// unnoticed.
-pub(super) fn link_setting(watchlist: i64) -> String {
-    format!("watchlist_link_{watchlist}")
-}
-
-/// The group a watchlist drives, as the rail would report it.
-///
-/// Asked of the rail's own scan rather than of the setting, so both of its
-/// rules are applied here too: the default watchlist drives group 1 until
-/// something says otherwise, and where two lists claim one group the earlier
-/// in display order keeps it. Zero is no group.
-fn link_group_of(store: &Store, watchlist: i64) -> u8 {
-    crate::ui::watchlist::group_owners(store)
-        .into_iter()
-        .find(|(_, id, _)| *id == watchlist)
-        .map(|(group, ..)| group)
-        .unwrap_or(0)
-}
-
-/// Read, set or clear the group a watchlist drives.
-///
-/// A group drives one list, so one already taken is refused rather than
-/// stolen — the rail greys that row out instead of offering it, and a command
-/// that quietly moved it would change which charts a list drives without
-/// saying so.
-fn watchlist_link(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
-    let (id, name) = find_list(store, required(m, "LIST")?)?;
-    let Some(wanted) = arg(m, "GROUP") else {
-        let group = link_group_of(store, id);
-        return match as_json {
-            true => Ok(format!("{}\n", json!({"id": id, "name": name, "group": group}))),
-            false => Ok(format!("{}\n", spell_group(group))),
-        };
-    };
-    let group = link_group(wanted)?;
-    if let Some((_, holder)) =
-        crate::ui::watchlist::group_held_by(store, LinkGroup::numbered(group), id)
-    {
-        return Err(Fault::refused(format!(
-            "link group {group} already drives {holder:?}; take it off that list first"
-        )));
-    }
-    store.set_setting(&link_setting(id), &group.to_string());
-    let text = match group {
-        0 => format!("{name:?} drives no link group"),
-        group => format!("{name:?} now drives link group {group}"),
-    };
-    said(as_json, json!({"id": id, "name": name, "group": group}), text)
+/// What the rail does to a chart, as a command spells it.
+fn link_mode(text: &str) -> Result<LinkMode, Fault> {
+    LinkMode::from_key(text).ok_or_else(|| {
+        Fault::usage(format!("{text:?} is not a link mode; use focus, follow or pinned"))
+    })
 }
 
 fn watchlist_sort(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
@@ -475,19 +407,7 @@ fn watchlist_sort(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<
     said(as_json, json!({"id": id, "name": name, "sort": sort.map(Sort::key)}), text)
 }
 
-/// A group where somebody reads it. Zero is not a group.
-fn spell_group(group: u8) -> String {
-    match group {
-        0 => "none".to_string(),
-        group => group.to_string(),
-    }
-}
-
-/// Every watchlist, with the group it drives.
-///
-/// The group is in the listing rather than only in `watchlist link`, because
-/// "which list drives which group" is one question and answering it a list at
-/// a time invites nine commands and a wrong answer in the middle.
+/// Every watchlist.
 fn watchlist_list(store: &Store, as_json: bool) -> Result<String, Fault> {
     let lists = store.watchlists();
     let counted = |id: i64| -> usize {
@@ -502,7 +422,6 @@ fn watchlist_list(store: &Store, as_json: bool) -> Result<String, Fault> {
                     "name": name,
                     "symbols": counted(*id),
                     "isDefault": *id == DEFAULT_WATCHLIST,
-                    "link": link_group_of(store, *id),
                     "sort": crate::ui::watchlist::stored_sort(store, *id)
                         .map(crate::ui::watchlist::Sort::key),
                 })
@@ -515,11 +434,7 @@ fn watchlist_list(store: &Store, as_json: bool) -> Result<String, Fault> {
         .iter()
         .map(|(id, name)| {
             let tag = if *id == DEFAULT_WATCHLIST { "(default)" } else { "" };
-            let link = match link_group_of(store, *id) {
-                0 => String::new(),
-                group => format!("link {group}"),
-            };
-            format!("{id:<4} {name:<24} {:>4} symbols  {link:<8}{tag}", counted(*id))
+            format!("{id:<4} {name:<24} {:>4} symbols  {tag}", counted(*id))
                 .trim_end()
                 .to_string()
         })
@@ -598,7 +513,6 @@ fn watchlist_import(
                     "action": done.action.key(),
                     "symbols": done.symbols,
                     "sections": done.sections,
-                    "linkKeptBy": done.link_kept_by.as_ref().map(|(_, holder)| holder),
                 })
                 .to_string()
             })
@@ -1137,10 +1051,7 @@ fn charts_verb(
                                 ),
                                 pane["timeframe"].as_str().unwrap_or(""),
                                 pane["bar_style"].as_str().unwrap_or(""),
-                                match pane["linked"].as_u64().unwrap_or(0) {
-                                    0 => "unlinked".to_string(),
-                                    group => format!("link {group}"),
-                                },
+                                stored_mode(pane).key(),
                             )
                             .trim_end(),
                         );
@@ -1351,9 +1262,9 @@ fn chart_set(
                 .ok_or_else(|| Fault::usage(format!("{text:?} is not a session")))?,
         ),
     };
-    let link = match arg(m, "link") {
+    let mode = match arg(m, "link") {
         None => None,
-        Some(text) => Some(link_group(text)?),
+        Some(text) => Some(link_mode(text)?),
     };
     let switch = |id: &str| -> Result<Option<bool>, Fault> {
         match arg(m, id).map(String::as_str) {
@@ -1371,10 +1282,10 @@ fn chart_set(
         Some(text) => Some(Some(find_template(store, text)?)),
     };
 
-    // Which group it was in, read before anything is written: only an actual
-    // change leads the group. Re-stating the group a chart is already in is
-    // not somebody asking for four charts to move.
-    let was = group_of(workspace.book(at)?, pane);
+    // Which mode it was in, read before anything is written: only becoming
+    // Follow leads the Follow charts. Re-stating the mode a chart is already
+    // in is not somebody asking for four charts to move.
+    let was = mode_of(workspace.book(at)?, pane);
 
     let target = workspace.book_mut(at)?;
     let Some(chart) = charts::pane_mut(target, pane) else {
@@ -1401,12 +1312,9 @@ fn chart_set(
         chart["session"] = json!(session.key());
         changed.push(format!("session {}", session.key()));
     }
-    if let Some(link) = link {
-        chart["linked"] = json!(link);
-        changed.push(match link {
-            0 => "unlinked".to_string(),
-            group => format!("link group {group}"),
-        });
+    if let Some(mode) = mode {
+        chart["link"] = json!(mode.key());
+        changed.push(format!("link {}", mode.key()));
     }
     if let Some(grid) = arg(m, "grid") {
         chart["show_grid"] = json!(grid == "on");
@@ -1462,14 +1370,14 @@ fn chart_set(
         ));
     }
 
-    // A chart put in a group leads it. Three things write nothing: leaving a
-    // group — the charts still in it keep what they had; re-stating the group
-    // the chart is already in; and leading from a chart with no symbol, which
-    // would blank the group it just joined.
-    let joined = link.filter(|group| *group > 0 && *group != was);
+    // A chart made Follow leads the Follow charts. Three things write
+    // nothing: leaving Follow — the charts still following keep what they had;
+    // re-stating the mode the chart is already in; and leading from a chart
+    // with no symbol, which would blank the charts it just joined.
+    let joined = mode.filter(|mode| *mode == LinkMode::Follow && *mode != was);
     let followers = match (joined, &leading) {
-        (Some(group), Some(symbol)) => {
-            workspace.lead_link_group(group, symbol, leading_suffix.as_deref(), at, pane)
+        (Some(_), Some(symbol)) => {
+            workspace.lead_follow_charts(symbol, leading_suffix.as_deref(), at, pane)
         }
         _ => 0,
     };
@@ -1477,11 +1385,10 @@ fn chart_set(
     workspace.save(store);
     let mut text = format!("chart {pane}: {}", changed.join(", "));
     if followers > 0 {
-        let group = joined.unwrap_or(0);
         let named = spell(leading.as_deref().unwrap_or("?"), leading_suffix.as_deref());
         text.push_str(&match followers {
-            1 => format!("; 1 other chart in group {group} now shows {named}"),
-            n => format!("; {n} other charts in group {group} now show {named}"),
+            1 => format!("; 1 other Follow chart now shows {named}"),
+            n => format!("; {n} other Follow charts now show {named}"),
         });
     }
     said(
@@ -2567,17 +2474,23 @@ fn chart_label(book: &Value, pane: u32) -> String {
     )
 }
 
-/// Which group a chart is in, as a number, with zero for none.
+/// Which mode a chart is in.
 ///
-/// Wanted before a change rather than after it, because joining a group leads
-/// it and re-stating the group a chart is already in must not.
-fn group_of(book: &Value, pane: u32) -> u8 {
+/// Wanted before a change rather than after it, because becoming Follow leads
+/// the Follow charts and re-stating the mode a chart is already in must not.
+fn mode_of(book: &Value, pane: u32) -> LinkMode {
     charts::panes(book)
         .iter()
         .find(|p| p["id"].as_u64() == Some(u64::from(pane)))
-        .and_then(|p| p["linked"].as_u64())
-        .and_then(|group| u8::try_from(group).ok())
-        .unwrap_or(0)
+        .map(stored_mode)
+        .unwrap_or_default()
+}
+
+/// A stored chart's mode, read the way the window reads it: anything it
+/// does not know is Focus. A chart still written with a link group has been
+/// given its mode by [`charts::Workspace::load`] before this sees it.
+fn stored_mode(pane: &Value) -> LinkMode {
+    serde_json::from_value::<LinkMode>(pane["link"].clone()).unwrap_or_default()
 }
 
 /// The chartbook already showing `watchlist`, if it is not the one at `besides`.
@@ -3068,7 +2981,7 @@ fn pane_json(pane: &Value) -> String {
         "auto_scale": pane["auto_scale"].as_bool().unwrap_or(true),
         // Likewise linear, before an axis could be anything else.
         "log_scale": pane["log_scale"].as_bool().unwrap_or(false),
-        "link": pane["linked"],
+        "link": stored_mode(pane).key(),
         "shows_drawings": pane["shows_drawings"].as_bool().unwrap_or(true),
         "sends_drawings": pane["sends_drawings"].as_bool().unwrap_or(true),
         "indicators": pane["indicators"]
@@ -3355,16 +3268,13 @@ fn status(store: &Store, window_open: bool, as_json: bool) -> Result<String, Fau
             if *id == focused { "*" } else { " " },
             spell(pane["symbol"].as_str().unwrap_or("?"), pane["suffix"].as_str()),
             pane["timeframe"].as_str().unwrap_or(""),
-            match pane["linked"].as_u64().unwrap_or(0) {
-                0 => "unlinked".to_string(),
-                group => format!("link {group}"),
-            },
+            stored_mode(pane).key(),
         ));
     }
     Ok(out)
 }
 
-/// Whether a pointer on one chart draws a line on the ones linked to it.
+/// Whether a pointer on a Follow chart draws a line on the other Follow charts.
 ///
 /// One setting for the whole window rather than one per chart, which is why
 /// it reads and writes a setting rather than a pane.
@@ -3382,7 +3292,7 @@ fn crosshair(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<Strin
     said(
         as_json,
         json!({"crosshairSync": on}),
-        format!("crosshair syncing across linked charts is {state}"),
+        format!("crosshair syncing across Follow charts is {state}"),
     )
 }
 
@@ -4440,7 +4350,6 @@ mod tests {
         run("section create Semis Memory", &store);
         run("watchlist add Semis MU --section Memory", &store);
         run("watchlist add Semis 2330 --suffix TW --section Memory", &store);
-        run("watchlist link Semis 3", &store);
         // One symbol in two sections, which a list may hold on purpose.
         run("watchlist add Semis NVDA --section Memory", &store);
         store
@@ -4512,16 +4421,48 @@ mod tests {
         assert_eq!(run("watchlist export", &store).out, before);
     }
 
+    /// A file exported while lists drove link groups says which one each
+    /// drove. Lists drive no group now, so the field is read past rather than
+    /// refused, and nothing is written for it.
     #[test]
-    fn a_link_group_already_driven_here_is_left_where_it_is() {
-        let file = run("watchlist export Semis", &exporting()).out;
-        let elsewhere = bare();
-        run("watchlist create Macro", &elsewhere);
-        run("watchlist link Macro 3", &elsewhere);
-        let out = import(&file, "", &elsewhere);
-        assert!(out.out.contains("link group 3 stays with \"Macro\""), "{}", out.out);
-        assert_eq!(run("watchlist link Macro", &elsewhere).out, "3\n");
-        assert_eq!(run("watchlist link Semis", &elsewhere).out, "none\n");
+    fn a_file_that_names_a_link_group_imports_as_one_that_does_not() {
+        let file = r#"{"omacharts": "watchlists", "version": 1, "watchlists": [
+            {"name": "FX", "link": 3, "sections": [{"symbols": ["SPY"]}]}]}"#;
+        let store = bare();
+        let out = import(file, "", &store);
+        assert_eq!(out.code, 0, "{}", out.err);
+        assert!(!out.out.contains("link"), "{}", out.out);
+        let (fx, _) = super::find_list(&store, "FX").unwrap();
+        assert_eq!(store.setting(&format!("watchlist_link_{fx}")), None);
+        assert!(!run("watchlist export FX", &store).out.contains("link"));
+    }
+
+    /// Commands read a chart stored with a link group as the mode the window
+    /// gives it, so a terminal and the window agree about one row.
+    #[test]
+    fn a_chart_stored_with_a_link_group_lists_as_its_mode() {
+        let store = bare();
+        let pane = |id: u32, linked: &str| {
+            format!(
+                r#"{{"id":{id},"symbol":"SPY","timeframe":"1D","indicators":[],
+                    "bar_style":"candles","session":"extended","show_grid":true,
+                    "linked":{linked}}}"#
+            )
+        };
+        store.set_setting(
+            "workspace",
+            &format!(
+                r#"{{"books":[{{"name":"Old","layout":{{"split":{{"horizontal":true,"ratio":0.5,
+                    "first":{{"leaf":1}},"second":{{"leaf":2}}}}}},"focused":1,"watchlist":1,
+                    "panes":[{},{}]}}],"active":0}}"#,
+                pane(1, "1"),
+                pane(2, "4")
+            ),
+        );
+        let listed = run("chart list --book Old --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        assert_eq!(parsed["charts"][0]["link"], "follow", "{}", listed.out);
+        assert_eq!(parsed["charts"][1]["link"], "focus", "{}", listed.out);
     }
 
     #[test]
@@ -4815,16 +4756,15 @@ mod tests {
     }
 
     /// A chartbook made from a terminal starts the way one made in the window
-    /// does: its chart in the first group. Unlinked, picking in the rail moved
-    /// nothing in it.
+    /// does: its chart on Follow, so picking in the rail moves it.
     #[test]
-    fn a_new_chartbooks_chart_starts_in_the_first_group() {
+    fn a_new_chartbooks_chart_starts_on_follow() {
         let store = bare();
         run("chartbook create Macro --symbol SPY --switch", &store);
 
         let listed = run("chart list --book Macro --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
-        assert_eq!(parsed["charts"][0]["link"], 1, "{}", listed.out);
+        assert_eq!(parsed["charts"][0]["link"], "follow", "{}", listed.out);
     }
 
     #[test]
@@ -5374,60 +5314,6 @@ mod tests {
     }
 
     #[test]
-    fn a_watchlists_group_can_be_read_set_and_cleared() {
-        let store = bare();
-        run("watchlist create Semis", &store);
-        assert_eq!(run("watchlist link Semis", &store).out.trim(), "none");
-
-        let set = run("watchlist link Semis 3", &store);
-        assert_eq!(set.code, 0, "{}", set.err);
-        assert_eq!(run("watchlist link Semis", &store).out.trim(), "3");
-        assert!(run("watchlist list", &store).out.contains("link 3"));
-
-        assert_eq!(run("watchlist link Semis none", &store).code, 0);
-        assert_eq!(run("watchlist link Semis", &store).out.trim(), "none");
-    }
-
-    /// A group drives one list. Taking one off another list is a thing to do
-    /// deliberately, so a command that wanted it has to be told no first.
-    #[test]
-    fn a_group_another_watchlist_drives_is_refused_rather_than_taken() {
-        let store = bare();
-        run("watchlist create Semis", &store);
-        run("watchlist create Energy", &store);
-        run("watchlist link Semis 5", &store);
-
-        let refused = run("watchlist link Energy 5", &store);
-        assert_eq!(refused.code, super::super::EXIT_REFUSED);
-        assert!(refused.err.contains("Semis"), "it has to name the holder: {}", refused.err);
-        assert_eq!(run("watchlist link Semis", &store).out.trim(), "5", "and leave it where it was");
-    }
-
-    /// The rail and this command have to be writing down the same thing. The
-    /// window's own helper for the key is private to it, so this writes through
-    /// the command and reads back through the window's own reader: spell the
-    /// key differently in either place and this fails.
-    #[test]
-    fn the_group_a_command_sets_is_the_one_the_rail_reads() {
-        let store = bare();
-        run("watchlist create Semis", &store);
-        run("watchlist link Semis 4", &store);
-        let owners = crate::ui::watchlist::group_owners(&store);
-        assert!(
-            owners.iter().any(|(group, _, name)| *group == 4 && name == "Semis"),
-            "the rail reads {owners:?}"
-        );
-    }
-
-    /// The default watchlist drives group 1 out of the box, and the listing has
-    /// to say so — it is the one group whose holder nobody chose.
-    #[test]
-    fn the_default_watchlist_is_reported_driving_the_group_it_starts_in() {
-        let store = bare();
-        assert_eq!(run("watchlist link id:1", &store).out.trim(), "1");
-    }
-
-    #[test]
     fn bars_can_turn_red_up_and_get_the_same_scheme_back() {
         let store = bare();
         run("config set bar_scheme hollow", &store);
@@ -5477,62 +5363,68 @@ mod tests {
         assert_eq!(parsed["charts"][0]["id"], 1);
     }
 
-    /// Joining a group leads it. You linked *this* chart, so what it is showing
-    /// is the symbol you meant the group to be on — and the chain and the
-    /// canvas agree either way round, which is the state the window goes out of
-    /// its way to keep.
+    /// Becoming Follow leads the Follow charts. You made *this* chart follow,
+    /// so what it is showing is the symbol you meant them to be on — and the
+    /// chain and the canvas agree either way round, which is the state the
+    /// window goes out of its way to keep.
     #[test]
-    fn a_chart_joining_a_group_leads_it_onto_what_that_chart_is_showing() {
+    fn a_chart_made_follow_leads_the_others_onto_what_it_is_showing() {
         let store = bare();
         run("chartbook create Macro --symbol AAPL --switch", &store);
         run("chart split horizontal --book Macro", &store);
-        run("chart set --book Macro --chart pos:0 --symbol NVDA --link 2", &store);
+        // Split charts start on Follow; the second is taken out to join.
+        run("chart set --book Macro --chart pos:1 --link focus", &store);
+        run("chart set --book Macro --chart pos:0 --symbol NVDA --link follow", &store);
         run("chart set --book Macro --chart pos:1 --symbol AMD", &store);
 
-        let joined = run("chart set --book Macro --chart pos:1 --link 2", &store);
+        let joined = run("chart set --book Macro --chart pos:1 --link follow", &store);
         assert_eq!(joined.code, 0, "{}", joined.err);
         assert!(joined.out.contains("AMD"), "it has to say what followed: {}", joined.out);
 
         let listed = run("chart list --book Macro --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
-        assert_eq!(parsed["charts"][0]["symbol"], "AMD", "the chart already in it follows");
+        assert_eq!(parsed["charts"][0]["symbol"], "AMD", "the chart already following follows");
         assert_eq!(parsed["charts"][1]["symbol"], "AMD");
     }
 
     /// A symbol named in the same command is what the chart ends up showing,
-    /// so it is also what the group is led onto — read after the write rather
-    /// than before it.
+    /// so it is also what the Follow charts are led onto — read after the
+    /// write rather than before it.
     #[test]
-    fn a_symbol_named_alongside_a_group_is_the_one_the_group_follows() {
+    fn a_symbol_named_alongside_follow_is_the_one_the_others_take() {
         let store = bare();
         run("chartbook create Macro --symbol AAPL --switch", &store);
         run("chart split horizontal --book Macro", &store);
-        run("chart set --book Macro --chart pos:0 --symbol NVDA --link 2", &store);
+        // Split charts start on Follow; the second is taken out to join.
+        run("chart set --book Macro --chart pos:1 --link focus", &store);
+        run("chart set --book Macro --chart pos:0 --symbol NVDA --link follow", &store);
 
-        run("chart set --book Macro --chart pos:1 --symbol AMD --link 2", &store);
+        run("chart set --book Macro --chart pos:1 --symbol AMD --link follow", &store);
 
         let listed = run("chart list --book Macro --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
         assert_eq!(parsed["charts"][1]["symbol"], "AMD");
-        assert_eq!(parsed["charts"][0]["symbol"], "AMD", "and the group follows the new symbol");
+        assert_eq!(parsed["charts"][0]["symbol"], "AMD", "and the Follow charts take the new symbol");
     }
 
-    /// Only an actual change leads the group. A radio menu makes re-picking the
-    /// group you are already in easy to do by accident, and a popover re-states
-    /// its own state every time it opens — either of those quietly rewriting
-    /// four charts would make the whole control unusable.
+    /// Only an actual change leads. A radio menu makes re-picking the mode
+    /// you are already in easy to do by accident, and a popover re-states its
+    /// own state every time it opens — either of those quietly rewriting four
+    /// charts would make the whole control unusable.
     #[test]
-    fn re_stating_the_group_a_chart_is_already_in_moves_nobody() {
+    fn re_stating_follow_on_a_follow_chart_moves_nobody() {
         let store = bare();
         run("chartbook create Macro --symbol AAPL --switch", &store);
         run("chart split horizontal --book Macro", &store);
-        run("chart set --book Macro --chart pos:0 --symbol NVDA --link 2", &store);
-        run("chart set --book Macro --chart pos:1 --symbol AMD --link 2", &store);
+        // Split charts start on Follow; the second is taken out to join.
+        run("chart set --book Macro --chart pos:1 --link focus", &store);
+        run("chart set --book Macro --chart pos:0 --symbol NVDA --link follow", &store);
+        run("chart set --book Macro --chart pos:1 --symbol AMD --link follow", &store);
         // Both on AMD now. Put one of them somewhere else by hand, then re-pick
-        // the group it has been in all along.
+        // the mode it has been in all along.
         run("chart set --book Macro --chart pos:0 --symbol NVDA", &store);
 
-        let again = run("chart set --book Macro --chart pos:1 --link 2", &store);
+        let again = run("chart set --book Macro --chart pos:1 --link follow", &store);
         assert_eq!(again.code, 0, "{}", again.err);
 
         let listed = run("chart list --book Macro --json", &store);
@@ -5541,59 +5433,72 @@ mod tests {
         assert_eq!(parsed["charts"][1]["symbol"], "AMD");
     }
 
-    /// Leaving a group changes nothing about the group. The chart stops
-    /// following and stops leading; the charts still in it keep what they were
-    /// showing, because unlinking is a statement about one chart.
+    /// Leaving Follow changes nothing about the other Follow charts. They keep
+    /// what they were showing, because leaving is a statement about one chart.
     #[test]
-    fn leaving_a_group_leaves_the_charts_still_in_it_alone() {
+    fn leaving_follow_leaves_the_charts_still_following_alone() {
         let store = bare();
         run("chartbook create Macro --symbol AAPL --switch", &store);
         run("chart split horizontal --book Macro", &store);
-        run("chart set --book Macro --chart pos:0 --symbol NVDA --link 2", &store);
-        run("chart set --book Macro --chart pos:1 --symbol AMD --link 2", &store);
+        // Split charts start on Follow; the second is taken out to join.
+        run("chart set --book Macro --chart pos:1 --link focus", &store);
+        run("chart set --book Macro --chart pos:0 --symbol NVDA --link follow", &store);
+        run("chart set --book Macro --chart pos:1 --symbol AMD --link follow", &store);
         run("chart set --book Macro --chart pos:1 --symbol AMD", &store);
 
-        let left = run("chart set --book Macro --chart pos:1 --link none", &store);
+        let left = run("chart set --book Macro --chart pos:1 --link focus", &store);
         assert_eq!(left.code, 0, "{}", left.err);
 
         let listed = run("chart list --book Macro --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
-        assert_eq!(parsed["charts"][0]["symbol"], "AMD", "group 2 keeps what it had");
-        assert_eq!(parsed["charts"][1]["link"], 0, "and this one is out of it");
+        assert_eq!(parsed["charts"][0]["symbol"], "AMD", "the Follow chart keeps what it had");
+        assert_eq!(parsed["charts"][1]["link"], "focus", "and this one is out of it");
     }
 
-    /// Moving between two groups writes to the one being joined and not to the
-    /// one being left, which are two different sets of charts.
+    /// A Pinned chart is not a Follow chart: leading the Follow charts passes
+    /// it by, and so does a chart in Focus.
     #[test]
-    fn moving_from_one_group_to_another_leads_only_the_group_it_joins() {
+    fn leading_the_follow_charts_passes_pinned_and_focus_charts_by() {
         let store = bare();
         run("chartbook create Macro --symbol AAPL --switch", &store);
         run("chart split horizontal --book Macro", &store);
         run("chart split horizontal --book Macro --chart pos:1", &store);
-        run("chart set --book Macro --chart pos:0 --symbol NVDA --link 2", &store);
-        run("chart set --book Macro --chart pos:1 --symbol AMD --link 5", &store);
-        run("chart set --book Macro --chart pos:2 --symbol TSM --link 2", &store);
-        // Joining group 2 just led it onto TSM. Put group 2 back on NVDA, so
-        // that what the move below does to it — nothing — is visible.
-        run("chart set --book Macro --chart pos:0 --symbol NVDA", &store);
+        run("chart set --book Macro --chart pos:0 --symbol SPY --link pinned", &store);
+        run("chart set --book Macro --chart pos:1 --symbol AMD --link focus", &store);
 
-        run("chart set --book Macro --chart pos:2 --link 5", &store);
+        run("chart set --book Macro --chart pos:2 --symbol TSM --link follow", &store);
 
         let listed = run("chart list --book Macro --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
-        assert_eq!(parsed["charts"][1]["symbol"], "TSM", "group 5 follows what joined it");
-        assert_eq!(parsed["charts"][0]["symbol"], "NVDA", "group 2 was only left, not written to");
+        assert_eq!(parsed["charts"][0]["symbol"], "SPY");
+        assert_eq!(parsed["charts"][0]["link"], "pinned");
+        assert_eq!(parsed["charts"][1]["symbol"], "AMD");
     }
 
-    /// A chart with nothing on it leads with nothing. Blanking a group because
-    /// an empty chart joined it would be the one way this feature could destroy
-    /// what somebody was looking at.
+    /// Every mode a command sets is the one it reads back.
     #[test]
-    fn a_chart_with_no_symbol_does_not_blank_the_group_it_joins() {
+    fn a_chart_s_mode_can_be_set_and_read_back() {
+        let store = bare();
+        run("chartbook create Macro --symbol AAPL --switch", &store);
+        for mode in ["follow", "pinned", "focus"] {
+            let set = run(&format!("chart set --book Macro --chart pos:0 --link {mode}"), &store);
+            assert_eq!(set.code, 0, "{}", set.err);
+            assert!(set.out.contains(&format!("link {mode}")), "{}", set.out);
+            let listed = run("chart list --book Macro", &store);
+            assert!(listed.out.contains(mode), "{}", listed.out);
+        }
+        assert_ne!(run("chart set --book Macro --chart pos:0 --link 2", &store).code, 0);
+    }
+
+    /// A chart with nothing on it leads with nothing. Blanking the Follow
+    /// charts because an empty chart joined them would be the one way this
+    /// feature could destroy what somebody was looking at.
+    #[test]
+    fn a_chart_with_no_symbol_does_not_blank_the_follow_charts() {
         let store = bare();
         run("chartbook create Macro --symbol AAPL --switch", &store);
         run("chart split horizontal --book Macro", &store);
-        run("chart set --book Macro --chart pos:0 --symbol NVDA --link 2", &store);
+        run("chart set --book Macro --chart pos:0 --symbol NVDA --link follow", &store);
         // Nothing in the command surface can empty a chart, so this reaches
         // past it — which is the only way the stored arrangement gets into this
         // state, and it is reachable: `config set workspace` writes it whole.
@@ -5602,33 +5507,30 @@ mod tests {
         charts::pane_mut(book, 2).unwrap()["symbol"] = json!("");
         workspace.save(&store);
 
-        let joined = run("chart set --book Macro --chart pos:1 --link 2", &store);
+        let joined = run("chart set --book Macro --chart pos:1 --link follow", &store);
         assert_eq!(joined.code, 0, "{}", joined.err);
 
         let listed = run("chart list --book Macro --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
-        assert_eq!(parsed["charts"][0]["symbol"], "NVDA", "the group keeps what it was showing");
+        assert_eq!(parsed["charts"][0]["symbol"], "NVDA", "the Follow chart keeps what it was showing");
     }
 
-    /// A group reaches across chartbooks, so joining one has to write into the
-    /// books that are not open. Stopping at the open one would make a group
-    /// mean "the charts in this group I can currently see", and the book you
-    /// switched back to would show a symbol from before the link.
+    /// Following the watchlist means this chartbook's list. A chartbook you
+    /// come back to is as you left it, so becoming Follow in one book leaves
+    /// the Follow charts of another alone.
     #[test]
-    fn joining_a_group_leads_the_charts_in_the_books_that_are_away() {
+    fn becoming_follow_leaves_the_charts_in_other_books_alone() {
         let store = bare();
         run("chartbook create Macro --symbol AAPL --switch", &store);
         run("chartbook create Chips --symbol MU", &store);
-        run("chart set --book Chips --chart pos:0 --link 4", &store);
-        run("chart set --book Chips --chart pos:0 --symbol MU", &store);
+        run("chart set --book Chips --chart pos:0 --link follow", &store);
 
-        let joined = run("chart set --book Macro --chart pos:0 --symbol NVDA --link 4", &store);
+        let joined = run("chart set --book Macro --chart pos:0 --symbol NVDA --link follow", &store);
         assert_eq!(joined.code, 0, "{}", joined.err);
-        assert!(joined.out.contains("group 4"), "it has to say so: {}", joined.out);
 
         let listed = run("chart list --book Chips --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
-        assert_eq!(parsed["charts"][0]["symbol"], "NVDA", "the book that is away followed");
+        assert_eq!(parsed["charts"][0]["symbol"], "MU", "the book that is away kept its chart");
     }
 
     /// Which list the rail shows is written down against whichever book was

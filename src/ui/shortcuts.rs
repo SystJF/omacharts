@@ -60,10 +60,8 @@ pub const BINDINGS: &[Binding] = &[
     // Shift as well, because Ctrl+G on its own is "find the next one" to
     // everything with a box you can type in, and this window has one.
     global("chart.grid", &["<Ctrl><Shift>g"]),
-    // O, not P: printing a chart is a thing this will grow, and the key
-    // everything else on the desktop prints with has to still be free when it
-    // does. A screenshot of the chartbook is the same key with Shift, the way
-    // closing one already is.
+    // O, not P: Ctrl+P is kept for a command palette. A screenshot of the
+    // chartbook is the same key with Shift, the way closing one already is.
     global("chart.screenshot", &["<Ctrl>o"]),
     global("win.screenshot", &["<Ctrl><Shift>o"]),
     // Alt with a letter is the drawing tools' register: a line and a
@@ -309,17 +307,11 @@ mod tests {
         }
     }
 
-    /// Screenshots went on Ctrl+O so that Ctrl+P stays what it is everywhere
-    /// else. Taking it later for anything but printing would be taking it from
-    /// printing, which is the one thing it was kept for.
+    /// Screenshots went on Ctrl+O, and pinning on Ctrl+Shift+P, so that
+    /// Ctrl+P is free for a command palette.
     #[test]
-    fn the_printing_keys_are_left_alone() {
-        for accel in ["<Ctrl>p", "<Ctrl><Shift>p"] {
-            assert!(
-                !BINDINGS.iter().any(|binding| binding.accels.contains(&accel)),
-                "{accel} is reserved for printing"
-            );
-        }
+    fn ctrl_p_is_left_for_a_command_palette() {
+        assert!(!BINDINGS.iter().any(|binding| binding.accels.contains(&"<Ctrl>p")));
     }
 
     #[test]

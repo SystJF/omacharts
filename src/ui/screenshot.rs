@@ -80,7 +80,7 @@ pub const FOLDER: &str = "Omacharts";
 /// - `timeframe-strip` — the segmented resolution buttons. The resolution
 ///   itself still appears: it is written beside the symbol as plain text, and
 ///   that label is information and stays.
-/// - `legend-gear`, `legend-link` — chart settings, and the link group.
+/// - `legend-gear`, `legend-link` — chart settings, and the link mode.
 /// - `legend-button` — a row's hide, settings and remove buttons.
 /// - `pane-expand` — the maximize corner.
 /// - [`POINTER_LAYER`] — the crosshair, its axis labels, and the boxes

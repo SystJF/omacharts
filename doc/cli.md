@@ -96,7 +96,7 @@ To find out what is open before changing it:
 ```
 $ omacharts status show
 chartbook  Macro (id:0)
-* pos:0  AAPL       1D    unlinked
+* pos:0  AAPL       1D    focus
 ```
 
 Everything `status` prints is spelled the way the other commands accept it, so
@@ -219,54 +219,41 @@ omacharts config set chart_header template,symbol
 cached quotes the watchlist shows, so it is as fresh as the rail and fetches
 nothing of its own.
 
-## Link groups
+## Link modes
 
-A chart belongs to one of nine groups, or to none. Charts in a group show the
-same instrument: moving one moves the others, and a pointer on one draws a
-crosshair on the rest.
+Each chart has a link mode: what a click in the watchlist does to it.
 
-```
-omacharts chart set --link 3        # join group 3 and lead it
-omacharts chart set --link none     # leave it, changing nobody
-omacharts chart list                # the last column is the group
-```
-
-A watchlist drives a group too, and that is the other half of what groups are
-for: picking a symbol in a list changes the charts in the group it drives
-rather than the one chart you happen to be on. In the window, putting a list in
-a group leads it the same way a chart does — with the row the list is on. From
-a command there is no such row to lead with, because which row a list is on is
-the rail's own state and is nowhere in the database, so this sets the group and
-the list then follows it: the rail points at what its new group is showing the
-moment that list is on screen.
+* **`follow`** (the default) takes every click. Follow charts show the same
+  instrument: a symbol typed on one moves the others, and a pointer on one draws
+  a crosshair on the rest. Split a chart, change the new one's resolution, and
+  both walk the watchlist together.
+* **`focus`** takes the click while it is the focused chart. Make a split's new
+  chart Focus and click a symbol, and it takes the symbol while the old one
+  keeps what it had.
+* **`pinned`** takes none, focused or not — for a context chart such as SPY
+  beside a stock. A click that moves nothing, because the focused chart is
+  pinned and nothing follows, lights up its pin.
 
 ```
-$ omacharts watchlist link Semis 3
-"Semis" now drives link group 3
-  [exit 0]
-
-$ omacharts watchlist link Semis
-3
-  [exit 0]
-
-$ omacharts watchlist link Semis none
-"Semis" drives no link group
-  [exit 0]
+omacharts chart set --link follow   # follow the watchlist, and lead the others
+omacharts chart set --link pinned   # never moved by the watchlist
+omacharts chart list                # the last column is the mode
 ```
 
-**A group drives at most one watchlist.** One already taken is refused, and
-the refusal names the list holding it, rather than quietly moving it:
+The chain in a chart's top-right corner picks any of the three once there is a
+second chart to tell apart, and the chart menu has them under Watchlist. A lone
+chart shows its chain only while it is pinned. Ctrl+Shift+P pins the focused
+chart, or unpins it back to `follow`; unpinned, it takes what the other Follow
+charts show rather than moving them to what it had. Following is within the open
+chartbook: a chartbook you come back to is as you left it.
 
-```
-$ omacharts watchlist link Energy 3
-omacharts: link group 3 already drives "Semis"; take it off that list first
-  [exit 5]
-```
+`omacharts SYMBOL`, which is what a click in the bar widget runs, picks the
+symbol in a watchlist the way a click does. When nothing takes it, because the
+focused chart is pinned and nothing follows, it says so and exits 5.
 
-`watchlist list` shows who holds what in one read, which is the question worth
-asking before changing any of it. Out of the box the default watchlist drives
-group 1, and charts start in group 1, so a fresh install has the list driving
-the charts.
+A chartbook saved when charts were in one of nine link groups keeps what a
+click did to each chart: a chart in the group its chartbook's watchlist drove
+becomes `follow` and any other chart `focus`.
 
 ### Sorting a watchlist
 
@@ -294,14 +281,13 @@ sorts last either way. While a list is sorted, dragging a symbol within its
 section does nothing — the sort decides its place — but dragging it into
 another section still moves it.
 
-**A chart put in a group leads it.** What that chart is showing becomes the
-group's symbol, and everything else in the group follows: the other charts, the
-charts of the chartbooks that are not open, and the watchlist driving the group.
-You linked *this* chart, so this is the symbol you meant the group to be on:
+**A chart made `follow` leads.** What that chart is showing becomes what every
+other Follow chart in the chartbook shows, and the watchlist points at it. You
+made *this* chart follow, so this is the symbol you meant them to be on:
 
 ```
-$ omacharts chart set --chart pos:1 --link 2
-chart 3: link group 2; 1 other chart in group 2 now shows AMD
+$ omacharts chart set --chart pos:1 --link follow
+chart 3: link follow; 1 other Follow chart now shows AMD
   [exit 0]
 ```
 
@@ -310,19 +296,19 @@ what the chart ends up showing.
 
 Three changes write nothing, which is what makes the control safe to touch:
 
-* **`--link none`** takes the chart out and changes nobody. The charts still in
-  the group keep what they had.
-* **Re-stating the group a chart is already in.** Only an actual change leads,
+* **Leaving follow** (`--link focus` or `--link pinned`) changes nobody. The
+  charts still following keep what they had.
+* **Re-stating the mode a chart is already in.** Only an actual change leads,
   so a script that re-applies a chart's whole state does not rewrite four others
   every time it runs.
-* **Joining from a chart with no symbol.** The group keeps what it was showing
-  rather than being blanked.
+* **Following from a chart with no symbol.** The Follow charts keep what they
+  were showing rather than being blanked.
 
-`chart set --symbol` on a chart already in a group changes that one chart.
-Spreading a symbol over a group is the window's business — picking in the rail,
+`chart set --symbol` on a Follow chart changes that one chart. Spreading a
+symbol over the Follow charts is the window's business — picking in the rail,
 or typing in the search — and a command names the charts it means.
 
-Whether a pointer on one chart draws a line on the ones linked to it:
+Whether a pointer on a Follow chart draws a line on the other Follow charts:
 
 ```
 omacharts chart crosshair off
@@ -471,9 +457,9 @@ moved CL from Energy to Majors in "Default", at the end
 
 ## Moving watchlists between machines
 
-`watchlist export` writes every watchlist — sections, their order, the symbols
-in them and the link group each drives — as one JSON file, and `watchlist
-import` brings it in on the other machine. Carry the file however you like:
+`watchlist export` writes every watchlist — sections, their order and the
+symbols in them — as one JSON file, and `watchlist import` brings it in on the
+other machine. Carry the file however you like:
 Syncthing, a dotfiles repository, `scp`.
 
 ```
@@ -491,13 +477,13 @@ Macro: already up to date
 the default one to the default one whatever either is called. A match gains
 the sections and symbols it lacks, after what it already has; nothing it holds
 is moved or removed, and a symbol it already has is not added again in another
-section. A watchlist with no match is created, with the link group it drove,
-unless another list here already drives that group. So the same file can be
-imported on every machine, as often as you like, and a second run changes
-nothing.
+section. A watchlist with no match is created. So the same file can be imported
+on every machine, as often as you like, and a second run changes nothing. A
+file exported when lists drove link groups still imports; the group is read
+past.
 
 `--replace` makes each watchlist in the file exactly what it was where it was
-exported — sections, order, link group — for when this machine should match
+exported — sections and order — for when this machine should match
 rather than combine. Watchlists the file does not name are never touched, by
 either form.
 
@@ -1042,7 +1028,7 @@ does that perfectly and regenerates itself; a hand-written copy would be wrong
 by the second release, and more confidently wrong than no copy at all. The
 skill carries the two things the surface structurally cannot: that this app is
 worth reaching for, and the orders commands go in — a 2×2 of linked charts is
-several commands and a handful of facts about `pos:N` and link groups, none of
+several commands and a handful of facts about `pos:N` and link modes, none of
 which is a word in any one command's help.
 
 **One skill, not one per agent.** Claude reads `~/.claude/skills/<name>/`, Codex

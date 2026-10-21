@@ -35,7 +35,7 @@ use crate::ui::pane::{self, ChartPane, Node};
 use crate::ui::drop_line;
 use crate::ui::screenshot;
 use omacharts_engine::link;
-use omacharts_engine::LinkGroup;
+use omacharts_engine::LinkMode;
 use crate::ui::colors;
 use crate::ui::preferences::Preferences;
 use crate::ui::search::SymbolSearch;
@@ -189,8 +189,8 @@ const SHORTCUT_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+Alt+V", "Split vertically"),
             ("Ctrl+Alt+X", "Close this chart"),
             ("Ctrl+M", "Give this chart the window, or put it back"),
+            ("Ctrl+Shift+P", "Pin this chart, or unpin it"),
             ("Ctrl+O", "Screenshot this chart"),
-            ("Ctrl+L", "Link this chart to the watchlist, or unlink it"),
             ("Alt+← → ↑ ↓", "Focus the chart that way"),
             ("Ctrl+Alt+Shift+← → ↑ ↓", "Resize this chart"),
         ],
@@ -409,39 +409,143 @@ mod tests {
         ]
     }"#;
 
-    /// Anybody upgrading has one of these in their database. Reading it as
-    /// the single book it describes is the difference between keeping the
-    /// layout they left and being handed an empty window.
+    /// What a chart written with link groups becomes, read through the
+    /// store the way a window or a command reads it.
+    fn upgraded(json: &str, store: &Store) -> Workspace {
+        let mut value: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+        upgrade_link_groups(&mut value, store);
+        parse_workspace(&value.to_string()).expect("the upgraded shape should parse")
+    }
+
+    fn modes(book: &Chartbook) -> Vec<LinkMode> {
+        book.panes.iter().map(|pane| pane.link).collect()
+    }
+
     /// Every chart stored before there were groups says `"linked": true`, and
-    /// nothing rewrites that file — it is the live layout, read once. A chart
-    /// that was linked has to come back in the group that looks and behaves
-    /// like the only link there used to be.
+    /// out of the box the default watchlist drove what that meant, so a
+    /// linked chart beside it is a Follow chart and an unlinked one Focus.
     #[test]
-    fn a_chart_linked_before_there_were_groups_joins_the_first_one() {
-        let workspace = parse_workspace(ONE_ARRANGEMENT).expect("the old shape should parse");
-        let panes = &workspace.books[0].panes;
-        assert_eq!(panes[0].linked, LinkGroup::Group(1), "linked meant the neutral group");
-        assert_eq!(panes[1].linked, LinkGroup::None, "and unlinked still means nobody");
+    fn a_chart_linked_before_there_were_groups_follows_the_watchlist() {
+        let store = Store::memory().expect("an in-memory store");
+        let workspace = upgraded(ONE_ARRANGEMENT, &store);
+        assert_eq!(modes(&workspace.books[0]), vec![LinkMode::Follow, LinkMode::Focus]);
+    }
+
+    /// Out of the box every chart was in group 1 and only the default list
+    /// drove it, so every click in it moved every chart — and still does. A
+    /// book beside another list was moved by none of its clicks, so its
+    /// charts go back to taking one while they are focused.
+    #[test]
+    fn the_out_of_the_box_groups_become_follow_only_beside_the_list_that_drove_them() {
+        let store = Store::memory().expect("an in-memory store");
+        let energy = store.add_watchlist("Energy").expect("made");
+        let pane = |id: u32| {
+            format!(
+                r#"{{"id": {id}, "symbol": "SPY", "timeframe": "1D", "indicators": [],
+                    "bar_style": "candle", "session": "extended", "show_grid": true,
+                    "linked": 1}}"#
+            )
+        };
+        let json = format!(
+            r#"{{"active": 0, "books": [
+                {{"name": "Main", "layout": {{"leaf": 1}}, "focused": 1, "watchlist": 1,
+                  "panes": [{}, {}]}},
+                {{"name": "Energy", "layout": {{"leaf": 3}}, "focused": 3, "watchlist": {energy},
+                  "panes": [{}]}}]}}"#,
+            pane(1),
+            pane(2),
+            pane(3)
+        );
+        let workspace = upgraded(&json, &store);
+        assert_eq!(modes(&workspace.books[0]), vec![LinkMode::Follow, LinkMode::Follow]);
+        assert_eq!(modes(&workspace.books[1]), vec![LinkMode::Focus]);
+    }
+
+    /// The whole table, per book: in the group its list drives is Follow,
+    /// in another group or none is Focus, and a pin is a pin.
+    #[test]
+    fn each_book_upgrades_against_the_group_its_own_list_drove() {
+        let store = Store::memory().expect("an in-memory store");
+        let fx = store.add_watchlist("FX").expect("made");
+        let quiet = store.add_watchlist("Quiet").expect("made");
+        store.set_setting(&format!("watchlist_link_{fx}"), "2");
+        store.set_setting(&format!("watchlist_link_{}", DEFAULT_WATCHLIST), "0");
+        let pane = |id: u32, linked: &str| {
+            format!(
+                r#"{{"id": {id}, "symbol": "EURUSD", "timeframe": "1D", "indicators": [],
+                    "bar_style": "candle", "session": "extended", "show_grid": true,
+                    "linked": {linked}}}"#
+            )
+        };
+        let json = format!(
+            r#"{{"active": 0, "books": [
+                {{"layout": {{"leaf": 1}}, "focused": 1, "watchlist": {fx},
+                  "panes": [{}, {}, {}]}},
+                {{"layout": {{"leaf": 5}}, "focused": 5, "watchlist": {quiet},
+                  "panes": [{}]}},
+                {{"layout": {{"leaf": 6}}, "focused": 6, "watchlist": 1,
+                  "panes": [{}]}}]}}"#,
+            pane(1, "2"),
+            pane(2, "3"),
+            pane(3, "0"),
+            pane(5, "2"),
+            pane(6, "true"),
+        );
+        let workspace = upgraded(&json, &store);
+        let (follow, focus) = (LinkMode::Follow, LinkMode::Focus);
+        assert_eq!(modes(&workspace.books[0]), vec![follow, focus, focus]);
+        assert_eq!(modes(&workspace.books[1]), vec![focus], "Quiet drove no group");
+        assert_eq!(modes(&workspace.books[2]), vec![focus], "the default list was unlinked");
+    }
+
+    /// Two lists could claim one group in a database from before that was
+    /// refused, and the earlier list in display order held it.
+    #[test]
+    fn a_group_two_lists_claimed_was_driven_by_the_earlier_one() {
+        let store = Store::memory().expect("an in-memory store");
+        let first = store.add_watchlist("Energy").expect("made");
+        let second = store.add_watchlist("Metals").expect("made");
+        store.set_setting(&format!("watchlist_link_{first}"), "4");
+        store.set_setting(&format!("watchlist_link_{second}"), "4");
+        let book = |list: i64, id: u32| {
+            format!(
+                r#"{{"layout": {{"leaf": {id}}}, "focused": {id}, "watchlist": {list},
+                    "panes": [{{"id": {id}, "symbol": "CL", "timeframe": "1D",
+                    "indicators": [], "bar_style": "candle", "session": "extended",
+                    "show_grid": true, "linked": 4}}]}}"#
+            )
+        };
+        let json =
+            format!(r#"{{"active": 0, "books": [{}, {}]}}"#, book(first, 1), book(second, 2));
+        let workspace = upgraded(&json, &store);
+        assert_eq!(modes(&workspace.books[0]), vec![LinkMode::Follow]);
+        assert_eq!(modes(&workspace.books[1]), vec![LinkMode::Focus]);
+    }
+
+    /// The upgrade writes the mode and drops the groups, so it happens once:
+    /// a chart that has a mode is read as that mode whatever the lists'
+    /// rows say later.
+    #[test]
+    fn an_upgraded_chart_is_not_upgraded_again() {
+        let store = Store::memory().expect("an in-memory store");
+        let mut value: serde_json::Value = serde_json::from_str(ONE_ARRANGEMENT).unwrap();
+        assert!(upgrade_link_groups(&mut value, &store));
+        assert!(value["panes"][0].get("linked").is_none(), "{value}");
+        assert_eq!(value["panes"][0]["link"], "follow");
+        store.set_setting(&format!("watchlist_link_{}", DEFAULT_WATCHLIST), "0");
+        assert!(!upgrade_link_groups(&mut value, &store), "nothing left to upgrade");
+        assert_eq!(value["panes"][0]["link"], "follow");
     }
 
     #[test]
-    fn a_group_survives_being_written_down() {
-        let json = r#"{"id": 1, "symbol": "SPY", "suffix": null, "timeframe": "1D",
-             "indicators": [], "bar_style": "candle", "session": "extended",
-             "show_grid": true, "linked": 4}"#;
-        let pane: StoredPane = serde_json::from_str(json).expect("a numbered group should parse");
-        assert_eq!(pane.linked, LinkGroup::Group(4));
-        let back: StoredPane =
-            serde_json::from_str(&serde_json::to_string(&pane).unwrap()).unwrap();
-        assert_eq!(back.linked, LinkGroup::Group(4));
-    }
-
-    /// The menu marks the row this chart is in, so the number it carries and
-    /// the number the action is told have to be the same number.
-    #[test]
-    fn a_groups_menu_target_is_its_number() {
-        assert_eq!(group_state(LinkGroup::None).get::<i32>(), Some(0));
-        assert_eq!(group_state(LinkGroup::Group(7)).get::<i32>(), Some(7));
+    fn a_mode_survives_being_written_down() {
+        for mode in omacharts_engine::link::MODES {
+            let json = serde_json::to_string(&stored_pane(1, "SPY", mode)).unwrap();
+            assert!(json.contains(&format!(r#""link":"{}""#, mode.key())), "{json}");
+            assert!(!json.contains(r#""linked""#), "{json}");
+            let back: StoredPane = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.link, mode);
+        }
     }
 
     /// A click in the bar widget hands back a canonical ticker and a suffix,
@@ -491,7 +595,7 @@ mod tests {
                 colouring: None,
                 session: "extended".to_string(),
                 show_grid: true,
-                linked: LinkGroup::None,
+                link: LinkMode::Focus,
                 shows_drawings: true,
                 sends_drawings: true,
                 drawing_uid: String::new(),
@@ -539,9 +643,9 @@ mod tests {
     #[test]
     fn a_held_price_scale_survives_a_restart() {
         let store = Store::memory().expect("an in-memory store");
-        let mut held = stored_pane(1, "SPY", LinkGroup::None);
+        let mut held = stored_pane(1, "SPY", LinkMode::Focus);
         held.auto_scale = false;
-        let book = book_of("Macro", vec![held, stored_pane(2, "QQQ", LinkGroup::None)]);
+        let book = book_of("Macro", vec![held, stored_pane(2, "QQQ", LinkMode::Focus)]);
         let json = serde_json::to_string(&Workspace { books: vec![book], active: 0 }).unwrap();
         store.set_setting(SETTING_WORKSPACE, &json);
 
@@ -551,7 +655,7 @@ mod tests {
     }
 
     /// A chart, as a book that is not on screen holds one.
-    fn stored_pane(id: u32, symbol: &str, linked: LinkGroup) -> StoredPane {
+    fn stored_pane(id: u32, symbol: &str, link: LinkMode) -> StoredPane {
         StoredPane {
             id,
             symbol: symbol.to_string(),
@@ -563,7 +667,7 @@ mod tests {
                 colouring: None,
             session: "extended".to_string(),
             show_grid: true,
-            linked,
+            link,
             shows_drawings: true,
             sends_drawings: true,
             drawing_uid: String::new(),
@@ -614,7 +718,7 @@ mod tests {
         assert!(workspace.books[0].panes.iter().all(|pane| pane.template.is_none()));
 
         let store = Store::memory().expect("an in-memory store");
-        let mut held = stored_pane(1, "SPY", LinkGroup::None);
+        let mut held = stored_pane(1, "SPY", LinkMode::Focus);
         held.template = Some(3);
         let book = book_of("Macro", vec![held]);
         let json = serde_json::to_string(&Workspace { books: vec![book], active: 0 }).unwrap();
@@ -638,11 +742,11 @@ mod tests {
         let store = Store::memory().expect("an in-memory store");
         let mut macro_book = book_of(
             "Macro",
-            vec![stored_pane(1, "SPY", LinkGroup::None), stored_pane(2, "QQQ", LinkGroup::None)],
+            vec![stored_pane(1, "SPY", LinkMode::Focus), stored_pane(2, "QQQ", LinkMode::Focus)],
         );
         macro_book.layout = Node::leaf(1).split(1, 2, true);
         macro_book.maximized = Some(2);
-        let energy = book_of("Energy", vec![stored_pane(3, "CL", LinkGroup::None)]);
+        let energy = book_of("Energy", vec![stored_pane(3, "CL", LinkMode::Focus)]);
         let workspace = Workspace { books: vec![macro_book, energy], active: 0 };
         store.set_setting(SETTING_WORKSPACE, &serde_json::to_string(&workspace).unwrap());
 
@@ -669,66 +773,6 @@ mod tests {
         }
     }
 
-    /// The half of linking nobody can see: a group reaches into the books that
-    /// are away, whose charts are stored values rather than widgets. Without
-    /// this, switching to a book you had linked would show a symbol from
-    /// before the link and the whole feature would look as though it had
-    /// quietly failed.
-    #[test]
-    fn a_group_is_written_into_every_book_but_the_one_on_screen() {
-        let mut books = vec![
-            book_of("Open", vec![stored_pane(1, "AAPL", LinkGroup::Group(2))]),
-            book_of("Away", vec![stored_pane(2, "MSFT", LinkGroup::Group(2))]),
-            book_of("Further", vec![stored_pane(3, "TSLA", LinkGroup::Group(2))]),
-        ];
-
-        write_group_into_books(&mut books, 0, &any_instrument("NVDA", None), LinkGroup::Group(2));
-
-        assert_eq!(books[1].panes[0].symbol, "NVDA");
-        assert_eq!(books[2].panes[0].symbol, "NVDA");
-        assert_eq!(
-            books[0].panes[0].symbol, "AAPL",
-            "the open book's charts are the live ones, and saving writes those back"
-        );
-    }
-
-    /// A chart in another group is deliberately somewhere else, and so is an
-    /// unlinked one.
-    #[test]
-    fn a_book_that_is_away_keeps_the_charts_that_are_not_in_the_group() {
-        let mut books = vec![
-            book_of("Open", vec![stored_pane(1, "AAPL", LinkGroup::Group(2))]),
-            book_of(
-                "Away",
-                vec![
-                    stored_pane(2, "MSFT", LinkGroup::Group(2)),
-                    stored_pane(3, "GOOG", LinkGroup::Group(5)),
-                    stored_pane(4, "AMZN", LinkGroup::None),
-                ],
-            ),
-        ];
-
-        write_group_into_books(&mut books, 0, &any_instrument("NVDA", None), LinkGroup::Group(2));
-
-        assert_eq!(books[1].panes[0].symbol, "NVDA");
-        assert_eq!(books[1].panes[1].symbol, "GOOG", "group 5 is tracking something else");
-        assert_eq!(books[1].panes[2].symbol, "AMZN", "and an unlinked chart follows nobody");
-    }
-
-    /// "Linked to nobody" is not a pool to agree with, which is what makes
-    /// unlinking the one group change that moves no other chart.
-    #[test]
-    fn nothing_is_written_for_the_unlinked_group() {
-        let mut books = vec![
-            book_of("Open", vec![stored_pane(1, "AAPL", LinkGroup::None)]),
-            book_of("Away", vec![stored_pane(2, "MSFT", LinkGroup::None)]),
-        ];
-
-        write_group_into_books(&mut books, 0, &any_instrument("NVDA", None), LinkGroup::None);
-
-        assert_eq!(books[1].panes[0].symbol, "MSFT");
-    }
-
     /// A stored chart naming a listing outside the curated half, saved again
     /// before the long tail has loaded, has to come back out as itself.
     ///
@@ -740,7 +784,7 @@ mod tests {
     /// flushes before it reads, so asking what was on screen was enough.
     #[test]
     fn a_symbol_the_curated_half_cannot_name_survives_being_saved() {
-        let stored = stored_pane(1, "FOXF", LinkGroup::Group(1));
+        let stored = stored_pane(1, "FOXF", LinkMode::Follow);
         let curated = crate::inventory::Inventory::curated();
         assert!(
             curated.find(&stored.symbol, stored.suffix.as_deref()).is_none(),
@@ -855,22 +899,6 @@ mod tests {
             .find_map(|(symbol, suffix)| index.find(symbol, suffix.as_deref()));
 
         assert_eq!(found.map(|i| i.symbol), Some("SPY".to_string()));
-    }
-
-    /// The venue travels with the ticker. A group landing on SAP in New York
-    /// when the chart that led it was showing SAP in Frankfurt would be two
-    /// different instruments wearing one name.
-    #[test]
-    fn the_venue_travels_with_the_symbol_into_the_books_that_are_away() {
-        let mut books = vec![
-            book_of("Open", vec![stored_pane(1, "SAP", LinkGroup::Group(3))]),
-            book_of("Away", vec![stored_pane(2, "MSFT", LinkGroup::Group(3))]),
-        ];
-
-        write_group_into_books(&mut books, 0, &any_instrument("SAP", Some("DE")), LinkGroup::Group(3));
-
-        assert_eq!(books[1].panes[0].symbol, "SAP");
-        assert_eq!(books[1].panes[0].suffix.as_deref(), Some("DE"));
     }
 
     /// A book is what you were looking at, and half of that is the list
@@ -1143,36 +1171,6 @@ mod tests {
     }
 }
 
-/// Pop a real menu up where the pointer is.
-///
-/// A GtkPopoverMenu built from a menu model, rather than a box of flat
-/// buttons: it is what the platform draws for a context menu, it handles
-/// radio items and keyboard navigation itself, and it looks like every other
-/// menu on the desktop.
-///
-/// Nested rather than sliding, which is what fixes the height. Sliding
-/// submenus live in one stack, and the stack is as tall as its tallest page —
-/// so a four-item menu whose submenu has more rows than that opens with dead
-/// space below it and a scrollbar down the side. Nested submenus fly out as
-/// their own popovers, leaving each menu exactly as tall as what is in it.
-/// A group's colour as a small filled circle, or an empty space the same size
-/// for the group that has no colour — so the labels line up down the popover
-/// however many of the rows are coloured.
-fn swatch_dot(colour: Option<String>) -> gtk::DrawingArea {
-    let area = gtk::DrawingArea::new();
-    area.set_content_width(12);
-    area.set_content_height(12);
-    area.set_valign(gtk::Align::Center);
-    area.set_draw_func(move |_, cr, width, height| {
-        let Some(hex) = colour.as_deref() else { return };
-        crate::ui::colors::set_source(cr, hex);
-        let r = (width.min(height) as f64) / 2.0 - 1.5;
-        cr.arc(width as f64 / 2.0, height as f64 / 2.0, r, 0.0, std::f64::consts::TAU);
-        let _ = cr.fill();
-    });
-    area
-}
-
 /// Does this watchlist hold that symbol?
 ///
 /// Matched on the canonical ticker and the exchange suffix together, never on
@@ -1186,11 +1184,6 @@ fn list_holds(store: &Store, watchlist: i64, symbol: &str, suffix: Option<&str>)
             .iter()
             .any(|entry| entry.symbol == symbol && entry.suffix.as_deref() == suffix)
     })
-}
-
-/// A group as a menu action's target: the number, and zero for unlinked.
-fn group_state(group: LinkGroup) -> glib::Variant {
-    (group.number().unwrap_or(0) as i32).to_variant()
 }
 
 /// Which digit of the number row a hardware keycode is, whatever the layout
@@ -1318,11 +1311,21 @@ fn sidebar_room(total: i32) -> i32 {
     (total - MIN_CHARTS_WIDTH).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
 }
 const SETTING_TIMEFRAMES: &str = "timeframes";
+/// Why [`Window::show_named`] put nothing on a chart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NotShown {
+    /// No watchlist holds the symbol, or not the one asked for.
+    Unlisted,
+    /// The list holds it and no chart took it: the focused chart is Pinned
+    /// and none follows the watchlist.
+    Refused,
+}
+
 /// The whole arrangement of charts, as one stored value.
 const SETTING_WORKSPACE: &str = "workspace";
 /// Whether the drawing tools are on screen.
 const SHOW_DRAWING_TOOLS: &str = "show_drawing_tools";
-/// Whether a pointer on one chart draws a line on the linked ones.
+/// Whether a pointer on a Follow chart draws a line on the other Follow charts.
 pub const SETTING_SYNC_CROSSHAIR: &str = "sync_crosshair";
 
 /// One chart, as it is written down.
@@ -1352,7 +1355,11 @@ struct StoredPane {
     colouring: Option<String>,
     session: String,
     show_grid: bool,
-    linked: LinkGroup,
+    /// What the rail does to this chart. Missing from a chart written with
+    /// link groups instead, which [`upgrade_link_groups`] turns into this
+    /// before the chart is read.
+    #[serde(default)]
+    link: LinkMode,
     /// Whether the price axis fits itself to the visible bars, or has been
     /// taken off automatic to be dragged. Missing from a chart written before
     /// this was remembered, and every one of those was fitting itself.
@@ -1520,34 +1527,81 @@ fn parse_workspace(json: &str) -> Option<Workspace> {
         })
 }
 
-/// Write `instrument` onto every stored chart in `group`, in every book but
-/// `skip`.
+/// Turn the link groups a stored arrangement may still carry into modes, in
+/// place. `true` when there was anything to turn.
 ///
-/// The books that are away are data rather than widgets, so a group reaching
-/// across chartbooks has to be written into them: skipping them would make a
-/// group mean "the charts in this group I can currently see", and switching to
-/// a book you had linked would show a symbol from before the link.
+/// Charts were written down with one of nine link groups, and the watchlist
+/// beside them chose which group its clicks moved. Each book is read against
+/// the group its own list drove, from the rows those lists kept it in: a
+/// chart in that group moved on every click, so it is Follow, and every
+/// other chart is Focus. See [`LinkMode::from_group`].
 ///
-/// Free-standing and over the stored shape on purpose, which is what lets the
-/// half of linking that nobody can see on screen be tested without a screen.
-///
-/// `skip` is the book on screen, whose charts are the live ones — saving writes
-/// those back over whatever was stored anyway.
-fn write_group_into_books(
-    books: &mut [Chartbook],
-    skip: usize,
-    instrument: &Instrument,
-    group: LinkGroup,
-) {
-    if !group.is_linked() {
-        return;
+/// On the stored value rather than on [`StoredPane`], so that a window and a
+/// command reading the same row with no window open arrive at the same modes,
+/// and so the old fields do not have to live on in the struct. The groups are
+/// dropped as the mode is written, so the next save stores the mode and the
+/// rows are never asked again; they are left where they are.
+pub(crate) fn upgrade_link_groups(workspace: &mut serde_json::Value, store: &Store) -> bool {
+    use serde_json::Value;
+
+    let legacy = |pane: &Value| pane.get("linked").is_some();
+    // The arrangement from before chartbooks is one book at the top level.
+    let mut books: Vec<&mut Value> = match workspace.get("books").is_some() {
+        true => match workspace["books"].as_array_mut() {
+            Some(books) => books.iter_mut().collect(),
+            None => return false,
+        },
+        false => vec![workspace],
+    };
+    let any = books.iter().any(|book| {
+        book["panes"].as_array().is_some_and(|panes| panes.iter().any(legacy))
+    });
+    if !any {
+        return false;
     }
-    for book in books.iter_mut().enumerate().filter(|(at, _)| *at != skip).map(|(_, book)| book) {
-        for pane in book.panes.iter_mut().filter(|pane| pane.linked == group) {
-            pane.symbol = instrument.symbol.clone();
-            pane.suffix = instrument.suffix.clone();
+
+    // Which group each list drove: what its row says, the default list group
+    // 1 when nothing was written, and a group two lists claimed stays with
+    // the earlier in display order, as the rail decided it.
+    let mut driven: Vec<(i64, u8)> = Vec::new();
+    for (id, _) in store.watchlists() {
+        let group = match store.setting(&format!("watchlist_link_{id}")) {
+            Some(value) => value.parse::<u8>().ok().filter(|n| (1..=9).contains(n)),
+            None => (id == crate::store::DEFAULT_WATCHLIST).then_some(1),
+        };
+        if let Some(group) = group
+            && !driven.iter().any(|(_, taken)| *taken == group)
+        {
+            driven.push((id, group));
         }
     }
+    // A book written before it kept a list of its own showed the rail's.
+    let rail = store
+        .setting(crate::ui::watchlist::SETTING_ACTIVE)
+        .and_then(|id| id.parse::<i64>().ok())
+        .unwrap_or(crate::store::DEFAULT_WATCHLIST);
+
+    for book in books.iter_mut() {
+        let list = book["watchlist"].as_i64().unwrap_or(rail);
+        let drives = driven.iter().find(|(id, _)| *id == list).map(|(_, group)| *group);
+        let Some(panes) = book.get_mut("panes").and_then(Value::as_array_mut) else { continue };
+        for pane in panes.iter_mut().filter(|p| legacy(p)) {
+            let Some(fields) = pane.as_object_mut() else { continue };
+            let group = match fields.remove("linked") {
+                Some(Value::Bool(linked)) => u8::from(linked),
+                Some(Value::Number(n)) => n
+                    .as_f64()
+                    .filter(|n| n.fract() == 0.0 && (1.0..=9.0).contains(n))
+                    .map_or(0, |n| n as u8),
+                _ => 0,
+            };
+            if !fields.contains_key("link") {
+                let mode = LinkMode::from_group(group, drives);
+                fields.insert("link".to_string(), Value::from(mode.key()));
+            }
+        }
+    }
+    true
 }
 
 /// The symbol and venue a chart is written down under.
@@ -1890,17 +1944,11 @@ impl Window {
         // way of changing it has to write the book down. One hook, because a
         // second route to the same state is a second route that can forget.
         let saver = this.clone();
-        let rail = watchlist.clone();
         watchlist.connect_switched(move || {
-            // A different list is a different group: the chain has to say what
-            // the list in front of you drives, not what the last one did.
-            let colours = saver.clone();
-            // And the list it is now showing follows its group rather than
-            // leading it. Being shown a list is not putting it in a group, and
-            // a rail that led here would move charts for a glance at a list.
-            if rail.adopt_link_group(move |group| colours.link_colour(group)) {
-                saver.rail_follows_its_group();
-            }
+            // The list it is now showing follows the Follow charts rather than
+            // leading them. Being shown a list is not picking a symbol, and a
+            // rail that led here would move charts for a glance at a list.
+            saver.rail_follows_follow_charts();
             saver.save_soon();
         });
         *this.watchlist.borrow_mut() = Some(watchlist.clone());
@@ -1909,34 +1957,6 @@ impl Window {
         // answer, and the switcher is where it gets asked.
         let books = this.clone();
         watchlist.connect_chartbook_using(move |id| books.book_using_watchlist(id));
-
-        let holder = watchlist.clone();
-        let marked = watchlist.clone();
-        watchlist.link_button().set_popover(Some(&this.link_popover(
-            move |group| holder.group_held_by(group).map(|(_, name)| name),
-            move || marked.link_group(),
-            |window, group| {
-                let colour = window.link_colour(group);
-                let rail = window.watchlist.borrow().as_ref().cloned();
-                let Some(rail) = rail else { return };
-                let before = rail.link_group();
-                rail.set_link_group(group, colour);
-                // Read back rather than assumed. A group another list already
-                // holds is refused, and a refusal that then moved the charts
-                // would be the worst of both answers.
-                let now = rail.link_group();
-                // A list leads the group it is put in, with the row it is on —
-                // which is the nearest thing a watchlist has to a symbol of its
-                // own. An empty list, or one nobody has clicked in yet, leads
-                // with nothing rather than blanking the group.
-                if now != before && let Some(instrument) = rail.selected_instrument() {
-                    window.spread_to_followers(&instrument, now, None);
-                }
-                window.save_workspace();
-            },
-        )));
-        let colours = this.clone();
-        watchlist.adopt_link_group(move |group| colours.link_colour(group));
 
         let split = &this.split;
         split.set_end_child(Some(&watchlist.widget));
@@ -2093,7 +2113,7 @@ impl Window {
             defaults.colouring,
             defaults.session,
             defaults.show_grid,
-            LinkGroup::Group(1),
+            LinkMode::default(),
         );
         pane.template.set(template.map(|t| t.id));
         self.show_header_on(&pane);
@@ -2115,7 +2135,7 @@ impl Window {
         colouring: BarColouring,
         session: Session,
         show_grid: bool,
-        linked: LinkGroup,
+        mode: LinkMode,
     ) -> Rc<ChartPane> {
         let id = self.next_pane.get();
         self.next_pane.set(id + 1);
@@ -2123,7 +2143,7 @@ impl Window {
         let theme = self.theming.borrow().theme();
         let scheme = colouring.for_style(bar_style).scheme(&theme);
         let pane = ChartPane::new(
-            id, theme, scheme, timeframe, indicators, bar_style, session, show_grid, linked,
+            id, theme, scheme, timeframe, indicators, bar_style, session, show_grid, mode,
         );
         pane.colouring.set(colouring);
         pane.view.set_bar_style(bar_style);
@@ -2149,22 +2169,20 @@ impl Window {
             expander.toggle_maximized();
         });
 
-        // The chain opens the list of groups rather than toggling one, now
-        // that there are nine of them and "off" is a tenth answer.
+        // The chain opens the three modes rather than toggling one: "off" is
+        // two answers, taking the click when focused and never taking it.
         let marked = self.clone();
-        pane.link.set_popover(Some(&self.link_popover(
-            // Charts share a group freely; only a watchlist is exclusive.
-            |_| None,
+        pane.link.set_popover(Some(&self.mode_popover(
             // By id rather than by holding the pane: the pane owns the button
-            // that owns this popover, and the chain it paints is the same
-            // `linked` this reads, so there is one answer rather than two.
-            move || marked.pane(id).map(|pane| pane.linked.get()).unwrap_or_default(),
-            move |window, group| {
+            // that owns this popover, and the icon it paints is the same mode
+            // this reads, so there is one answer rather than two.
+            move || marked.pane(id).map(|pane| pane.mode()).unwrap_or_default(),
+            move |window, mode| {
                 window.focus(id);
-                window.set_pane_link_group(id, group);
+                window.set_pane_mode(id, mode);
             },
         )));
-        pane.set_link_group(linked, self.link_colour(linked));
+        pane.set_mode(mode, mode.colour(&self.theming.borrow().theme()));
 
         // Right-clicking a strip offers to edit the list, rather than throwing
         // a modal at you for a click you may not have meant. The list is one
@@ -2290,8 +2308,8 @@ impl Window {
             closer.set_indicators_of(&pane, kept);
         });
 
-        // The pointer on one chart draws a crosshair on the charts linked
-        // with it, so you can read the same moment and the same price on all
+        // The pointer on a Follow chart draws a crosshair on the other Follow
+        // charts, so you can read the same moment and the same price on all
         // of them at once. Both halves travel as values rather than as
         // pixels: charts at different resolutions share no bar index, and
         // charts at different zooms share no y.
@@ -2405,7 +2423,7 @@ impl Window {
     /// to be re-pointed when the focus moves.
     fn sync_chart_actions(self: &Rc<Self>, pane: &Rc<ChartPane>) {
         if let Some(action) = self.linked_action.borrow().as_ref() {
-            action.set_state(&group_state(pane.linked.get()));
+            action.set_state(&pane.mode().key().to_variant());
         }
         if let Some(action) = self.bar_style_action.borrow().as_ref() {
             action.set_state(&pane.bar_style.get().key().to_variant());
@@ -2471,7 +2489,7 @@ impl Window {
             from.colouring.get(),
             from.session.get(),
             from.show_grid.get(),
-            from.linked.get(),
+            from.mode(),
         );
         added.template.set(from.template.get());
         self.show_header_on(&added);
@@ -2863,91 +2881,100 @@ impl Window {
         }
     }
 
-    /// Put a chart in a group, or take it out of one — and where it joins one,
-    /// make what it is showing the group's symbol.
+    /// Change what the rail does to a chart — and where it becomes Follow,
+    /// make what it is showing the Follow charts' symbol.
     ///
-    /// The chart leads rather than follows. You linked *this* chart, so this is
-    /// the symbol you meant the group to be on; and it is the only direction
-    /// that works from the rail's side as well, where a list has no symbol of
-    /// its own to adopt and can only ever drive.
+    /// The chart leads rather than follows. You made *this* chart follow, so
+    /// this is the symbol you meant the Follow charts to be on.
     ///
     /// Three changes deliberately write nothing, each of which would otherwise
     /// move charts somebody did not ask about:
     ///
-    /// - **Leaving a group.** The charts still in it keep what they had. Only
-    ///   the group being joined is ever written to, so nothing walks the group
-    ///   a chart left as a side effect of leaving it.
-    /// - **Re-picking the group it is already in.** The chain's popover and the
-    ///   chart menu's radio items both re-apply their own state, so a group
+    /// - **Leaving Follow.** The charts still following keep what they had.
+    /// - **Re-picking the mode it is already in.** The chain's popover and the
+    ///   chart menu's radio items both re-apply their own state, so a mode
     ///   that rewrote four charts every time its menu opened would be unusable.
-    /// - **Joining from a chart with nothing on it.** A group that is showing
-    ///   something keeps it; leading with nothing would blank the group.
-    pub fn set_pane_link_group(self: &Rc<Self>, id: u32, group: LinkGroup) {
+    /// - **Following from a chart with nothing on it.** Follow charts that are
+    ///   showing something keep it; leading with nothing would blank them.
+    pub fn set_pane_mode(self: &Rc<Self>, id: u32, mode: LinkMode) {
         let Some(pane) = self.pane(id) else { return };
-        let before = pane.linked.get();
-        pane.set_link_group(group, self.link_colour(group));
+        let before = pane.mode();
+        pane.set_mode(mode, mode.colour(&self.theming.borrow().theme()));
         self.sync_chart_actions(&pane);
         let showing = pane.instrument.borrow().clone();
-        if group != before && let Some(instrument) = showing {
-            self.spread_to_followers(&instrument, group, Some(id));
+        if mode == LinkMode::Follow && before != mode && let Some(instrument) = showing {
+            self.spread_to_followers(&instrument, mode, Some(id));
         }
         self.save_workspace();
     }
 
-    /// What a group's badge is painted in, against the theme in force now.
+    /// Pin a chart, or unpin it back to the default.
     ///
-    /// Resolved on demand rather than stored, because the number is the group
-    /// and the colour is only this theme's answer about it.
-    fn link_colour(&self, group: LinkGroup) -> Option<String> {
-        group.colour(&self.theming.borrow().theme())
+    /// Unpinned into Follow, it joins the Follow charts rather than leading
+    /// them: it was pinned to hold something they were not showing, so leading
+    /// would put that on every one of them, which is not what a key pressed on
+    /// one chart asks for.
+    fn toggle_pin(self: &Rc<Self>, pane: &Rc<ChartPane>) {
+        let mode = pane.mode().pin_toggled();
+        let joining = (mode == LinkMode::Follow)
+            .then(|| {
+                self.panes
+                    .borrow()
+                    .iter()
+                    .filter(|p| p.id != pane.id && p.mode() == LinkMode::Follow)
+                    .find_map(|p| p.instrument.borrow().clone())
+            })
+            .flatten();
+        let Some(instrument) = joining else {
+            self.set_pane_mode(pane.id, mode);
+            return;
+        };
+        pane.set_mode(mode, mode.colour(&self.theming.borrow().theme()));
+        self.sync_chart_actions(pane);
+        self.show_in(pane, instrument);
+        self.save_workspace();
     }
 
-    /// The list of groups, as a popover. `choose` is handed the group the row
-    /// stands for; which chart or rail it applies to is the caller's business.
+    /// The three modes, as a popover. `choose` is handed the mode the row
+    /// stands for; which chart it applies to is the caller's business.
     ///
-    /// `current` is asked which group is in force, and asked again every time
+    /// `current` is asked which mode is in force, and asked again every time
     /// the popover opens rather than once when it is built: the popover is
-    /// attached to its button for the life of the chart, and the group changes
-    /// underneath it constantly. A mark decided at build time would be a mark
-    /// that was right once.
-    ///
-    /// It is a parameter for the same reason `held` is. The popover is shared
-    /// between a chart, which is in its pane's group, and the rail, which is in
-    /// the watchlist's — so reading either one's state from in here would be
-    /// right for one caller and wrong for the other.
-    fn link_popover(
+    /// attached to its button for the life of the chart, and the mode changes
+    /// underneath it — from the chart menu and commands. A mark
+    /// decided at build time would be a mark that was right once.
+    fn mode_popover(
         self: &Rc<Self>,
-        held: impl Fn(LinkGroup) -> Option<String> + 'static,
-        current: impl Fn() -> LinkGroup + 'static,
-        choose: impl Fn(&Rc<Self>, LinkGroup) + 'static,
+        current: impl Fn() -> LinkMode + 'static,
+        choose: impl Fn(&Rc<Self>, LinkMode) + 'static,
     ) -> gtk::Popover {
         let popover = gtk::Popover::new();
         popover.set_has_arrow(false);
         let menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let choose = Rc::new(choose);
         // The mark for each row, kept so opening the popover can move it.
-        let mut marks: Vec<(LinkGroup, gtk::Image)> = Vec::new();
-        for group in link::ALL {
+        let mut marks: Vec<(LinkMode, gtk::Image)> = Vec::new();
+        for mode in link::MODES {
             let row = gtk::Button::new();
             row.add_css_class("flat");
             row.add_css_class("link-row");
             let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            line.append(&swatch_dot(self.link_colour(group)));
-            let label = gtk::Label::new(Some(group.label()));
+            // The icon the chart's button takes in this mode, so choosing one
+            // shows what the legend will say afterwards.
+            let icon = pane::menu_mode_icon(mode);
+            icon.set_valign(gtk::Align::Center);
+            line.append(&icon);
+            let words = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            words.set_hexpand(true);
+            let label = gtk::Label::new(Some(mode.label()));
             label.set_xalign(0.0);
-            label.set_hexpand(true);
-            line.append(&label);
-            // A group drives one watchlist, so one another list already holds
-            // is not on offer — and the row names whose it is rather than
-            // merely refusing, which would leave nothing to understand.
-            if let Some(owner) = held(group) {
-                let owner = gtk::Label::new(Some(&owner));
-                owner.add_css_class("dim-label");
-                owner.add_css_class("caption");
-                owner.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                line.append(&owner);
-                row.set_sensitive(false);
-            }
+            words.append(&label);
+            let blurb = gtk::Label::new(Some(mode.blurb()));
+            blurb.set_xalign(0.0);
+            blurb.add_css_class("dim-label");
+            blurb.add_css_class("caption");
+            words.append(&blurb);
+            line.append(&words);
             // The same icon GTK draws for a chosen item in a menu — the chart's
             // own right-click menu gets one of these for free from a stateful
             // action, and a hand-built list of buttons has to put it there
@@ -2956,15 +2983,10 @@ impl Window {
             // Always present, never hidden: hiding it would collapse the
             // column and shuffle every label sideways as the choice moved.
             // Opacity keeps the space and only stops it being drawn.
-            //
-            // After the owner label, so a row that is both the current group
-            // and spoken for by another watchlist reads as what it is — "this
-            // one, and it belongs to that list" — rather than one of the two
-            // displacing the other.
             let mark = gtk::Image::from_icon_name("object-select-symbolic");
             mark.set_opacity(0.0);
             line.append(&mark);
-            marks.push((group, mark));
+            marks.push((mode, mark));
             row.set_child(Some(&line));
 
             let this = self.clone();
@@ -2974,15 +2996,15 @@ impl Window {
                 if let Some(popover) = popover_weak.upgrade() {
                     popover.popdown();
                 }
-                choose(&this, group);
+                choose(&this, mode);
             });
             menu.append(&row);
         }
         // Every time it opens, not once when it is built.
         popover.connect_show(move |_| {
             let now = current();
-            for (group, mark) in &marks {
-                mark.set_opacity(if *group == now { 1.0 } else { 0.0 });
+            for (mode, mark) in &marks {
+                mark.set_opacity(if *mode == now { 1.0 } else { 0.0 });
             }
         });
         popover.set_child(Some(&menu));
@@ -3084,7 +3106,7 @@ impl Window {
                     colouring: Some(pane.colouring.get().key().to_string()),
                     session: pane.session.get().key().to_string(),
                     show_grid: pane.show_grid.get(),
-                    linked: pane.linked.get(),
+                    link: pane.mode(),
                     shows_drawings: pane.shows_drawings.get(),
                     sends_drawings: pane.sends_drawings.get(),
                     drawing_uid: pane.uid.borrow().clone(),
@@ -3136,7 +3158,12 @@ impl Window {
     /// Put the chartbooks back. `false` when there was nothing written down,
     /// or when what was written cannot be rebuilt.
     fn restore_workspace(self: &Rc<Self>) -> bool {
-        let Some(json) = self.store.setting(SETTING_WORKSPACE) else { return false };
+        let Some(mut json) = self.store.setting(SETTING_WORKSPACE) else { return false };
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&json)
+            && upgrade_link_groups(&mut value, &self.store)
+        {
+            json = value.to_string();
+        }
         let Some(workspace) = parse_workspace(&json) else { return false };
         let active = workspace.active.min(workspace.books.len() - 1);
         *self.books.borrow_mut() = workspace.books;
@@ -3182,20 +3209,6 @@ impl Window {
         let rail = self.watchlist.borrow().as_ref().cloned();
         if let Some(rail) = rail {
             rail.reload();
-            // The chain beside the name is painted from the group the rail
-            // holds, and reloading the list does not re-ask for it — so a group
-            // set from a terminal was right in the database and stale on
-            // screen until the next time you switched lists.
-            let colours = self.clone();
-            // A command can only put a list in a group, never hand the group a
-            // symbol: which row the list is on is the rail's own state and is
-            // nowhere in the database. So the list follows — it is pointed at
-            // what its new group is showing. Only when the group actually
-            // changed, or adding one symbol to a list would move the selection
-            // off whatever somebody was looking at.
-            if rail.adopt_link_group(move |group| colours.link_colour(group)) {
-                self.rail_follows_its_group();
-            }
         }
         // A watchlist that just changed is the likeliest moment for there to
         // be a row with no price — somebody has just added one. Waiting for
@@ -3277,7 +3290,7 @@ impl Window {
                     .unwrap_or(defaults.colouring),
                 Session::from_key(&stored.session).unwrap_or_default(),
                 stored.show_grid,
-                stored.linked,
+                stored.link,
             );
             pane.template.set(template.map(|t| t.id));
             self.show_header_on(&pane);
@@ -3987,21 +4000,21 @@ impl Window {
         entry.add_controller(keys);
     }
 
-    /// Draw `ts` on every chart linked with `from`, and on none when it is
-    /// unlinked: an unlinked chart is deliberately somewhere else.
+    /// Draw `ts` on every Follow chart when `from` is one, and on none when
+    /// it is not: a Focus or Pinned chart is deliberately somewhere else.
     fn echo_crosshair(self: &Rc<Self>, from: u32, echo: Option<Echo>) {
         if !self.store.setting_bool(SETTING_SYNC_CROSSHAIR, true) {
             return;
         }
-        let source = self.pane(from).map(|p| p.linked.get()).unwrap_or_default();
+        let source = self.pane(from).map(|p| p.mode()).unwrap_or_default();
         for pane in self.panes.borrow().iter() {
             if pane.id == from {
                 continue;
             }
-            // Same group, or no line: a chart in another group is tracking a
+            // Follow to Follow, or no line: any other chart may be showing a
             // different symbol, and a crosshair from this one would be
             // pointing at a bar that is not the bar under the pointer.
-            let show = source.is_linked() && pane.linked.get() == source;
+            let show = source == LinkMode::Follow && pane.mode() == LinkMode::Follow;
             pane.view.set_echo(if show { echo } else { None });
         }
     }
@@ -4014,36 +4027,17 @@ impl Window {
         }
     }
 
-    /// What a group is already showing. `None` for the unlinked group, which
-    /// is not a pool and has nothing to agree on.
-    ///
-    /// The live charts first, then the charts of the books that are away. The
-    /// stored ones are consulted because a group reaches across chartbooks: a
-    /// rail showing a list that drives a group whose only members are in
-    /// another book still has somewhere to point, and answering `None` there
-    /// would read as the group being empty when it is not.
-    fn group_instrument(&self, group: LinkGroup) -> Option<Instrument> {
-        if !group.is_linked() {
-            return None;
-        }
-        let live = self
-            .panes
+    /// What the Follow charts in the open chartbook are already showing.
+    fn follow_instrument(&self) -> Option<Instrument> {
+        self.panes
             .borrow()
             .iter()
-            .filter(|p| p.linked.get() == group)
-            .find_map(|p| p.instrument.borrow().clone());
-        live.or_else(|| {
-            self.books
-                .borrow()
-                .iter()
-                .flat_map(|book| book.panes.iter())
-                .filter(|p| p.linked == group)
-                .find_map(|p| self.index.find(&p.symbol, p.suffix.as_deref()))
-        })
+            .filter(|p| p.mode() == LinkMode::Follow)
+            .find_map(|p| p.instrument.borrow().clone())
     }
 
-    /// Point the rail at `instrument`, where the list on it is the one driving
-    /// `group`.
+    /// Point the rail at `instrument`, where `mode` is Follow — the charts
+    /// every list drives.
     ///
     /// Through [`highlight`](Watchlist::highlight), which selects the row and
     /// tells nobody. That is what stops this coming back round: the rail's loud
@@ -4054,24 +4048,23 @@ impl Window {
     /// A list that does not hold the symbol keeps the row it was on. There is
     /// nothing to select, and clearing the selection would lose somebody's
     /// place in a list of forty over a symbol that was never in it.
-    fn rail_follows(&self, instrument: &Instrument, group: LinkGroup) {
+    fn rail_follows(&self, instrument: &Instrument, mode: LinkMode) {
         let rail = self.watchlist.borrow().as_ref().cloned();
-        let Some(rail) = rail.filter(|rail| rail.link_group() == group) else { return };
+        let Some(rail) = rail.filter(|_| mode == LinkMode::Follow) else { return };
         rail.highlight(instrument);
     }
 
-    /// Point the rail at whatever the group its list drives is showing.
+    /// Point the rail at whatever the Follow charts are showing.
     ///
-    /// The other half of a group reaching a watchlist, and the answer to the
-    /// rail being one widget showing one list: a group whose list is not the
-    /// one on screen cannot be pointed at anything when the group moves. There
-    /// is nothing to write down to make up for that, because the group's symbol
-    /// is already written in the charts — so the list is pointed at it the
-    /// moment it is shown instead, which cannot go stale.
-    fn rail_follows_its_group(self: &Rc<Self>) {
+    /// The answer to the rail being one widget showing one list: a list that
+    /// is not on screen cannot be pointed at anything when the Follow charts
+    /// move. There is nothing to write down to make up for that, because their
+    /// symbol is already written in the charts — so the list is pointed at it
+    /// the moment it is shown instead, which cannot go stale.
+    fn rail_follows_follow_charts(self: &Rc<Self>) {
         let rail = self.watchlist.borrow().as_ref().cloned();
         let Some(rail) = rail else { return };
-        if let Some(instrument) = self.group_instrument(rail.link_group()) {
+        if let Some(instrument) = self.follow_instrument() {
             rail.highlight(&instrument);
         }
     }
@@ -4469,19 +4462,6 @@ impl Window {
             }
 
             match key {
-                // Ctrl+L: follow the rail, or stop following it.
-                // Ctrl+L: in or out of the neutral group, which is the one a
-                // chart that was simply "linked" has always been in. Picking
-                // one of the other eight is a thing you do by looking.
-                Key::l | Key::L if ctrl => {
-                    let pane = this.focused_pane();
-                    let next = match pane.linked.get() {
-                        LinkGroup::None => LinkGroup::Group(1),
-                        _ => LinkGroup::None,
-                    };
-                    this.set_pane_link_group(pane.id, next);
-                    return glib::Propagation::Stop;
-                }
                 Key::Left if alt && !ctrl => {
                     this.focus_towards(-1, 0);
                     return glib::Propagation::Stop;
@@ -4496,6 +4476,13 @@ impl Window {
                 }
                 Key::Down if alt && !ctrl => {
                     this.focus_towards(0, 1);
+                    return glib::Propagation::Stop;
+                }
+                // Ctrl+Shift+P: pin the focused chart, or unpin it. A letter,
+                // so it is the same key on every layout; Ctrl+P is kept for a
+                // command palette.
+                Key::p | Key::P if ctrl && shift && !alt => {
+                    this.toggle_pin(&this.focused_pane());
                     return glib::Propagation::Stop;
                 }
                 // Back to the chart, from wherever the keyboard ended up —
@@ -4864,14 +4851,10 @@ impl Window {
         }
         for pane in self.panes.borrow().iter() {
             pane.view.restyle(theme.clone(), pane_scheme(pane, &theme));
-            // The group is the number and the colour is the theme's answer
-            // about it, which has just changed.
-            let group = pane.linked.get();
-            pane.set_link_group(group, group.colour(&theme));
-        }
-        if let Some(rail) = self.watchlist.borrow().as_ref() {
-            let group = rail.link_group();
-            rail.set_link_group(group, group.colour(&theme));
+            // The colour is the theme's answer about the mode, which has just
+            // changed.
+            let mode = pane.mode();
+            pane.set_mode(mode, mode.colour(&theme));
         }
         // Indicators without a colour of their own take one from the theme's
         // palette, and that answer just changed. Repainting without asking
@@ -5240,99 +5223,91 @@ impl Window {
         self.save_workspace();
     }
 
-    /// Chart an instrument: paint from cache now, fetch the gap in the
-    /// background.
-    /// Chart an instrument on the focused chart, and on every chart linked
-    /// with it.
+    /// Chart an instrument on the focused chart, and on every Follow chart
+    /// when it is one.
     ///
-    /// Linked charts are one group showing one symbol: the watchlist drives
-    /// them, and a symbol picked on any of them moves the rest. An unlinked
-    /// chart is parked — leaving one showing something while you go looking
+    /// The Follow charts show one symbol: the watchlist drives them, and a
+    /// symbol picked on any of them moves the rest. A Focus or Pinned chart
+    /// moves alone — leaving one showing something while you go looking
     /// elsewhere is most of the reason to have split it.
     pub fn show(self: &Rc<Self>, instrument: Instrument) {
         let focused = self.focused_pane();
-        self.spread(instrument, focused.linked.get(), Some(focused.id));
+        self.spread(instrument, focused.mode(), Some(focused.id));
     }
 
     /// Chart what the rail just picked.
     ///
-    /// A list drives its group, wherever those charts are. The chart you are
-    /// looking at moves because it is in that group, not because it is the one
-    /// you are looking at — a chart you have taken out of the group follows
-    /// nobody, the list included, or unlinking the focused chart would look as
-    /// though it had done nothing at all.
+    /// The Follow charts take it, and so does the focused chart if it is a
+    /// Focus chart — which is what makes "split, make the new chart Focus,
+    /// then click" put the symbol on that chart and leave the old one alone.
+    /// A Pinned chart takes nothing, focused or not.
     ///
-    /// A list in no group is the exception: it still drives the chart in front
-    /// of you. Clicking a symbol has to put it somewhere, and a rail whose
-    /// every click did nothing would read as broken rather than as unlinked.
-    pub fn show_from_rail(self: &Rc<Self>, instrument: Instrument) {
-        let group =
-            self.watchlist.borrow().as_ref().map(|rail| rail.link_group()).unwrap_or_default();
-        let seed = if group.is_linked() { None } else { Some(self.focused.get()) };
-        self.spread(instrument, group, seed);
+    /// A click that moves nothing at all — a Pinned chart in front of you and
+    /// no Follow charts — lights the pin rather than doing nothing silently,
+    /// because a rail whose click did nothing would read as broken rather
+    /// than as pinned. The rail's highlight goes back to what that chart is
+    /// showing, so the list does not claim a symbol no chart shows, and the
+    /// answer is `false`, so a command that clicked for somebody can say so.
+    pub fn show_from_rail(self: &Rc<Self>, instrument: Instrument) -> bool {
+        let focused = self.focused_pane();
+        let seed = (focused.mode() == LinkMode::Focus).then_some(focused.id);
+        let following = self.panes.borrow().iter().any(|p| p.mode() == LinkMode::Follow);
+        if seed.is_none() && !following {
+            focused.flag_pinned();
+            let showing = focused.instrument.borrow().clone();
+            let rail = self.watchlist.borrow().as_ref().cloned();
+            if let Some(rail) = rail {
+                rail.put_back(showing.as_ref());
+            }
+            return false;
+        }
+        self.spread(instrument, LinkMode::Follow, seed);
+        true
     }
 
-    /// Put `instrument` on `seed`, on every live chart in `group`, and on
-    /// every chart in `group` that belongs to a chartbook which is not on
-    /// screen.
+    /// Put `instrument` on `seed`, and on every Follow chart when `mode` is
+    /// Follow.
     ///
-    /// The books that are away are data rather than widgets, so they are
-    /// written to directly. Skipping them would make a group mean "the charts
-    /// in this group I can currently see", which is a rule nobody could
-    /// predict from one chartbook away.
-    fn spread(self: &Rc<Self>, instrument: Instrument, group: LinkGroup, seed: Option<u32>) {
+    /// The open chartbook only. A chartbook you come back to is as you left
+    /// it: each shows its own watchlist, so following the watchlist means
+    /// this book's list, not a list in a book that is away.
+    fn spread(self: &Rc<Self>, instrument: Instrument, mode: LinkMode, seed: Option<u32>) {
         if let Some(pane) = seed.and_then(|id| self.pane(id)) {
             self.show_in(&pane, instrument.clone());
         }
-        self.spread_to_followers(&instrument, group, seed);
+        self.spread_to_followers(&instrument, mode, seed);
         self.save_workspace();
     }
 
-    /// Put `instrument` on everything in `group` but `except`: the live charts,
-    /// the charts of the books that are away, and the rail where the list on it
-    /// drives this group.
+    /// Put `instrument` on every Follow chart but `except`, and point the
+    /// rail at it, when `mode` is Follow.
     ///
     /// `except` is the one already showing it — the chart the symbol came from.
-    /// Skipped rather than painted again, so a chart leading its group does not
-    /// refetch what it is already displaying.
+    /// Skipped rather than painted again, so a chart leading the Follow charts
+    /// does not refetch what it is already displaying.
     ///
-    /// Nothing happens for the unlinked group. "Linked to nobody" is not a pool
-    /// to agree with, which is what makes unlinking a change that moves no
-    /// other chart.
+    /// Nothing happens for Focus or Pinned. Neither is a pool to agree with,
+    /// which is what makes leaving Follow a change that moves no other chart.
     fn spread_to_followers(
         self: &Rc<Self>,
         instrument: &Instrument,
-        group: LinkGroup,
+        mode: LinkMode,
         except: Option<u32>,
     ) {
-        if !group.is_linked() {
+        if mode != LinkMode::Follow {
             return;
         }
         let others: Vec<Rc<ChartPane>> = self
             .panes
             .borrow()
             .iter()
-            .filter(|p| Some(p.id) != except && p.linked.get() == group)
+            .filter(|p| Some(p.id) != except && p.mode() == LinkMode::Follow)
             .cloned()
             .collect();
         for pane in others {
             self.show_in(&pane, instrument.clone());
         }
-        self.spread_to_stored_books(instrument, group);
-        self.rail_follows(instrument, group);
-    }
-
-    /// Move a group's charts in the books that are not on screen.
-    ///
-    /// The active book is skipped: its charts are the live ones, and saving
-    /// writes them back over whatever was stored anyway.
-    fn spread_to_stored_books(&self, instrument: &Instrument, group: LinkGroup) {
-        write_group_into_books(
-            &mut self.books.borrow_mut(),
-            self.active.get(),
-            instrument,
-            group,
-        );
+        self.rail_follows(instrument, mode);
     }
 
     /// Chart an instrument on one chart: paint from cache now, fetch the gap
@@ -7701,16 +7676,13 @@ impl Window {
         menu.append_section(None, &layout);
 
         let rest = gio::Menu::new();
-        let groups = gio::Menu::new();
-        for group in link::ALL {
-            let item = gio::MenuItem::new(Some(group.label()), None);
-            item.set_action_and_target_value(
-                Some("chart.link-group"),
-                Some(&group_state(group)),
-            );
-            groups.append_item(&item);
+        let modes = gio::Menu::new();
+        for mode in link::MODES {
+            let item = gio::MenuItem::new(Some(mode.label()), None);
+            item.set_action_and_target_value(Some("chart.link-mode"), Some(&mode.key().to_variant()));
+            modes.append_item(&item);
         }
-        rest.append_submenu(Some("Link group"), &groups);
+        rest.append_submenu(Some("Watchlist"), &modes);
         shortcuts::append(&rest, "Take screenshot", "chart.screenshot");
         if !self.focused_pane().view.drawings().is_empty() {
             shortcuts::append(&rest, "Remove all drawings", "chart.drawing-clear");
@@ -7873,19 +7845,21 @@ impl Window {
         close.connect_activate(move |_, _| this.close_focused());
         actions.add_action(&close);
 
-        // Stateful over the group number, so the menu draws a radio mark
-        // beside the one this chart is in rather than a tick that can only
-        // say linked or not.
+        // Stateful over the mode's key, so the menu draws a radio mark beside
+        // the one this chart is in.
         let linked = gio::SimpleAction::new_stateful(
-            "link-group",
-            Some(glib::VariantTy::INT32),
-            &group_state(self.focused_pane().linked.get()),
+            "link-mode",
+            Some(glib::VariantTy::STRING),
+            &self.focused_pane().mode().key().to_variant(),
         );
         let this = self.clone();
         linked.connect_activate(move |action, target| {
-            let Some(number) = target.and_then(|t| t.get::<i32>()) else { return };
-            action.set_state(&number.to_variant());
-            this.set_pane_link_group(this.focused.get(), LinkGroup::numbered(number.max(0) as u8));
+            let Some(mode) = target.and_then(|t| t.get::<String>()).and_then(|k| LinkMode::from_key(&k))
+            else {
+                return;
+            };
+            action.set_state(&mode.key().to_variant());
+            this.set_pane_mode(this.focused.get(), mode);
         });
         actions.add_action(&linked);
         *self.linked_action.borrow_mut() = Some(linked);
@@ -8274,30 +8248,36 @@ impl Window {
     /// way back into what you were already watching, and a click there that
     /// rewrote the chart in front of you would be a different feature.
     ///
-    /// `false` when no list holds it, which leaves the caller to do the one
-    /// thing that is still right — put the window up.
+    /// [`NotShown::Unlisted`] when no list holds it, which leaves the caller
+    /// to do the one thing that is still right — put the window up.
     ///
     /// With `watchlist`, the window moves to that list whatever else holds
     /// the symbol, and the symbol is picked only there: the bar widget shows
     /// the default list, and a click there is a click in that list, not in
-    /// whichever one happened to be on screen. `false` then means that list
-    /// does not hold it, and nothing was searched for instead — a list that
-    /// was asked for and quietly swapped for another is the answer a script
-    /// cannot tell from the right one.
+    /// whichever one happened to be on screen. `Unlisted` then means that
+    /// list does not hold it, and nothing was searched for instead — a list
+    /// that was asked for and quietly swapped for another is the answer a
+    /// script cannot tell from the right one.
+    ///
+    /// [`NotShown::Refused`] when the list holds it and no chart took it,
+    /// as [`show_from_rail`](Self::show_from_rail) refuses a click.
     pub fn show_named(
         self: &Rc<Self>,
         symbol: &str,
         suffix: Option<&str>,
         watchlist: Option<i64>,
-    ) -> bool {
+    ) -> Result<(), NotShown> {
         if let Some(wanted) = watchlist {
             self.show_watchlist(wanted);
-            return self.list_holds(wanted, symbol, suffix)
-                && self.index.find(symbol, suffix).is_some_and(|i| self.pick_in_rail(&i));
+            if !self.list_holds(wanted, symbol, suffix) {
+                return Err(NotShown::Unlisted);
+            }
+            let instrument = self.index.find(symbol, suffix).ok_or(NotShown::Unlisted)?;
+            return self.pick_in_rail(&instrument);
         }
 
         let Some(instrument) = self.index.find(symbol, suffix) else {
-            return false;
+            return Err(NotShown::Unlisted);
         };
 
         // The book you are in wins any tie. "The first where it is available"
@@ -8316,7 +8296,7 @@ impl Window {
                 self.list_holds(id, symbol, suffix).then_some(index)
             })
         };
-        let Some(index) = elsewhere else { return false };
+        let Some(index) = elsewhere else { return Err(NotShown::Unlisted) };
         self.activate_book(index);
         // After the switch, never before: selecting looks through the rows the
         // rail is showing, and until it has been rebuilt those are the last
@@ -8362,9 +8342,13 @@ impl Window {
         list_holds(&self.store, watchlist, symbol, suffix)
     }
 
-    fn pick_in_rail(self: &Rc<Self>, instrument: &Instrument) -> bool {
+    fn pick_in_rail(self: &Rc<Self>, instrument: &Instrument) -> Result<(), NotShown> {
         let rail = self.watchlist.borrow().as_ref().cloned();
-        rail.is_some_and(|rail| rail.pick(instrument))
+        match rail.and_then(|rail| rail.pick(instrument)) {
+            None => Err(NotShown::Unlisted),
+            Some(false) => Err(NotShown::Refused),
+            Some(true) => Ok(()),
+        }
     }
 
     pub fn indicators(&self) -> Vec<Indicator> {

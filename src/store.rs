@@ -800,9 +800,9 @@ impl Store {
             .conn
             .execute("DELETE FROM watchlist_sections WHERE watchlist_id = ?1", params![id]);
         let _ = self.conn.execute("DELETE FROM watchlists WHERE id = ?1", params![id]);
-        // The group it drove goes with it. Left behind, the row still claims
-        // the group — so the next list offering that group was told it was
-        // taken, by a list that no longer exists and could not be named.
+        // The link group it drove, from before charts had modes, goes with
+        // it: a list that came to reuse the id would otherwise be read as
+        // having driven that group when an old arrangement is upgraded.
         let _ = self
             .conn
             .execute("DELETE FROM settings WHERE key = ?1", params![format!("watchlist_link_{id}")]);

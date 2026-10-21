@@ -388,10 +388,16 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
    the link's hover box half as wide again as its neighbours'. The outer one
    carries the box; this one only holds the glyph. */
 .legend-link > button { min-width: 0; min-height: 0; padding: 0; }
+/* A Pinned chart that just refused a rail click, for a moment: the pin is the
+   reason nothing moved, so the pin is what lights up. */
+.legend-link.refused {
+  background: alpha(@accent_color, 0.35);
+  border-radius: 5px;
+}
 
-/* One group in the chain's popover. A menu row rather than a button: the dot
+/* One mode in the chain's popover. A menu row rather than a button: the icon
    carries the colour, so the row itself should stay out of the way and let
-   nine of them read as a list. */
+   the three read as a list. */
 .link-row {
   padding: 3px 10px;
   min-height: 0;
@@ -399,6 +405,9 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
   font-size: 0.9em;
 }
 .link-row:hover { background: alpha(currentColor, 0.09); }
+/* A mode's icon in that menu, for a mode other than the default: the accent,
+   as the chart's button wears it. */
+.link-mode-set { color: @accent_color; }
 
 /* The symbol over the chart is a button, because clicking the name of the
    thing you are looking at to change it is the shortest route there is — but
@@ -413,10 +422,10 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 .legend-symbol:hover { background: alpha(currentColor, 0.12); }
 
 /* The legend sits over the drawing, and the drawing is the point. The gear,
-   and the link while the chart is in no group (the default, so nothing to
+   and the link while the chart is in Follow (the default, so nothing to
    report), strike the maximize corner's bargain: not there until the pointer
-   is on the chart. A linked chart keeps its link showing, since then the
-   icon is telling you something. The link stays up while its menu is open,
+   is on the chart. A Focus or Pinned chart keeps its link showing, since
+   then the icon is telling you something. The link stays up while its menu is open,
    when the pointer has left the chart for the menu. */
 .legend-gear,
 .legend-link.quiet {
