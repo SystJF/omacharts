@@ -81,6 +81,17 @@ pub struct ChartPane {
     pub pending: RefCell<Option<(String, Option<String>)>>,
     pub timeframe: Cell<Timeframe>,
     pub indicators: RefCell<Vec<Indicator>>,
+    /// The chart template whose indicators these are, if any. While it has
+    /// one, `indicators` is a copy of the template's, kept current by the
+    /// window; see [`crate::templates`].
+    pub template: Cell<Option<u32>>,
+    /// What the header shows, in order. See [`crate::header`].
+    pub header: RefCell<Vec<crate::header::Part>>,
+    /// The line the header is written on, and the two parts of it only the
+    /// window can fill in.
+    header_row: gtk::Box,
+    pub change_label: gtk::Label,
+    pub template_label: gtk::Label,
     pub bar_style: Cell<BarStyle>,
     /// How the theme's candle colours are painted on this chart.
     pub colouring: Cell<omacharts_engine::BarColouring>,
@@ -188,8 +199,22 @@ impl ChartPane {
         // screenshot, because which bars these are is information. The
         // controls go to the opposite corner, where they stay out of it.
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-        bar.append(&symbol_button);
-        bar.append(&timeframe_menu);
+        // The two parts a header may also show, written by the window when
+        // the chart is showing them. Labels rather than buttons: there is
+        // nothing to do to a day's move or a template's name from here.
+        let change_label = gtk::Label::new(None);
+        change_label.add_css_class("readout-symbol");
+        change_label.set_valign(gtk::Align::Center);
+        let template_label = gtk::Label::new(None);
+        template_label.add_css_class("readout-symbol");
+        template_label.add_css_class("dim-label");
+        template_label.set_valign(gtk::Align::Center);
+        // The padding the two buttons beside them have, so the four sit
+        // evenly apart whichever order they are in.
+        for label in [&change_label, &template_label] {
+            label.set_margin_start(8);
+            label.set_margin_end(8);
+        }
         // As tall as the strip, so the symbol reads on the same line as the
         // resolutions. Alone it is shorter than the strip and sat above it.
         // A number rather than a size group, because the strip is hidden on
@@ -284,7 +309,7 @@ impl ChartPane {
         root.set_vexpand(true);
         root.append(&overlay);
 
-        Rc::new(ChartPane {
+        let pane = Rc::new(ChartPane {
             id,
             view,
             root,
@@ -303,6 +328,11 @@ impl ChartPane {
             pending: RefCell::new(None),
             timeframe: Cell::new(timeframe),
             indicators: RefCell::new(indicators),
+            template: Cell::new(None),
+            header: RefCell::new(crate::header::standard()),
+            header_row: bar,
+            change_label,
+            template_label,
             bar_style: Cell::new(bar_style),
             colouring: Cell::new(Default::default()),
             session: Cell::new(session),
@@ -313,7 +343,9 @@ impl ChartPane {
             uid: RefCell::new(gtk::glib::uuid_string_random().to_string()),
             local_drawings: RefCell::new(Vec::new()),
             link_colour,
-        })
+        });
+        pane.arrange_header();
+        pane
     }
 
     /// Point this chart's strip, and the resolution beside its symbol, at the
@@ -384,7 +416,7 @@ impl ChartPane {
     /// the same step, so their names line up rather than only the top-left
     /// one moving.
     pub fn set_start_clearance(&self, clearance: i32) {
-        if let Some(legend) = self.symbol_button.parent().and_then(|bar| bar.parent()) {
+        if let Some(legend) = self.header_row.parent() {
             legend.set_margin_start(LEGEND_MARGIN + clearance);
         }
     }
@@ -412,6 +444,55 @@ impl ChartPane {
                 self.timeframe.get().label()
             ),
             None => String::new(),
+        }
+    }
+
+    /// Put the header's parts on its line in the chart's order, and take off
+    /// the ones it does not show.
+    pub fn arrange_header(&self) {
+        let parts: [(crate::header::Part, gtk::Widget); 4] = [
+            (crate::header::Part::Symbol, self.symbol_button.clone().upcast()),
+            (crate::header::Part::Resolution, self.timeframe_menu.clone().upcast()),
+            (crate::header::Part::Change, self.change_label.clone().upcast()),
+            (crate::header::Part::Template, self.template_label.clone().upcast()),
+        ];
+        for (_, widget) in &parts {
+            if widget.parent().is_some() {
+                self.header_row.remove(widget);
+            }
+        }
+        for part in self.header.borrow().iter() {
+            if let Some((_, widget)) = parts.iter().find(|(p, _)| p == part) {
+                self.header_row.append(widget);
+            }
+        }
+    }
+
+    /// Whether the header has `part` in it, so the window only works out what
+    /// it is asked to show.
+    pub fn shows(&self, part: crate::header::Part) -> bool {
+        self.header.borrow().contains(&part)
+    }
+
+    /// The template's name, or nothing at all on a chart with none.
+    pub fn write_template(&self, name: Option<&str>) {
+        self.template_label.set_text(name.unwrap_or(""));
+        self.template_label.set_visible(name.is_some());
+    }
+
+    /// The day's move, in `colour`; nothing at all until there is one.
+    pub fn write_change(&self, change: Option<(f64, &str)>) {
+        match change {
+            Some((pct, colour)) => {
+                let text = gtk::glib::markup_escape_text(&crate::header::change_text(pct));
+                let colour = gtk::glib::markup_escape_text(colour);
+                self.change_label.set_markup(&format!("<span foreground=\"{colour}\">{text}</span>"));
+                self.change_label.set_visible(true);
+            }
+            None => {
+                self.change_label.set_text("");
+                self.change_label.set_visible(false);
+            }
         }
     }
 

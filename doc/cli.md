@@ -159,6 +159,66 @@ A parameter an indicator has no use for is refused rather than ignored —
 `--period` on a volume profile is an error, not a no-op, because silence would
 read as the command having worked.
 
+## Chart templates
+
+A chart template is a named set of indicators that charts share. A chart on a
+template shows the template's indicators, and changing the template changes
+every chart on it at once, in every chartbook. A new profile has one called
+**Default**, holding the volume study, and new charts open with it.
+
+```
+omacharts template list
+omacharts template create Momentum
+omacharts template indicator add Momentum rsi --period 14
+omacharts template indicator add Momentum macd --signal-color Amber
+omacharts chart set --template Momentum
+omacharts template default Momentum
+```
+
+`template indicator` takes the same actions and the same parameters as
+`chart indicator` — the table above applies to both — with the template named
+before the indicator. `template list` marks with `*` the one new charts open
+with, and says how many charts use each.
+
+Putting a chart on a template replaces its own indicators with the template's.
+`chart set --template none` puts it on none, which is the empty set: the chart
+is left with no indicators. To start from a template and make it the chart's
+own, change the chart's indicators instead — that is the next paragraph.
+
+**Changing a chart's indicators takes it off its template.** `chart indicator
+add`, `remove` and `set` on a chart that is on one first let go of the
+template, keeping its indicators, then make the change — and say so, because
+otherwise adding an RSI to one chart would add it to every chart on the
+template. To change all of them, change the template:
+
+```
+omacharts chart indicator add sma --period 200
+# added SMA(200) on pos:0 SPY 1D in "Macro"; it no longer uses chart
+# template "Default", and keeps the indicators it had
+```
+
+Renaming a template keeps every chart on it, since charts name it by id.
+Deleting one leaves its charts with a copy of its indicators, as their own.
+The default for new charts is also `config set chart_template NAME|none`,
+which is the same setting `template default` writes.
+
+## The header
+
+The line at a chart's top-left shows its symbol and resolution, and can also
+show the day's move — as a percentage, in the chart's own colours for a rise
+and a fall — and the name of its chart template. It is one line for the whole
+app: every chart in every chartbook shows the same parts, in the order given,
+and a window that is open changes them all at once:
+
+```
+omacharts config set chart_header symbol,resolution,change
+omacharts config set chart_header template,symbol
+```
+
+`none` is a header with nothing in it. The day's move comes from the same
+cached quotes the watchlist shows, so it is as fresh as the rail and fetches
+nothing of its own.
+
 ## Link groups
 
 A chart belongs to one of nine groups, or to none. Charts in a group show the
@@ -1093,6 +1153,7 @@ story, and adding a manifest would be a second thing to maintain for nothing.
 | `section` | the named groups inside a watchlist |
 | `chartbook` | saved arrangements of charts |
 | `chart` | the charts inside a chartbook |
+| `template` | chart templates: named sets of indicators that charts share |
 | `provider` | the data feed, and signing in to one that needs it |
 | `config` | stored preferences |
 | `cache` | the cached market data |

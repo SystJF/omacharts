@@ -65,6 +65,9 @@ const SHARED: &[&str] = &[
     "chart_log_scale",
     "chart_shows_drawings",
     "chart_sends_drawings",
+    "chart_template",
+    "chart_templates",
+    "chart_header",
 ];
 
 pub fn kind(key: &str) -> Kind {
@@ -92,6 +95,10 @@ mod tests {
         assert_eq!(kind("cooldown.yahoo"), Kind::Bookkeeping);
         assert_eq!(kind("watchlist_link_3"), Kind::Shared);
         assert_eq!(kind("something new"), Kind::Shared);
+        // Somebody's own sets of indicators, and which one new charts use.
+        assert_eq!(kind("chart_templates"), Kind::Shared);
+        assert_eq!(kind("chart_template"), Kind::Shared);
+        assert_eq!(kind("chart_header"), Kind::Shared);
     }
 
     /// Every key the app writes has been given a kind on purpose.

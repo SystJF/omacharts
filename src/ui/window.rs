@@ -32,6 +32,7 @@ use crate::chart_defaults::ChartDefaults;
 use crate::theming::Theming;
 use crate::ui::chart::{Drawn, Echo};
 use crate::ui::pane::{self, ChartPane, Node};
+use crate::ui::drop_line;
 use crate::ui::screenshot;
 use omacharts_engine::link;
 use omacharts_engine::LinkGroup;
@@ -204,6 +205,9 @@ const SHORTCUT_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("End", "Jump to the latest bar"),
             ("Ctrl+Esc", "Reset the view"),
             ("Ctrl+Shift+G", "Show or hide the gridlines"),
+            ("Ctrl+Alt+Shift+1 … 9", "Chart template N, in the order they are listed"),
+            ("Ctrl+Alt+Shift+0", "No chart template"),
+            ("Ctrl+Alt+Shift+PgUp PgDn", "Previous or next chart template"),
             ("Esc", "Back to the chart"),
         ],
     ),
@@ -482,6 +486,7 @@ mod tests {
                 suffix: None,
                 timeframe: "1h".to_string(),
                 indicators: Vec::new(),
+                template: None,
                 bar_style: "candle".to_string(),
                 colouring: None,
                 session: "extended".to_string(),
@@ -553,6 +558,7 @@ mod tests {
             suffix: None,
             timeframe: "1D".to_string(),
             indicators: Vec::new(),
+            template: None,
             bar_style: "candle".to_string(),
                 colouring: None,
             session: "extended".to_string(),
@@ -579,6 +585,42 @@ mod tests {
             sidebar_width: None,
             maximized: None,
         }
+    }
+
+    /// The number row by position: 1 to 9 then 0, whatever it types.
+    #[test]
+    fn the_number_row_is_read_by_where_a_key_is() {
+        assert_eq!(number_row(10), Some(1));
+        assert_eq!(number_row(18), Some(9));
+        assert_eq!(number_row(19), Some(0));
+        assert_eq!(number_row(20), None, "the key after 0 is minus");
+        assert_eq!(number_row(9), None, "escape");
+    }
+
+    /// None and two templates: stepping goes round both ways.
+    #[test]
+    fn stepping_through_templates_wraps_at_either_end() {
+        assert_eq!(step_round(0, 2, 1), 1);
+        assert_eq!(step_round(2, 2, 1), 0, "past the last is None");
+        assert_eq!(step_round(0, 2, -1), 2, "before None is the last");
+        assert_eq!(step_round(0, 0, 1), 0, "with no templates, None stays None");
+    }
+
+    /// A chart written down before there were templates keeps its own
+    /// indicators: nothing on screen changes for anybody upgrading.
+    #[test]
+    fn a_chart_written_before_templates_is_on_none_and_one_since_keeps_its_template() {
+        let workspace = parse_workspace(ONE_ARRANGEMENT).expect("the old shape should parse");
+        assert!(workspace.books[0].panes.iter().all(|pane| pane.template.is_none()));
+
+        let store = Store::memory().expect("an in-memory store");
+        let mut held = stored_pane(1, "SPY", LinkGroup::None);
+        held.template = Some(3);
+        let book = book_of("Macro", vec![held]);
+        let json = serde_json::to_string(&Workspace { books: vec![book], active: 0 }).unwrap();
+        store.set_setting(SETTING_WORKSPACE, &json);
+        let back = parse_workspace(&store.setting(SETTING_WORKSPACE).unwrap()).unwrap();
+        assert_eq!(back.books[0].panes[0].template, Some(3));
     }
 
     /// Something may well have been filling the window when one of these was
@@ -1151,8 +1193,47 @@ fn group_state(group: LinkGroup) -> glib::Variant {
     (group.number().unwrap_or(0) as i32).to_variant()
 }
 
-fn popup_menu(model: &gio::Menu, over: &impl IsA<gtk::Widget>, x: f64, y: f64) {
-    popup_menu_with(model, over, x, y, Vec::new());
+/// Which digit of the number row a hardware keycode is, whatever the layout
+/// makes it type.
+///
+/// Evdev's codes, which are what GDK hands over on Linux, offset by the eight
+/// X has always added: the row runs 1 to 9 from code 10, and 0 is after them.
+fn number_row(keycode: u32) -> Option<usize> {
+    match keycode {
+        10..=18 => Some(keycode as usize - 9),
+        19 => Some(0),
+        _ => None,
+    }
+}
+
+/// Where stepping `by` from `current` lands among None and the templates,
+/// wrapping at either end. Positions, with 0 for None.
+fn step_round(current: usize, count: usize, by: i32) -> usize {
+    let len = count as i32 + 1;
+    (current as i32 + by).rem_euclid(len) as usize
+}
+
+/// The key that picks the template at `n` in the list, or none for 0.
+fn template_accel(n: usize) -> String {
+    format!("<Ctrl><Alt><Shift>{n}")
+}
+
+/// A chart template as a menu action's target: its id, or `none`, spelled
+/// the way the default for new charts is written down.
+fn template_state(template: Option<u32>) -> glib::Variant {
+    match template {
+        Some(id) => id.to_string().to_variant(),
+        None => crate::chart_defaults::NO_TEMPLATE.to_variant(),
+    }
+}
+
+fn popup_menu(
+    model: &gio::Menu,
+    over: &impl IsA<gtk::Widget>,
+    x: f64,
+    y: f64,
+) -> gtk::PopoverMenu {
+    popup_menu_with(model, over, x, y, Vec::new())
 }
 
 /// The same, with widgets of our own standing in for the items that name
@@ -1164,7 +1245,7 @@ fn popup_menu_with(
     x: f64,
     y: f64,
     children: Vec<(String, gtk::Widget)>,
-) {
+) -> gtk::PopoverMenu {
     // Sliding submenus, which is GTK's default and not what this used.
     //
     // `NESTED` puts each submenu in a popover of its own, and a popover of
@@ -1200,7 +1281,9 @@ fn popup_menu_with(
     // GtkPopoverMenu absorbs the difference by scrolling, which is why the last
     // item sat under the bottom corner. The separator sync runs at a higher
     // idle priority than this one, so by the time it pops it is whole.
-    glib::idle_add_local_once(move || popover.popup());
+    let shown = popover.clone();
+    glib::idle_add_local_once(move || shown.popup());
+    popover
 }
 
 /// How many symbols either side of the selection to fetch ahead.
@@ -1254,7 +1337,14 @@ struct StoredPane {
     #[serde(default)]
     suffix: Option<String>,
     timeframe: String,
+    /// What the chart shows. For a chart on a template, a copy of the
+    /// template's, so that a command reading the arrangement reads what is on
+    /// screen and a chart whose template has gone still has something to show.
     indicators: Vec<Indicator>,
+    /// The chart template it shows, by id. Missing from a chart written
+    /// before there were templates, and every one of those had its own.
+    #[serde(default)]
+    template: Option<u32>,
     bar_style: String,
     /// How the theme's candle colours are painted. Missing from a chart
     /// written before charts were painted one by one.
@@ -1588,6 +1678,7 @@ pub struct Window {
     linked_action: RefCell<Option<gio::SimpleAction>>,
     bar_style_action: RefCell<Option<gio::SimpleAction>>,
     session_action: RefCell<Option<gio::SimpleAction>>,
+    template_action: RefCell<Option<gio::SimpleAction>>,
     grid_action: RefCell<Option<gio::SimpleAction>>,
     auto_scale_action: RefCell<Option<gio::SimpleAction>>,
     log_scale_action: RefCell<Option<gio::SimpleAction>>,
@@ -1757,6 +1848,7 @@ impl Window {
             linked_action: RefCell::new(None),
             bar_style_action: RefCell::new(None),
             session_action: RefCell::new(None),
+            template_action: RefCell::new(None),
             grid_action: RefCell::new(None),
             auto_scale_action: RefCell::new(None),
             log_scale_action: RefCell::new(None),
@@ -1985,22 +2077,26 @@ impl Window {
 
     // -- panes -------------------------------------------------------------
 
-    /// A chart as a new one opens: the defaults from the preferences.
+    /// A chart as a new one opens: the defaults from the preferences, and the
+    /// template they name in place of `indicators` when they name one.
     fn new_default_pane(
         self: &Rc<Self>,
         timeframe: Timeframe,
         indicators: Vec<Indicator>,
     ) -> Rc<ChartPane> {
         let defaults = ChartDefaults::load(&self.store);
+        let template = defaults.template.and_then(|id| crate::templates::get(&self.store, id));
         let pane = self.new_pane(
             timeframe,
-            indicators,
+            template.as_ref().map(|t| t.indicators.clone()).unwrap_or(indicators),
             defaults.bar_style,
             defaults.colouring,
             defaults.session,
             defaults.show_grid,
             LinkGroup::Group(1),
         );
+        pane.template.set(template.map(|t| t.id));
+        self.show_header_on(&pane);
         pane.view.set_price_log(defaults.log_scale);
         pane.shows_drawings.set(defaults.shows_drawings);
         pane.sends_drawings.set(defaults.sends_drawings);
@@ -2156,7 +2252,14 @@ impl Window {
                     | omacharts_engine::Params::Stochastic { height, .. } => *height = share,
                     _ => return,
                 }
-                resizer.set_indicators_of(&pane, indicators);
+                // A height is geometry rather than a choice of indicators, so
+                // dragging one on a chart that is on a template does not take
+                // it off the template: the template takes the height, and the
+                // charts on it keep one shape.
+                match pane.template.get() {
+                    Some(template) => resizer.set_template_indicators(template, indicators),
+                    None => resizer.set_indicators_of(&pane, indicators),
+                }
             }
         });
 
@@ -2310,6 +2413,9 @@ impl Window {
         if let Some(action) = self.session_action.borrow().as_ref() {
             action.set_state(&pane.session.get().key().to_variant());
         }
+        if let Some(action) = self.template_action.borrow().as_ref() {
+            action.set_state(&template_state(pane.template.get()));
+        }
         if let Some(action) = self.grid_action.borrow().as_ref() {
             action.set_state(&pane.show_grid.get().to_variant());
         }
@@ -2367,6 +2473,8 @@ impl Window {
             from.show_grid.get(),
             from.linked.get(),
         );
+        added.template.set(from.template.get());
+        self.show_header_on(&added);
         added.view.set_price_auto(from.view.price_auto());
         added.view.set_price_log(from.view.price_log());
         let next = self.layout.borrow().split(from.id, added.id, horizontal);
@@ -2971,6 +3079,7 @@ impl Window {
                     suffix,
                     timeframe: pane.timeframe.get().key(),
                     indicators: pane.indicators.borrow().clone(),
+                    template: pane.template.get(),
                     bar_style: pane.bar_style.get().key().to_string(),
                     colouring: Some(pane.colouring.get().key().to_string()),
                     session: pane.session.get().key().to_string(),
@@ -3146,13 +3255,18 @@ impl Window {
         self.panes.borrow_mut().clear();
         let mut restored: Vec<(Rc<ChartPane>, StoredPane)> = Vec::new();
         let defaults = ChartDefaults::load(&self.store);
+        let templates = crate::templates::all(&self.store);
         for stored in book.panes {
             if !wanted.contains(&stored.id) {
                 continue;
             }
+            // Read off the template rather than the copy, which a template
+            // changed while this book was not on screen has left behind. A
+            // template that has gone leaves the chart the copy, as its own.
+            let template = stored.template.and_then(|id| templates.iter().find(|t| t.id == id));
             let pane = self.new_pane(
                 Timeframe::parse(&stored.timeframe).unwrap_or(Timeframe::days(1)),
-                stored.indicators.clone(),
+                template.map(|t| t.indicators.clone()).unwrap_or_else(|| stored.indicators.clone()),
                 BarStyle::from_key(&stored.bar_style).unwrap_or_default(),
                 // A chart written before it had a colouring of its own was
                 // wearing the one every chart wore, which is the default's.
@@ -3165,6 +3279,8 @@ impl Window {
                 stored.show_grid,
                 stored.linked,
             );
+            pane.template.set(template.map(|t| t.id));
+            self.show_header_on(&pane);
             pane.shows_drawings.set(stored.shows_drawings);
             pane.sends_drawings.set(stored.sends_drawings);
             pane.view.set_sends(stored.sends_drawings);
@@ -3742,20 +3858,22 @@ impl Window {
         source.connect_drag_end(move |_, _, _| finished.set(false));
         tab.add_controller(source);
 
-        let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
+        let from = |value: &glib::Value| value.get::<String>().ok()?.parse::<usize>().ok();
         let mover = self.clone();
-        target.connect_drop(move |_, value, _, _| {
-            let Ok(from) = value.get::<String>().unwrap_or_default().parse::<usize>() else {
-                return false;
-            };
-            // A tab dropped on itself is a click that travelled a few pixels
-            // too far, and means nothing.
-            if from == index {
-                return false;
-            }
-            mover.move_book(from, index);
-            true
-        });
+        let target = drop_line::target(
+            &tab,
+            move |value| drop_line::edge(from(value)?, index),
+            move |value| {
+                let Some(from) = from(value) else { return false };
+                // A tab dropped on itself is a click that travelled a few
+                // pixels too far, and means nothing.
+                if from == index {
+                    return false;
+                }
+                mover.move_book(from, index);
+                true
+            },
+        );
         tab.add_controller(target);
 
         // Right-clicking a tab switches to it first, then offers the menu for
@@ -4305,11 +4423,35 @@ impl Window {
 
         let keys = gtk::EventControllerKey::new();
         let this = self.clone();
-        keys.connect_key_pressed(move |_, key, _, state| {
+        keys.connect_key_pressed(move |_, key, keycode, state| {
             use gtk::gdk::Key;
             let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
             let alt = state.contains(gtk::gdk::ModifierType::ALT_MASK);
             let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+
+            // Ctrl+Alt+Shift and the number row picks the focused chart's
+            // template: 1 to 9 the templates in the order they are listed, 0
+            // none. By where the key is rather than what it types, because
+            // with Shift held the row types "!" and "\"" on one layout, "!"
+            // and "@" on another and digits only on a third — the trap the
+            // note on chart settings in `shortcuts` describes.
+            if ctrl && alt && shift {
+                if let Some(n) = number_row(keycode) {
+                    this.pick_template(n);
+                    return glib::Propagation::Stop;
+                }
+                // Page up and down rather than the arrows, which with these
+                // three resize the chart and rotate the rail's watchlists.
+                let step = match key {
+                    Key::Page_Up | Key::KP_Page_Up => Some(-1),
+                    Key::Page_Down | Key::KP_Page_Down => Some(1),
+                    _ => None,
+                };
+                if let Some(step) = step {
+                    this.step_template(step);
+                    return glib::Propagation::Stop;
+                }
+            }
 
             // Ctrl and a digit shows that watchlist, counting down the
             // switcher from 1. From anywhere, rail open or not: nothing is
@@ -4631,6 +4773,7 @@ impl Window {
                             && let Some(rail) = this.watchlist.borrow().as_ref()
                         {
                             rail.refresh_quotes();
+                            this.write_changes();
                         }
                         // Any failure, not only a refusal: a batch that came
                         // back with nothing leaves every row in it due, and
@@ -4811,10 +4954,15 @@ impl Window {
         // beside the symbol that stands in for it. Mapped rather than
         // visible: the strip is hidden by its row stepping aside, and only
         // the map state reaches down through the row to the strip itself.
+        // And with neither, on a header that leaves the resolution out, to
+        // the chart itself.
         let pane = self.focused_pane();
-        match pane.strip.is_mapped() {
-            true => popover.set_parent(&pane.strip),
-            false => popover.set_parent(&pane.timeframe_menu),
+        if pane.strip.is_mapped() {
+            popover.set_parent(&pane.strip);
+        } else if pane.timeframe_menu.is_mapped() {
+            popover.set_parent(&pane.timeframe_menu);
+        } else {
+            popover.set_parent(&pane.view.area);
         }
         // Every number typed builds a fresh one, so each has to let go of the
         // strip when it closes or they pile up on it.
@@ -4904,7 +5052,6 @@ impl Window {
     fn open_preferences(self: &Rc<Self>) {
         let this = self.clone();
         let editor = self.clone();
-        let applier = self.clone();
         let restorer = self.clone();
         Preferences::present(
             &self.window,
@@ -4917,8 +5064,8 @@ impl Window {
                 this.adopt_feed();
             }),
             Rc::new(move || editor.edit_timeframes()),
-            Rc::new(move || applier.apply_chart_defaults()),
             Rc::new(move || restorer.adopt_restored()),
+            self.clone(),
         );
     }
 
@@ -5205,6 +5352,7 @@ impl Window {
         // back when the catalogue lands.
         *pane.pending.borrow_mut() = None;
         pane.write_readout();
+        self.write_header_of(pane);
         if pane.id == self.focused.get() {
             self.store.set_setting(LAST_SYMBOL, &instrument.symbol);
             self.store
@@ -5699,6 +5847,7 @@ impl Window {
             // column may now have numbers it did not have a moment ago.
             if let Some(watchlist) = self.watchlist.borrow().as_ref() {
                 watchlist.refresh_quotes();
+                self.write_changes();
                 watchlist.set_trouble(trouble);
             }
             return;
@@ -5713,6 +5862,7 @@ impl Window {
         }
         if let Some(watchlist) = self.watchlist.borrow().as_ref() {
             watchlist.refresh_quotes();
+            self.write_changes();
             watchlist.set_trouble(trouble);
         }
     }
@@ -5847,6 +5997,7 @@ impl Window {
                     Written::Flushed { .. } => {
                         if let Some(watchlist) = this.watchlist.borrow().as_ref() {
                             watchlist.refresh_quotes();
+                            this.write_changes();
                         }
                     }
                 }
@@ -5943,6 +6094,7 @@ impl Window {
         }
         if let Some(watchlist) = self.watchlist.borrow().as_ref() {
             watchlist.refresh_quotes();
+            self.write_changes();
         }
     }
 
@@ -6039,6 +6191,7 @@ impl Window {
                 }
                 if let Some(watchlist) = self.watchlist.borrow().as_ref() {
                     watchlist.refresh_quotes();
+                    self.write_changes();
                 }
             }
             // The end of the series: each chart's view of the bars from the
@@ -6163,11 +6316,30 @@ impl Window {
         self.set_indicators_of(&pane, indicators);
     }
 
+    /// Give one chart these indicators as its own.
+    ///
+    /// A chart on a template lets go of it first, keeping what it showed:
+    /// every way of changing a chart's indicators from the chart itself — the
+    /// picker, the legend, a strip's corner, a command — arrives here, and
+    /// none of them is asking to change every other chart on the template.
+    /// The template's own editor is how that is asked for.
     fn set_indicators_of(self: &Rc<Self>, pane: &Rc<ChartPane>, indicators: Vec<Indicator>) {
+        if pane.template.take().is_some() {
+            self.write_header_of(pane);
+            if pane.id == self.focused.get() {
+                self.sync_chart_actions(pane);
+            }
+        }
         // Still written to the one stored set, which is what a brand new chart
         // starts from: the next split should look like the last thing you set
         // up rather than like the defaults.
         self.store.set_indicators(&indicators);
+        self.show_indicators(pane, indicators);
+        self.save_workspace();
+    }
+
+    /// Draw a chart with these indicators, writing nothing down.
+    fn show_indicators(self: &Rc<Self>, pane: &Rc<ChartPane>, indicators: Vec<Indicator>) {
         *pane.indicators.borrow_mut() = indicators;
         self.rebuild_legend_of(pane);
         let instrument = pane.instrument.borrow().clone();
@@ -6175,6 +6347,281 @@ impl Window {
             self.series.borrow_mut().clear();
             self.show_in(pane, instrument);
         }
+    }
+
+    // -- chart templates ---------------------------------------------------
+
+    /// Every chart template, in the order they were made.
+    pub fn templates(&self) -> Vec<crate::templates::Template> {
+        crate::templates::all(&self.store)
+    }
+
+    /// The template the focused chart is on, if it is on one.
+    pub fn focused_template(&self) -> Option<u32> {
+        self.focused_pane().template.get()
+    }
+
+    /// Put the focused chart on a template, or on none.
+    ///
+    /// Onto one, the chart shows the template's indicators in place of its
+    /// own, which go. Onto none, it shows no indicators at all: None is a
+    /// choice of indicators like the others, the empty one. A chart is taken
+    /// off its template keeping what it showed by changing its indicators,
+    /// not by this.
+    pub fn set_template(self: &Rc<Self>, template: Option<u32>) {
+        let pane = self.focused_pane();
+        self.put_on_template(&pane, template);
+        self.sync_chart_actions(&pane);
+        self.save_workspace();
+    }
+
+    /// The template at `n` in the order they are listed, counting from 1, or
+    /// none for 0. A number with no template behind it does nothing.
+    fn pick_template(self: &Rc<Self>, n: usize) {
+        let chosen = match n {
+            0 => None,
+            n => match self.templates().get(n - 1) {
+                Some(template) => Some(template.id),
+                None => return,
+            },
+        };
+        // None again still clears a chart showing indicators of its own,
+        // which is the one thing pressing it there can mean.
+        if chosen.is_none() || chosen != self.focused_template() {
+            self.choose_template(chosen, || {});
+        }
+    }
+
+    /// The next or previous of None and the templates, round and round.
+    fn step_template(self: &Rc<Self>, by: i32) {
+        let templates = self.templates();
+        let at = self
+            .focused_template()
+            .and_then(|id| templates.iter().position(|t| t.id == id))
+            .map_or(0, |at| at + 1);
+        let next = step_round(at, templates.len(), by);
+        let chosen = next.checked_sub(1).and_then(|at| templates.get(at)).map(|t| t.id);
+        self.choose_template(chosen, || {});
+    }
+
+    /// Put the focused chart on a template or on none, asking first when that
+    /// would drop indicators of its own, and run `done` once it is settled
+    /// either way.
+    ///
+    /// Only then: a chart already on a template has nothing of its own to
+    /// lose, one with nothing on it has nothing to lose at all, and one
+    /// showing exactly what some template holds can have it back by choosing
+    /// that template.
+    pub fn choose_template(self: &Rc<Self>, template: Option<u32>, done: impl Fn() + 'static) {
+        let pane = self.focused_pane();
+        let chosen = template.and_then(|id| crate::templates::get(&self.store, id));
+        let own = pane.indicators.borrow().len();
+        let kept_elsewhere =
+            self.templates().iter().any(|t| *pane.indicators.borrow() == t.indicators);
+        let loses = pane.template.get().is_none() && own > 0 && !kept_elsewhere;
+        // Choosing what it already shows loses nothing either.
+        let same = chosen.as_ref().is_some_and(|t| *pane.indicators.borrow() == t.indicators);
+        if !loses || same {
+            self.set_template(template);
+            done();
+            return;
+        }
+        let count = match own {
+            1 => "one".to_string(),
+            n => n.to_string(),
+        };
+        let (title, body, verb) = match &chosen {
+            Some(chosen) => (
+                "Use Chart Template?",
+                format!(
+                    "This chart will show the indicators of \u{201c}{}\u{201d} in place of its own {count}.",
+                    chosen.name
+                ),
+                "Replace Indicators",
+            ),
+            None => (
+                "Remove Indicators?",
+                format!(
+                    "This chart will show no indicators, and its own {count} will be removed."
+                ),
+                "Remove Indicators",
+            ),
+        };
+        let dialog = adw::AlertDialog::new(Some(title), Some(&body));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("replace", verb);
+        dialog.set_response_appearance("replace", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let this = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response == "replace" {
+                this.set_template(template);
+            } else {
+                // Put the menu's mark back on what the chart is still on.
+                this.sync_chart_actions(&this.focused_pane());
+            }
+            done();
+        });
+        dialog.present(Some(&self.window));
+    }
+
+    fn put_on_template(self: &Rc<Self>, pane: &Rc<ChartPane>, template: Option<u32>) {
+        let found = template.and_then(|id| crate::templates::get(&self.store, id));
+        pane.template.set(found.as_ref().map(|t| t.id));
+        self.write_header_of(pane);
+        let indicators = found.map(|t| t.indicators).unwrap_or_default();
+        if *pane.indicators.borrow() != indicators {
+            self.show_indicators(pane, indicators);
+        }
+    }
+
+    /// Change what a template holds, and every chart on it with it.
+    pub fn set_template_indicators(self: &Rc<Self>, template: u32, indicators: Vec<Indicator>) {
+        crate::templates::set_indicators(&self.store, template, indicators);
+        self.follow_templates();
+    }
+
+    pub fn create_template(self: &Rc<Self>, name: &str) -> u32 {
+        crate::templates::create(&self.store, name).id
+    }
+
+    pub fn rename_template(self: &Rc<Self>, template: u32, name: &str) {
+        crate::templates::rename(&self.store, template, name);
+        // The menus and the chart's own settings read the name when they are
+        // opened; a header showing it is the one place it is on screen.
+        let panes = self.panes.borrow().clone();
+        for pane in panes.iter().filter(|pane| pane.template.get() == Some(template)) {
+            self.write_header_of(pane);
+        }
+    }
+
+    // -- the header ------------------------------------------------------
+
+    /// The header as it is set now, on every chart on screen: what follows
+    /// a change to it, from the preferences or a command.
+    ///
+    /// The charts of the other chartbooks are not built until their book is
+    /// open, and they read the setting then.
+    pub fn apply_header(self: &Rc<Self>) {
+        let panes = self.panes.borrow().clone();
+        for pane in &panes {
+            self.show_header_on(pane);
+        }
+    }
+
+    /// One chart's header, as the setting says.
+    fn show_header_on(self: &Rc<Self>, pane: &Rc<ChartPane>) {
+        *pane.header.borrow_mut() = crate::header::load(&self.store);
+        pane.arrange_header();
+        self.write_header_of(pane);
+    }
+
+    /// Fill in the parts of a chart's header only the window knows: the
+    /// template's name, and the day's move. Each only when the header shows
+    /// it, so a chart that does not ask for the move never reads a quote.
+    fn write_header_of(self: &Rc<Self>, pane: &Rc<ChartPane>) {
+        use crate::header::Part;
+        if pane.shows(Part::Template) {
+            let name = pane.template.get().and_then(|id| crate::templates::get(&self.store, id));
+            pane.write_template(name.as_ref().map(|t| t.name.as_str()));
+        }
+        if pane.shows(Part::Change) {
+            self.write_change_of(pane);
+        }
+    }
+
+    /// Every chart's day's move, after quotes have moved.
+    ///
+    /// Out of the cache the rail reads, through the same lookup, so the
+    /// header and the rail cannot disagree and nothing is fetched for it.
+    /// Called where the rail's own numbers are refreshed — never from a draw.
+    fn write_changes(self: &Rc<Self>) {
+        let panes = self.panes.borrow().clone();
+        for pane in panes.iter().filter(|pane| pane.shows(crate::header::Part::Change)) {
+            self.write_change_of(pane);
+        }
+    }
+
+    fn write_change_of(self: &Rc<Self>, pane: &Rc<ChartPane>) {
+        let instrument = pane.instrument.borrow().clone();
+        let provider = self.provider();
+        let quote = instrument.and_then(|instrument| {
+            let symbol = provider.symbol_for(&instrument)?;
+            crate::cli::quote_at(&self.store, &format!("{}:{symbol}", provider.id()))
+        });
+        // In the chart's own colours for a rise and a fall, as its candles
+        // are painted — a chart whose rises are red says so here too.
+        let scheme = pane_scheme(pane, &self.theme());
+        let direction = |change: f64| omacharts_engine::Direction::of_change(change);
+        match quote {
+            Some(quote) => {
+                let colour = scheme.outline(direction(quote.change)).to_string();
+                pane.write_change(Some((quote.change_pct, &colour)));
+            }
+            None => pane.write_change(None),
+        }
+    }
+
+    /// Delete a template. Its charts keep what it was showing them.
+    pub fn delete_template(self: &Rc<Self>, template: u32) {
+        crate::templates::delete(&self.store, template);
+        self.follow_templates();
+    }
+
+    /// How many charts, in every chartbook, are on `template`.
+    pub fn charts_on_template(&self, template: u32) -> usize {
+        let active = self.active.get();
+        let on_screen =
+            self.panes.borrow().iter().filter(|pane| pane.template.get() == Some(template)).count();
+        let elsewhere: usize = self
+            .books
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| *at != active)
+            .map(|(_, book)| book.panes.iter().filter(|p| p.template == Some(template)).count())
+            .sum();
+        on_screen + elsewhere
+    }
+
+    /// Bring every chart on a template up to what the template now holds.
+    ///
+    /// The charts on screen are redrawn, and only the ones whose indicators
+    /// actually changed; the books that are not on screen are only written
+    /// down, and read the template again when they are next built anyway. A
+    /// chart whose template has gone keeps what it was showing, as its own.
+    fn follow_templates(self: &Rc<Self>) {
+        let templates = crate::templates::all(&self.store);
+        let held = |id: u32| templates.iter().find(|t| t.id == id).map(|t| &t.indicators);
+        let panes = self.panes.borrow().clone();
+        for pane in &panes {
+            let Some(id) = pane.template.get() else { continue };
+            match held(id) {
+                Some(indicators) if *pane.indicators.borrow() != *indicators => {
+                    self.show_indicators(pane, indicators.clone());
+                }
+                Some(_) => {}
+                None => {
+                    pane.template.set(None);
+                    self.write_header_of(pane);
+                }
+            }
+        }
+        let active = self.active.get();
+        for (at, book) in self.books.borrow_mut().iter_mut().enumerate() {
+            if at == active {
+                continue;
+            }
+            for stored in &mut book.panes {
+                let Some(id) = stored.template else { continue };
+                match held(id) {
+                    Some(indicators) => stored.indicators = indicators.clone(),
+                    None => stored.template = None,
+                }
+            }
+        }
+        self.sync_chart_actions(&self.focused_pane());
         self.save_workspace();
     }
 
@@ -6401,30 +6848,102 @@ impl Window {
     }
 
     /// Put the focused chart back to what a new chart opens with.
-    pub fn reset_chart_to_defaults(self: &Rc<Self>) {
+    /// The template is chosen the way any other choice of it is, asking first
+    /// when that would drop indicators of the chart's own; `done` runs once
+    /// that is settled either way.
+    pub fn reset_chart_to_defaults(self: &Rc<Self>, done: impl Fn() + 'static) {
         let defaults = ChartDefaults::load(&self.store);
         let pane = self.focused_pane();
-        self.adopt_defaults(&pane, &defaults);
+        self.adopt_looks(&pane, &defaults);
         self.sync_chart_actions(&pane);
         self.redraw_current();
         self.save_workspace();
+        self.choose_template(defaults.template, done);
     }
 
-    /// Every chart, in every chartbook, to what a new chart opens with.
-    pub fn apply_chart_defaults(self: &Rc<Self>) {
+    /// Every chart, in every chartbook, to what a new chart opens with,
+    /// asking first when charts would lose indicators of their own; `applied`
+    /// runs only if it went ahead.
+    pub fn apply_chart_defaults(self: &Rc<Self>, applied: impl Fn() + 'static) {
         let defaults = ChartDefaults::load(&self.store);
+        let templates = self.templates();
+        let chosen = defaults.template.and_then(|id| templates.iter().find(|t| t.id == id));
+        // The same test as choosing a template for one chart: a chart on a
+        // template, or showing exactly what some template holds, has nothing
+        // of its own to lose.
+        let loses = |template: Option<u32>, indicators: &[Indicator]| {
+            template.is_none()
+                && !indicators.is_empty()
+                && !templates.iter().any(|t| t.indicators == indicators)
+        };
+        let active = self.active.get();
+        let on_screen = self
+            .panes
+            .borrow()
+            .iter()
+            .filter(|pane| loses(pane.template.get(), &pane.indicators.borrow()))
+            .count();
+        let elsewhere: usize = self
+            .books
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| *at != active)
+            .map(|(_, book)| {
+                book.panes.iter().filter(|stored| loses(stored.template, &stored.indicators)).count()
+            })
+            .sum();
+        let count = on_screen + elsewhere;
+        if count == 0 {
+            self.apply_chart_defaults_now(&defaults);
+            applied();
+            return;
+        }
+        let charts = match count {
+            1 => "One chart has indicators of its own".to_string(),
+            n => format!("{n} charts have indicators of their own"),
+        };
+        let body = match chosen {
+            Some(chosen) => format!(
+                "{charts}, which will be replaced by the indicators of \u{201c}{}\u{201d}.",
+                chosen.name
+            ),
+            None => format!("{charts}, which will be removed."),
+        };
+        let dialog = adw::AlertDialog::new(Some("Apply to All Charts?"), Some(&body));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("apply", "Apply to All Charts");
+        dialog.set_response_appearance("apply", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let this = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response == "apply" {
+                this.apply_chart_defaults_now(&ChartDefaults::load(&this.store));
+                applied();
+            }
+        });
+        dialog.present(Some(&self.window));
+    }
+
+    fn apply_chart_defaults_now(self: &Rc<Self>, defaults: &ChartDefaults) {
         let panes = self.panes.borrow().clone();
         for pane in &panes {
-            self.adopt_defaults(pane, &defaults);
+            self.adopt_defaults(pane, defaults);
         }
         // The books not on screen are only written down, so they are changed
         // where they are written.
         let active = self.active.get();
+        let template = defaults.template.and_then(|id| crate::templates::get(&self.store, id));
         for (at, book) in self.books.borrow_mut().iter_mut().enumerate() {
             if at == active {
                 continue;
             }
             for stored in &mut book.panes {
+                // Onto the default template, or onto none and no indicators:
+                // the same two answers a chart on screen gets.
+                stored.template = template.as_ref().map(|t| t.id);
+                stored.indicators = template.as_ref().map(|t| t.indicators.clone()).unwrap_or_default();
                 stored.bar_style = defaults.bar_style.key().to_string();
                 stored.colouring = Some(defaults.colouring.key().to_string());
                 stored.session = defaults.session.key().to_string();
@@ -6445,6 +6964,12 @@ impl Window {
     /// One chart to the defaults, drawn as it now is. Drawings move the way
     /// the switches in its own settings move them.
     fn adopt_defaults(self: &Rc<Self>, pane: &Rc<ChartPane>, defaults: &ChartDefaults) {
+        self.adopt_looks(pane, defaults);
+        self.put_on_template(pane, defaults.template);
+    }
+
+    /// Everything of the defaults but the template.
+    fn adopt_looks(self: &Rc<Self>, pane: &Rc<ChartPane>, defaults: &ChartDefaults) {
         pane.bar_style.set(defaults.bar_style);
         pane.view.set_bar_style(defaults.bar_style);
         pane.colouring.set(defaults.colouring);
@@ -7129,6 +7654,32 @@ impl Window {
         }
         menu.append_submenu(Some("Session"), &sessions);
 
+        // Built from the templates as they are now, every time the menu
+        // opens, so one made or renamed a moment ago is already here.
+        //
+        // Each says its key, Ctrl+Alt+Shift and its place in the list, down to
+        // the ninth. The keys themselves are taken by where they are on the
+        // keyboard, by the window and, while it is open, by the menu below.
+        let templates = gio::Menu::new();
+        let none = gio::MenuItem::new(Some("None"), None);
+        none.set_action_and_target_value(Some("chart.template"), Some(&template_state(None)));
+        none.set_attribute_value("accel", Some(&template_accel(0).to_variant()));
+        templates.append_item(&none);
+        let made = gio::Menu::new();
+        for (at, template) in self.templates().into_iter().enumerate() {
+            let item = gio::MenuItem::new(Some(&template.name), None);
+            item.set_action_and_target_value(
+                Some("chart.template"),
+                Some(&template_state(Some(template.id))),
+            );
+            if at < 9 {
+                item.set_attribute_value("accel", Some(&template_accel(at + 1).to_variant()));
+            }
+            made.append_item(&item);
+        }
+        templates.append_section(None, &made);
+        menu.append_submenu(Some("Template"), &templates);
+
         // With the other two choices about how the chart is drawn, and drawn
         // as a tick: "Gridlines" as a plain row could not say whether this
         // chart has any.
@@ -7180,7 +7731,37 @@ impl Window {
         let (wx, wy) = area
             .translate_coordinates(&self.window, x, y)
             .unwrap_or((x, y));
-        popup_menu(&menu, &self.window, wx, wy);
+        let popover = popup_menu(&menu, &self.window, wx, wy);
+
+        // The template rows' keys are drawn, and GTK also binds what they
+        // draw while the menu is open — by what the key types, which on a
+        // layout whose number row types other digits with Shift held picks a
+        // different template than the same key does with the menu closed.
+        // So the menu takes the number row first, by where the key is, the
+        // way the window does.
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let this = self.clone();
+        let closing = popover.downgrade();
+        keys.connect_key_pressed(move |_, _, keycode, state| {
+            use gtk::gdk::ModifierType;
+            let chord = ModifierType::CONTROL_MASK | ModifierType::ALT_MASK | ModifierType::SHIFT_MASK;
+            let Some(n) = number_row(keycode).filter(|_| state.contains(chord)) else {
+                return glib::Propagation::Proceed;
+            };
+            if let Some(popover) = closing.upgrade() {
+                popover.popdown();
+            }
+            this.pick_template(n);
+            // Closing hands the keyboard to the window's first button; back
+            // to the chart the menu was about, once it has.
+            let area = this.focused_pane().view.area.clone();
+            glib::idle_add_local_once(move || {
+                area.grab_focus();
+            });
+            glib::Propagation::Stop
+        });
+        popover.add_controller(keys);
     }
 
     /// The price axis has its own menu, and its own questions: whether the
@@ -7246,6 +7827,22 @@ impl Window {
         });
         actions.add_action(&session);
         *self.session_action.borrow_mut() = Some(session);
+
+        // The same choice as the chart's Indicators page offers, asked the
+        // same way. The state follows what was actually done, which is not
+        // what was clicked when the question is answered with Cancel.
+        let template = gio::SimpleAction::new_stateful(
+            "template",
+            Some(glib::VariantTy::STRING),
+            &template_state(self.focused_template()),
+        );
+        let this = self.clone();
+        template.connect_activate(move |_, value| {
+            let Some(key) = value.and_then(|v| v.str().map(str::to_string)) else { return };
+            this.choose_template(key.parse().ok(), || {});
+        });
+        actions.add_action(&template);
+        *self.template_action.borrow_mut() = Some(template);
 
         // Stateful over a boolean rather than taking one, because a key has
         // nothing to hand it: Ctrl+Shift+G means the other way round from
@@ -7772,11 +8369,6 @@ impl Window {
 
     pub fn indicators(&self) -> Vec<Indicator> {
         self.focused_pane().indicators.borrow().clone()
-    }
-
-    /// An id nothing on the chart is using.
-    pub fn next_indicator_id(&self) -> u32 {
-        self.focused_pane().indicators.borrow().iter().map(|i| i.id).max().unwrap_or(0) + 1
     }
 
     /// Open the chart on the symbol last looked at, or — the first time ever —
