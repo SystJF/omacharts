@@ -19,6 +19,7 @@ use omacharts_engine::theme::{
     theme_bars, BarSlot, UiSlot, FALLBACK_THEME_ID, OMARCHY_ID, SWATCH_NAMES,
 };
 
+use crate::backup;
 use crate::cache;
 use crate::chart_defaults::ChartDefaults;
 use crate::store::Store;
@@ -42,6 +43,8 @@ struct Context {
     on_edit_resolutions: Rc<dyn Fn()>,
     /// Puts every chart to the defaults on the Charts page.
     on_apply_chart_defaults: Rc<dyn Fn()>,
+    /// Has the window read back everything a restored backup changed.
+    on_restored: Rc<dyn Fn()>,
     page: adw::PreferencesPage,
     general_page: adw::PreferencesPage,
     charts_page: adw::PreferencesPage,
@@ -58,6 +61,7 @@ impl Preferences {
         on_change: Rc<dyn Fn()>,
         on_edit_resolutions: Rc<dyn Fn()>,
         on_apply_chart_defaults: Rc<dyn Fn()>,
+        on_restored: Rc<dyn Fn()>,
     ) {
         let dialog = adw::Dialog::new();
         dialog.set_title("Preferences");
@@ -97,6 +101,7 @@ impl Preferences {
             on_change,
             on_edit_resolutions,
             on_apply_chart_defaults,
+            on_restored,
             page,
             general_page,
             charts_page,
@@ -836,8 +841,211 @@ fn build_data_page(context: &Rc<Context>) {
         &context.data_page,
         context.store.clone(),
         context.on_change.clone(),
-        group,
+        vec![group, backups_group(context)],
     );
+}
+
+/// When the settings were last backed up, and the way back to any backup.
+///
+/// Below the cache rather than beside it: the cache is what can be thrown
+/// away, and this is what cannot.
+fn backups_group(context: &Rc<Context>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::new();
+    group.set_title("Backups");
+    let settings = context.store.path().map(std::path::Path::to_path_buf);
+    if let Some(path) = &settings {
+        group.set_description(Some(&format!(
+            "Taken when your settings change: up to {} from the past week, in {}.",
+            backup::MOST_KEPT,
+            home_relative(&backup::dir(path)),
+        )));
+    }
+
+    let row = adw::ActionRow::new();
+    row.set_title("Last backup");
+    let restore = gtk::Button::with_label("Restore…");
+    restore.set_valign(gtk::Align::Center);
+
+    // One closure, because taking a backup and restoring one both change the
+    // answer, and the button has nothing to open while there is nothing in it.
+    let refresh: Rc<dyn Fn()> = {
+        let (row, restore, settings) = (row.clone(), restore.clone(), settings.clone());
+        Rc::new(move || {
+            let backups = settings.as_deref().map(backup::list).unwrap_or_default();
+            row.set_subtitle(&match backups.first() {
+                Some(newest) => format!(
+                    "{} · {} kept",
+                    capitalised(&backup::when(newest.taken, chrono::Local::now())),
+                    backups.len()
+                ),
+                None => "None yet".to_string(),
+            });
+            restore.set_sensitive(!backups.is_empty());
+        })
+    };
+    refresh();
+
+    let now = gtk::Button::with_label("Back Up Now");
+    now.set_valign(gtk::Align::Center);
+    now.set_sensitive(settings.is_some());
+    let store = context.store.clone();
+    let refreshed = refresh.clone();
+    let shown = row.clone();
+    now.connect_clicked(move |_| {
+        match backup::take(&store) {
+            Ok((_, true)) => refreshed(),
+            // Said, or the button looks like it did nothing.
+            Ok((_, false)) => shown.set_subtitle("Nothing changed since the last backup"),
+            Err(error) => shown.set_subtitle(&error.to_string()),
+        }
+    });
+
+    let ctx = context.clone();
+    restore.connect_clicked(move |button| choose_backup(&ctx, button));
+
+    row.add_suffix(&now);
+    row.add_suffix(&restore);
+    group.add(&row);
+    group
+}
+
+/// The backups, newest first, to pick one to put back.
+///
+/// One dialog that is both the list and the question, with Cancel the
+/// default: a restore replaces everything on screen, and the one thing that
+/// makes that safe — what it replaces is kept — is said where the choice is
+/// made.
+fn choose_backup(context: &Rc<Context>, anchor: &gtk::Button) {
+    let Some(settings) = context.store.path() else { return };
+    let backups = backup::list(settings);
+
+    let list = gtk::ListBox::new();
+    list.add_css_class("boxed-list");
+    list.set_selection_mode(gtk::SelectionMode::None);
+    let chosen: Rc<RefCell<Option<String>>> = Rc::default();
+    let mut first: Option<gtk::CheckButton> = None;
+    let now = chrono::Local::now();
+    let mut ticks = Vec::new();
+    for item in &backups {
+        let row = adw::ActionRow::new();
+        row.set_title(&capitalised(&backup::when(item.taken, now)));
+        let tick = gtk::CheckButton::new();
+        // Grouped even when it is the only one, so it is drawn as the choice
+        // it is rather than as a box to tick.
+        let leader = first.get_or_insert_with(gtk::CheckButton::new);
+        tick.set_group(Some(&*leader));
+        row.add_prefix(&tick);
+        row.set_activatable_widget(Some(&tick));
+        list.append(&row);
+        ticks.push((tick, item.name.clone()));
+    }
+
+    let scroller = gtk::ScrolledWindow::new();
+    scroller.set_hscrollbar_policy(gtk::PolicyType::Never);
+    scroller.set_propagate_natural_height(true);
+    scroller.set_max_content_height(360);
+    scroller.set_child(Some(&list));
+
+    // Restore belongs to the list it acts on, so it sits right under it; the
+    // dialog's own buttons, below a gap, are the other ways out of it — a
+    // file from another machine, or nothing at all.
+    let restore = gtk::Button::with_label("Restore");
+    restore.add_css_class("destructive-action");
+    restore.set_margin_top(12);
+    restore.set_margin_bottom(24);
+    restore.set_sensitive(false);
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    body.append(&scroller);
+    body.append(&restore);
+
+    let dialog = adw::AlertDialog::new(Some("Restore Settings"), None);
+    dialog.set_extra_child(Some(&body));
+    // Stacked, the last response added is drawn first: Cancel last.
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("file", "Choose a File…");
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+
+    for (tick, name) in ticks {
+        let (chosen, gate) = (chosen.clone(), restore.clone());
+        tick.connect_toggled(move |tick| {
+            if tick.is_active() {
+                *chosen.borrow_mut() = Some(name.clone());
+                gate.set_sensitive(true);
+            }
+        });
+    }
+
+    let ctx = context.clone();
+    let preferences = anchor.ancestor(adw::Dialog::static_type()).and_downcast::<adw::Dialog>();
+    let anchor_kept = anchor.clone();
+    {
+        let (ctx, anchor, preferences, dialog) =
+            (ctx.clone(), anchor_kept.clone(), preferences.clone(), dialog.clone());
+        restore.connect_clicked(move |_| {
+            let Some(name) = chosen.borrow().clone() else { return };
+            dialog.close();
+            finish_restore(&ctx, &anchor, preferences.as_ref(), backup::restore(&ctx.store, &name));
+        });
+    }
+    dialog.connect_response(None, move |_, response| {
+        if response == "file" {
+            restore_from_file(&ctx, &anchor_kept, preferences.clone());
+        }
+    });
+    dialog.present(Some(anchor));
+}
+
+/// Pick a settings file — a backup copied from another machine — and put it
+/// back.
+fn restore_from_file(context: &Rc<Context>, anchor: &gtk::Button, preferences: Option<adw::Dialog>) {
+    let picker = gtk::FileDialog::new();
+    picker.set_title("Restore Settings From a File");
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some("Omacharts settings"));
+    filter.add_suffix("db");
+    let filters = gio::ListStore::new::<gtk::FileFilter>();
+    filters.append(&filter);
+    picker.set_filters(Some(&filters));
+    let parent = anchor.root().and_downcast::<gtk::Window>();
+    let (ctx, anchor) = (context.clone(), anchor.clone());
+    picker.open(parent.as_ref(), gio::Cancellable::NONE, move |answer| {
+        let Some(path) = answer.ok().and_then(|file| file.path()) else { return };
+        finish_restore(&ctx, &anchor, preferences.as_ref(), backup::restore_file(&ctx.store, &path));
+    });
+}
+
+/// After a restore: the dialog goes, since every page of it was built from
+/// the settings just replaced, and the window reads them back. A refusal
+/// says why and changes nothing.
+fn finish_restore(
+    context: &Rc<Context>,
+    anchor: &gtk::Button,
+    preferences: Option<&adw::Dialog>,
+    result: Result<backup::Restored, backup::Error>,
+) {
+    match result {
+        Ok(_) => {
+            if let Some(preferences) = preferences {
+                preferences.close();
+            }
+            (context.on_restored)();
+        }
+        Err(error) => {
+            let failed = adw::AlertDialog::new(Some("Not Restored"), Some(&error.to_string()));
+            failed.add_response("close", "Close");
+            failed.present(Some(anchor));
+        }
+    }
+}
+
+/// "today at 14:03" as the first words of a row.
+fn capitalised(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// The bar widget: one switch, and the truth about what it did.
@@ -1015,7 +1223,7 @@ fn unique_id(name: &str, taken: &[String]) -> String {
         .expect("an unbounded range runs out of nothing")
 }
 
-fn describe_bytes(bytes: i64) -> String {
+pub(crate) fn describe_bytes(bytes: i64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
     const GB: f64 = MB * 1024.0;

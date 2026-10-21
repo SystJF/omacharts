@@ -15,7 +15,7 @@ use omacharts::ui::Window;
 const APP_ID: &str = "com.jorgemanrubia.Omacharts";
 
 fn main() -> glib::ExitCode {
-    let launch = std::env::args().collect::<Vec<String>>();
+    let launch = cli::caller_paths(std::env::args().collect::<Vec<String>>());
 
     // The launch options come off first, so that everything below reads a
     // command line of commands and symbols: `--provider` says what this
@@ -148,7 +148,16 @@ fn main() -> glib::ExitCode {
                 .filter(|_| store.cache_sweep_due())
                 .map(|path| (path.to_path_buf(), store.cache_limit()));
 
+            let backups = store.path().map(std::path::Path::to_path_buf);
+
             *window.borrow_mut() = Some(Window::build(app, Rc::new(store)));
+
+            // Behind the first frame too, and on a thread of its own: a
+            // backup is for the next time something goes wrong, not for
+            // this launch.
+            if let Some(settings) = backups {
+                glib::idle_add_local_once(move || omacharts::backup::keep_taking(settings));
+            }
 
             if let Some((path, limit)) = sweep {
                 glib::idle_add_local_once(move || {
