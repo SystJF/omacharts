@@ -1,7 +1,11 @@
 //! The local database: settings, cached bars, and themes the user saved.
 //!
-//! One file, `$XDG_DATA_HOME/omacharts/omacharts.db`, and it is pure app
-//! data — never in the repo, safe to delete, rebuilt on demand.
+//! Two files in `$XDG_DATA_HOME/omacharts/`, opened as one. `omacharts.db`
+//! holds everything somebody made — settings, chartbooks, watchlists,
+//! drawings, themes — and is the file to copy to take them elsewhere.
+//! `market.db` beside it holds what was fetched: bars and quotes, attached
+//! as the `market` schema. A query names a table and SQLite finds it in
+//! whichever file has it, so nothing below needs to know there are two.
 //!
 //! Bars are stored columnar: one row per (symbol, timeframe) holding parallel
 //! blobs of timestamps and prices. A row per bar would mean tens of thousands
@@ -97,10 +101,23 @@ impl Store {
     }
 
     pub fn open_at(path: &Path) -> Result<Store, migrations::Error> {
-        let conn = Connection::open(path)?;
-        // WAL so a background fetch writing never blocks the window reading.
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        match Store::open_both(path) {
+            Ok(store) => Ok(store),
+            // The market file is a cache. One that cannot be read, or that a
+            // newer Omacharts wrote, is set aside and started again rather
+            // than allowed to stand between somebody and their settings. Never
+            // when it is the settings file this build cannot read: that
+            // refusal stands, and the cache beside it is somebody's too.
+            Err(_) if !market_usable(path) && settings_usable(path) => {
+                set_aside_market(path);
+                Store::open_both(path)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn open_both(path: &Path) -> Result<Store, migrations::Error> {
+        let conn = connect(path)?;
         let store = Store { conn, path: Some(path.to_path_buf()) };
         // Where a migration that could lose something leaves a copy first.
         // Beside the database rather than in a temp directory, because the
@@ -112,7 +129,9 @@ impl Store {
     /// A database with no file behind it: the tests, and the fallback when
     /// the real one cannot be opened. Nothing to snapshot.
     pub fn memory() -> Result<Store, migrations::Error> {
-        let store = Store { conn: Connection::open_in_memory()?, path: None };
+        let conn = Connection::open_in_memory()?;
+        conn.execute("ATTACH ':memory:' AS market", [])?;
+        let store = Store { conn, path: None };
         store.migrate(None)?;
         Ok(store)
     }
@@ -141,7 +160,13 @@ impl Store {
     /// fetched correctly, which has its own counter because it moves on its
     /// own schedule. A release can change either without touching the other.
     fn migrate(&self, snapshot_to: Option<&Path>) -> Result<(), migrations::Error> {
-        migrations::run(&self.conn, snapshot_to)?;
+        let from = migrations::run(&self.conn, snapshot_to)?;
+        // The bars just moved out leave their pages behind, and a settings
+        // file the size of the cache it no longer holds is not one anybody
+        // will think to copy. Once, on the launch that moved them.
+        if (1..migrations::MARKET_MOVED_OUT).contains(&from) {
+            self.conn.execute_batch("VACUUM main")?;
+        }
         self.invalidate_stale_cache()?;
         Ok(())
     }
@@ -494,7 +519,7 @@ impl Store {
     pub fn clear_market_data(&self) -> rusqlite::Result<()> {
         self.conn.execute("DELETE FROM bar_series", [])?;
         self.conn.execute("DELETE FROM quotes", [])?;
-        self.conn.execute_batch("VACUUM")?;
+        self.conn.execute_batch("VACUUM market")?;
         Ok(())
     }
 
@@ -1082,6 +1107,58 @@ impl Store {
 }
 
 /// `$XDG_DATA_HOME/omacharts`, falling back to `~/.local/share/omacharts`.
+/// The market data file that goes with a settings file: beside it.
+pub fn market_path(settings: &Path) -> PathBuf {
+    settings.with_file_name("market.db")
+}
+
+/// Whether the market file beside `settings` can be read by this build:
+/// absent, or a database at a version it knows.
+fn market_usable(settings: &Path) -> bool {
+    let market = market_path(settings);
+    if !market.exists() {
+        return true;
+    }
+    Connection::open(&market)
+        .and_then(|conn| conn.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0)))
+        .is_ok_and(|version| version <= migrations::MARKET_LATEST)
+}
+
+/// Whether this build can read the settings file itself, so that a failure
+/// to open is the market file's alone.
+fn settings_usable(settings: &Path) -> bool {
+    Connection::open(settings)
+        .and_then(|conn| conn.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0)))
+        .is_ok_and(|version| version <= migrations::LATEST)
+}
+
+/// Move an unusable market file out of the way, kept rather than deleted in
+/// case somebody wants to look at what was in it.
+fn set_aside_market(settings: &Path) {
+    let market = market_path(settings);
+    for suffix in ["", "-wal", "-shm"] {
+        let from = PathBuf::from(format!("{}{suffix}", market.display()));
+        let to = PathBuf::from(format!("{}.unreadable{suffix}", market.display()));
+        let _ = std::fs::rename(&from, &to);
+    }
+}
+
+/// A connection to a settings file with its market data attached, both
+/// written the same way. Not migrated: [`Store::open_at`] does that, and a
+/// second connection to a file the window has opened has nothing to do.
+pub fn connect(path: &Path) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.execute("ATTACH ?1 AS market", [market_path(path).to_string_lossy()])?;
+    // WAL so a background fetch writing never blocks the window reading.
+    // One batch rather than a pragma call each: this runs on every launch.
+    // `market` is migrations::MARKET, spelled out to keep the batch static.
+    conn.execute_batch(
+        "PRAGMA main.journal_mode = WAL; PRAGMA market.journal_mode = WAL;
+         PRAGMA main.synchronous = NORMAL; PRAGMA market.synchronous = NORMAL;",
+    )?;
+    Ok(conn)
+}
+
 pub fn data_dir() -> PathBuf {
     if let Some(base) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
         return PathBuf::from(base).join("omacharts");
@@ -1355,9 +1432,8 @@ mod tests {
     /// watchlist on screen over the top of somebody's real one.
     #[test]
     fn a_database_from_a_newer_omacharts_is_refused_rather_than_opened() {
-        let path =
-            std::env::temp_dir().join(format!("omacharts-future-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+        let dir = scratch_dir("future");
+        let path = dir.join("omacharts.db");
 
         let store = Store::open_at(&path).unwrap();
         store.add_section(DEFAULT_WATCHLIST, "Mine").unwrap();
@@ -1373,7 +1449,80 @@ mod tests {
             }
             other => panic!("expected a refusal, got {:?}", other.map(|_| "a store")),
         }
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A market file that cannot be read, or one from a newer build, is set
+    /// aside rather than costing anybody their settings.
+    #[test]
+    fn an_unusable_market_file_is_set_aside_and_settings_survive() {
+        let dir = scratch_dir("unusable-market");
+        let path = dir.join("omacharts.db");
+        let store = Store::open_at(&path).unwrap();
+        store.set_setting("keep", "me");
+        drop(store);
+
+        for (what, write) in [
+            ("garbage", Box::new(|market: &Path| std::fs::write(market, b"not a database").unwrap())
+                as Box<dyn Fn(&Path)>),
+            ("from the future", Box::new(|market: &Path| {
+                let conn = Connection::open(market).unwrap();
+                conn.pragma_update(None, "user_version", migrations::MARKET_LATEST + 1).unwrap();
+            })),
+        ] {
+            let market = market_path(&path);
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{suffix}", market.display()));
+            }
+            write(&market);
+            let store = Store::open_at(&path).unwrap_or_else(|e| panic!("{what}: {e}"));
+            assert_eq!(store.setting("keep").as_deref(), Some("me"), "{what}");
+            assert_eq!(store.cached_series(), 0, "{what}");
+            assert!(dir.join("market.db.unreadable").exists(), "{what} was not kept");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A settings file from a newer build is refused, and the market file
+    /// beside it — newer too, and perfectly good — is left exactly where it
+    /// was for the build that wrote it.
+    #[test]
+    fn a_refused_settings_file_leaves_the_market_file_alone() {
+        let dir = scratch_dir("both-newer");
+        let path = dir.join("omacharts.db");
+        let store = Store::open_at(&path).unwrap();
+        store.write_bars("k", Timeframe::days(1), &[bar(100, 1.0)]);
+        drop(store);
+        for (file, version) in [
+            ("omacharts.db", migrations::LATEST + 1),
+            ("market.db", migrations::MARKET_LATEST + 1),
+        ] {
+            let conn = Connection::open(dir.join(file)).unwrap();
+            conn.pragma_update(None, "user_version", version).unwrap();
+        }
+
+        assert!(matches!(
+            Store::open_at(&path),
+            Err(migrations::Error::FromTheFuture { .. })
+        ));
+        assert!(!dir.join("market.db.unreadable").exists(), "the cache was set aside");
+        let kept: i64 = Connection::open(dir.join("market.db"))
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM bar_series", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory of its own for a test that needs files: the market data
+    /// file sits beside the settings one, so two tests sharing a directory
+    /// would share a cache.
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("omacharts-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
@@ -1688,8 +1837,8 @@ mod tests {
 
     #[test]
     fn a_cache_written_by_an_older_version_is_discarded_once() {
-        let file = std::env::temp_dir().join(format!("omacharts-cache-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&file);
+        let dir = scratch_dir("cache");
+        let file = dir.join("omacharts.db");
 
         {
             let store = Store::open_at(&file).unwrap();
@@ -1712,7 +1861,7 @@ mod tests {
         let store = Store::open_at(&file).unwrap();
         assert_eq!(store.cached_series(), 1);
 
-        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
 
