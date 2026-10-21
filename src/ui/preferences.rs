@@ -5,7 +5,7 @@
 //! painted from those colours — filled, hollow, red up, monochrome — is a
 //! chart setting, and lives under Charts.
 //!
-//! Built-ins and the Omarchy theme are not editable in place. "Duplicate"
+//! Built-ins and the Omarchy theme are not editable in place. "Customize"
 //! makes a copy you own, which is both simpler to reason about and means a
 //! fiddled palette can always be abandoned by switching back.
 
@@ -27,6 +27,10 @@ use crate::ui::colors;
 use crate::ui::screenshot;
 
 pub struct Preferences;
+
+/// The sidebar plus the column a preferences page lays its rows in, with
+/// room either side of it.
+const MAX_WIDTH: i32 = 980;
 
 struct Context {
     store: Rc<Store>,
@@ -59,10 +63,12 @@ impl Preferences {
         dialog.set_title("Preferences");
         // The breakpoint below needs a floor to measure against.
         dialog.set_size_request(360, 360);
-        // Most of the window rather than a fixed box: the appearance page is a
-        // long list of colours, and every row that fits is a scroll saved.
+        // Most of the window's height: the theme page is a long list of
+        // colours, and every row that fits is a scroll saved. Not its width:
+        // the rows sit in a column of their own, and past the sidebar and that
+        // column a wider dialog is only margin.
         let parent = parent.as_ref();
-        dialog.set_content_width((parent.width() * 85 / 100).max(560));
+        dialog.set_content_width((parent.width() * 85 / 100).clamp(560, MAX_WIDTH));
         dialog.set_content_height((parent.height() * 85 / 100).max(640));
 
         let page = adw::PreferencesPage::new();
@@ -228,7 +234,6 @@ fn resolutions_group(context: &Rc<Context>) -> adw::PreferencesGroup {
 
 fn theme_group(context: &Rc<Context>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::new();
-    group.set_title("Theme");
     let theming = context.theming.borrow();
 
     let ids: Vec<String> = theming.themes().iter().map(|t| t.id.clone()).collect();
@@ -247,6 +252,9 @@ fn theme_group(context: &Rc<Context>) -> adw::PreferencesGroup {
             }
         })
         .collect();
+    // Where the themes somebody made begin: they come last, and a line
+    // above the first sets them apart from the ones that ship.
+    let first_own = theming.themes().iter().position(|t| t.source.is_editable());
     let following = theming.theme().name.clone();
     let is_system = theming.theme_id() == omacharts_engine::theme::OMARCHY_ID;
     let selected = ids.iter().position(|id| id == theming.theme_id()).unwrap_or(0);
@@ -261,6 +269,7 @@ fn theme_group(context: &Rc<Context>) -> adw::PreferencesGroup {
         row.set_subtitle(&format!("Following {following}"));
     }
     row.set_model(Some(&string_list(&names)));
+    row.set_list_factory(Some(&separated_list(first_own)));
     row.set_selected(selected as u32);
 
     let ctx = context.clone();
@@ -900,6 +909,35 @@ fn alpha_dialog() -> gtk::ColorDialog {
     let dialog = gtk::ColorDialog::new();
     dialog.set_with_alpha(true);
     dialog
+}
+
+/// A drop-down list of names with a line above the one at `split`, for a
+/// list that is two lists one after the other.
+fn separated_list(split: Option<usize>) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let line = gtk::Separator::new(gtk::Orientation::Horizontal);
+        let label = gtk::Label::new(None);
+        label.set_xalign(0.0);
+        column.append(&line);
+        column.append(&label);
+        item.set_child(Some(&column));
+    });
+    factory.connect_bind(move |_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+        let Some(column) = item.child().and_downcast::<gtk::Box>() else { return };
+        let (Some(line), Some(label)) =
+            (column.first_child(), column.last_child().and_downcast::<gtk::Label>())
+        else {
+            return;
+        };
+        let name = item.item().and_downcast::<gtk::StringObject>().map(|s| s.string());
+        label.set_label(name.as_deref().unwrap_or(""));
+        line.set_visible(split.is_some_and(|at| at > 0 && item.position() as usize == at));
+    });
+    factory
 }
 
 fn string_list(items: &[String]) -> gtk::StringList {
