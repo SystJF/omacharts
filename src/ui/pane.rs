@@ -459,8 +459,11 @@ impl ChartPane {
     fn sync_link_shown(&self) {
         // A lone Pinned chart keeps its pin, because a rail click it refuses
         // lights the pin, and a hidden one would leave the refusal unexplained.
+        // `get_visible`, not `is_visible`: that one asks the whole ancestor
+        // chain, which at launch is not on screen yet, so a chartbook opened
+        // already split came up with no link button until the next split.
         self.link
-            .set_visible(self.expand.is_visible() || self.mode.get() == LinkMode::Pinned);
+            .set_visible(self.expand.get_visible() || self.mode.get() == LinkMode::Pinned);
     }
 
     /// Point the glyph in or out, and say which it is.
