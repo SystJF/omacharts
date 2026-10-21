@@ -576,6 +576,57 @@ the axis draws linear and turns logarithmic again once they are off screen.
 omacharts chart set --resolution 1W --log-scale on
 ```
 
+## Chartbook templates
+
+A chartbook template is a chartbook's arrangement under a name: the splits,
+every divider as a share of its split rather than in pixels so it fits any
+window, and for each chart its resolution and its chart template, or its own
+indicators when it has none. The symbols are not in it. A chartbook keeps its
+own symbols and link modes, and taking a template gives them to the charts by
+where they sit; a chart the template adds is a copy of the focused one. A
+template saved before resolutions were part of one leaves each chart's own.
+
+```
+omacharts chartbook template save Corners
+omacharts chartbook template apply Corners --book Energy
+omacharts chartbook create Metals --symbol GLD --template Corners --switch
+omacharts chartbook template list
+omacharts chartbook template rename Corners Quarters
+omacharts chartbook template apply none --book Energy
+omacharts chartbook template delete Quarters
+```
+
+**A chartbook on a template stays on it, and every change to its arrangement
+goes to the template and to every other chartbook on it** — a split, a closed
+chart, a dragged divider, a resolution, an indicator, a chart template — the
+way a change to a chart template reaches every chart on it. A command that changes one is no
+different from the window doing it. A chart that is added in one book is added
+beside the same chart in the others, and one closed in one is closed in the
+others, so each book keeps its symbols where they were.
+
+`save NAME` makes a new template from the chartbook and puts the book on it.
+It only ever makes a new one: a name a template already has, in any case, is
+refused, and nothing changes. A book on a template needs no saving, since its
+changes are already in it.
+`chartbook create NAME --template T` makes a book on a template from the
+start, every chart on `--symbol`. `apply none` takes a book off its template
+and keeps everything it has.
+Deleting a template does the same to every book on it. `list` marks with `*`
+the template the open chartbook is on, and says how many chartbooks use each.
+
+In the window these are the **Template** submenu on a chartbook tab's
+right-click menu: None, the templates and Save as New Template…, then Manage
+Templates…, and the New chartbook dialog's **Template** row, which is there
+once a template exists.
+
+`chartbook duplicate` makes a copy beside a chartbook — the charts, their
+settings and drawings, and its chartbook template — and `--switch` opens it.
+A watchlist belongs to one chartbook, so the copy shows the default one.
+
+```
+omacharts chartbook duplicate Macro --name "Macro weekly" --switch
+```
+
 ## Drawing on a chart
 
 A drawing is a line between two anchors, a box or an ellipse with them at

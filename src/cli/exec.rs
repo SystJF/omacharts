@@ -227,6 +227,11 @@ fn names_a_target(noun: &str, verb: &str, m: &clap::ArgMatches) -> bool {
     // Creating one invents its own target, and listing them all needs none.
     // The drawing configurations are about every chart rather than one.
     matches!((noun, verb), ("chartbook", "create") | ("chartbook", "list"))
+        // A chartbook template is named on the line; only saving and applying
+        // are about a chartbook.
+        || (noun == "chartbook"
+            && verb == "template"
+            && matches!(arg(m, "ACTION").map(String::as_str), Some("list" | "rename" | "delete")))
         || (noun == "chart"
             && verb == "drawing"
             && matches!(
@@ -1082,18 +1087,38 @@ fn charts_verb(
                 None => None,
             };
             let id = workspace.next_pane();
-            let book = json!({
+            let template = arg(m, "template").map(|t| find_book_template(store, t)).transpose()?;
+            let mut book = json!({
                 "name": name,
                 "layout": {"leaf": id},
                 "focused": id,
                 "panes": [fresh_pane(store, id, &symbol)],
                 "watchlist": watchlist,
             });
+            // Built from its one chart, as taking the template would be.
+            if let Some(template) = &template {
+                let charts = crate::templates::all(store);
+                let mut next = id + 1;
+                if !crate::book_templates::apply(&mut book, &template.shape, &charts, &mut next, None) {
+                    return Err(Fault::new(
+                        super::EXIT_ERROR,
+                        format!("chartbook template {:?} is not an arrangement", template.name),
+                    ));
+                }
+                crate::book_templates::set_link(&mut book, Some(template.id));
+            }
             let at = workspace.push(book);
             if flag(m, "switch") {
                 workspace.set_active(at);
             }
-            format!("created chartbook {name:?} (id:{at}) showing {symbol}")
+            match template {
+                Some(template) => format!(
+                    "created chartbook {name:?} (id:{at}) showing {symbol}, on chartbook template {:?}: {}",
+                    template.name,
+                    charts_counted(template.shape.panes.len())
+                ),
+                None => format!("created chartbook {name:?} (id:{at}) showing {symbol}"),
+            }
         }
         ("chartbook", "rename") => {
             let at = workspace.find(required(m, "BOOK")?)?;
@@ -1129,6 +1154,47 @@ fn charts_verb(
             }
             workspace.book_mut(at)?["watchlist"] = json!(id);
             format!("chartbook {:?} now shows watchlist {name:?}", workspace.name_of(at))
+        }
+        ("chartbook", "duplicate") => {
+            let at = workspace.resolve(selector.map(String::as_str))?;
+            let was = workspace.name_of(at);
+            let name = match arg(m, "name") {
+                Some(name) => name.trim().to_string(),
+                None => format!("{was} copy"),
+            };
+            if name.is_empty() {
+                return Err(Fault::usage("a chartbook needs a name".into()));
+            }
+            let mut copy = workspace.book(at)?.clone();
+            let mut next = workspace.next_pane();
+            let mut ids = std::collections::HashMap::new();
+            for pane in charts::panes_mut(&mut copy)? {
+                let Some(old) = pane["id"].as_u64() else { continue };
+                ids.insert(old as u32, next);
+                pane["id"] = json!(next);
+                // Its own name among the drawings: see `charts::copy_pane`.
+                pane["drawing_uid"] = json!(gtk::glib::uuid_string_random().to_string());
+                next += 1;
+            }
+            let renamed = |id: &Value| {
+                id.as_u64().and_then(|id| ids.get(&(id as u32))).map_or(Value::Null, |id| json!(id))
+            };
+            copy["layout"] = charts::relabel(&copy["layout"], &ids);
+            copy["focused"] = renamed(&copy["focused"]);
+            copy["maximized"] = renamed(&copy["maximized"]);
+            copy["name"] = json!(name);
+            // A watchlist is one chartbook's.
+            if copy["watchlist"].as_i64().is_some_and(|list| list != DEFAULT_WATCHLIST) {
+                copy["watchlist"] = json!(DEFAULT_WATCHLIST);
+            }
+            let placed = workspace.insert(at + 1, copy);
+            if flag(m, "switch") {
+                workspace.set_active(placed);
+            }
+            format!("duplicated chartbook {was:?} as {name:?} (id:{placed})")
+        }
+        ("chartbook", "template") => {
+            return book_template_verb(store, m, as_json, &mut workspace, selector.map(String::as_str));
         }
         ("chart", _) => return chart_verb(store, verb, m, as_json, &mut workspace),
         _ => return Err(Fault::usage(format!("no such command: {noun} {verb}"))),
@@ -3049,6 +3115,195 @@ fn template_verb(
     said(as_json, json!({"message": text}), text)
 }
 
+/// Chartbook templates, from `chartbook template`. See [`crate::book_templates`].
+///
+/// A chartbook on one carries every change to its arrangement into it as it
+/// is written down — [`Workspace::save`] does that for every command — so
+/// there is nothing here for saving into the template a book is already on,
+/// and `save` only ever makes a new one.
+fn book_template_verb(
+    store: &Store,
+    m: &clap::ArgMatches,
+    as_json: bool,
+    workspace: &mut Workspace,
+    selector: Option<&str>,
+) -> Result<String, Fault> {
+    use crate::book_templates as bt;
+    let action = required(m, "ACTION")?.as_str();
+    let templates = bt::all(store);
+    let named = || {
+        arg(m, "TEMPLATE")
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| Fault::usage(format!("`chartbook template {action}` needs a TEMPLATE")))
+    };
+    let found = |selector: &str| find_book_template(store, selector);
+
+    let (text, value) = match action {
+        "list" => return Ok(book_template_list(&templates, workspace, as_json)),
+        "save" => {
+            let at = workspace.resolve(selector)?;
+            let book = workspace.name_of(at);
+            let shape = bt::capture(workspace.book(at)?).ok_or_else(|| {
+                Fault::new(super::EXIT_ERROR, format!("chartbook {book:?} names a chart it does not have"))
+            })?;
+            let wanted = named()?;
+            // Only ever a new one: replacing a template would change every
+            // chartbook on it, which a word like "save" does not say.
+            if let Some(why) = bt::refused_name(&templates, wanted, None) {
+                return Err(Fault::usage(why));
+            }
+            let id = bt::create(store, wanted, shape.clone()).id;
+            bt::set_link(workspace.book_mut(at)?, Some(id));
+            (
+                format!(
+                    "saved chartbook {book:?} as new chartbook template {wanted:?} ({})",
+                    charts_counted(shape.panes.len()),
+                ),
+                json!({"template": id, "chartbook": book}),
+            )
+        }
+        "apply" => {
+            let at = workspace.resolve(selector)?;
+            let book = workspace.name_of(at);
+            let wanted = named()?;
+            if wanted.eq_ignore_ascii_case(crate::chart_defaults::NO_TEMPLATE) {
+                bt::set_link(workspace.book_mut(at)?, None);
+                (
+                    format!("chartbook {book:?} is on no chartbook template; it keeps its layout and indicators"),
+                    json!({"template": null, "chartbook": book}),
+                )
+            } else {
+                let chosen = found(wanted)?;
+                let charts = crate::templates::all(store);
+                let mut next = workspace.next_pane();
+                let target = workspace.book_mut(at)?;
+                if !bt::apply(target, &chosen.shape, &charts, &mut next, None) {
+                    return Err(Fault::new(
+                        super::EXIT_ERROR,
+                        format!("chartbook template {:?} or chartbook {book:?} is not an arrangement", chosen.name),
+                    ));
+                }
+                bt::set_link(target, Some(chosen.id));
+                (
+                    format!(
+                        "applied chartbook template {:?} to chartbook {book:?}: {}",
+                        chosen.name,
+                        charts_counted(chosen.shape.panes.len())
+                    ),
+                    json!({"template": chosen.id, "chartbook": book}),
+                )
+            }
+        }
+        "rename" => {
+            let template = found(named()?)?;
+            let name = arg(m, "NAME").map(|n| n.trim()).filter(|n| !n.is_empty()).ok_or_else(|| {
+                Fault::usage("`chartbook template rename` needs a TEMPLATE and a NAME".into())
+            })?;
+            if let Some(why) = bt::refused_name(&templates, name, Some(template.id)) {
+                return Err(Fault::usage(why));
+            }
+            bt::rename(store, template.id, name);
+            (
+                format!("renamed chartbook template {:?} to {name:?}", template.name),
+                json!({"template": template.id, "name": name}),
+            )
+        }
+        "delete" => {
+            let template = found(named()?)?;
+            bt::delete(store, template.id);
+            let kept = bt::unlink(workspace.books_mut(), template.id);
+            let tail = match kept {
+                0 => String::new(),
+                1 => "; the chartbook on it keeps its layout and indicators".to_string(),
+                n => format!("; the {n} chartbooks on it keep their layout and indicators"),
+            };
+            (
+                format!("deleted chartbook template {:?}{tail}", template.name),
+                json!({"template": template.id, "chartbooks": kept}),
+            )
+        }
+        other => return Err(Fault::usage(format!("no such action: chartbook template {other}"))),
+    };
+    workspace.save(store);
+    let mut value = value;
+    value["message"] = json!(text);
+    said(as_json, value, text)
+}
+
+fn charts_counted(count: usize) -> String {
+    match count {
+        1 => "1 chart".to_string(),
+        n => format!("{n} charts"),
+    }
+}
+
+/// The chartbook template a selector names, or why there is none.
+fn find_book_template(store: &Store, selector: &str) -> Result<crate::book_templates::BookTemplate, Fault> {
+    use crate::book_templates::{self as bt, Lookup};
+    let all = bt::all(store);
+    match bt::find(&all, selector) {
+        Lookup::Found(found) => Ok(found.clone()),
+        Lookup::Missing => Err(Fault::not_found(format!(
+            "no chartbook template called {selector:?}; see `omacharts chartbook template list`"
+        ))),
+        Lookup::Ambiguous(ids) => Err(Fault::ambiguous(format!(
+            "{} chartbook templates are called {selector:?}; use {}",
+            ids.len(),
+            ids.iter().map(|id| format!("id:{id}")).collect::<Vec<_>>().join(" or ")
+        ))),
+    }
+}
+
+/// Every chartbook template, how many charts it lays out and how many
+/// chartbooks are on it; * marks the open chartbook's.
+fn book_template_list(
+    templates: &[crate::book_templates::BookTemplate],
+    workspace: &Workspace,
+    as_json: bool,
+) -> String {
+    use crate::book_templates as bt;
+    let open = workspace.books().get(workspace.active()).and_then(bt::linked);
+    if as_json {
+        let rows = templates
+            .iter()
+            .map(|t| {
+                json!({
+                    "id": t.id,
+                    "name": t.name,
+                    "charts": t.shape.panes.len(),
+                    "chartbooks": bt::usage(workspace.books(), t.id),
+                    "open": open == Some(t.id),
+                })
+                .to_string()
+            })
+            .collect();
+        return wrap_list("book_templates", rows);
+    }
+    if templates.is_empty() {
+        return "no chartbook templates; save one with `omacharts chartbook template save NAME`\n"
+            .into();
+    }
+    templates
+        .iter()
+        .map(|t| {
+            let books = match bt::usage(workspace.books(), t.id) {
+                1 => "1 chartbook".to_string(),
+                n => format!("{n} chartbooks"),
+            };
+            format!(
+                "{}{:<5} {:<20} {:<9} {books}",
+                if open == Some(t.id) { "* " } else { "  " },
+                format!("id:{}", t.id),
+                t.name,
+                charts_counted(t.shape.panes.len()),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
 /// A name as typed, refusing a blank one: a template nobody can name is one
 /// nobody can pick again.
 fn template_name(m: &clap::ArgMatches, id: &str) -> Result<String, Fault> {
@@ -4753,6 +5008,222 @@ mod tests {
         let listed = run("chart list --book Macro --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
         assert_eq!(parsed["charts"].as_array().unwrap().len(), 2);
+    }
+
+    fn ok(line: &str, store: &Store) -> String {
+        let out = run(line, store);
+        assert_eq!(out.code, 0, "{line}: {}", out.err);
+        out.out
+    }
+
+    /// A book's charts, in layout order.
+    fn panes_of(store: &Store, book: &str) -> Vec<Value> {
+        let workspace = Workspace::load(store);
+        let at = workspace.find(book).unwrap();
+        let book = &workspace.books()[at];
+        charts::leaves(&book["layout"])
+            .iter()
+            .map(|id| {
+                charts::panes(book).iter().find(|p| p["id"].as_u64() == Some(u64::from(*id))).unwrap().clone()
+            })
+            .collect()
+    }
+
+    fn symbols_of(store: &Store, book: &str) -> Vec<String> {
+        panes_of(store, book).iter().map(|p| p["symbol"].as_str().unwrap().to_string()).collect()
+    }
+
+    fn swing(store: &Store) -> Value {
+        json!(find_template(store, "Swing").unwrap().id)
+    }
+
+    /// Two by two, with an RSI on the first chart and a chart template on
+    /// the second: the mixed book the chartbook templates are for.
+    fn grid_book(store: &Store, name: &str, symbol: &str) {
+        ok(&format!("chartbook create {name} --symbol {symbol}"), store);
+        ok(&format!("chart split horizontal --book {name} --chart pos:0"), store);
+        ok(&format!("chart split vertical --book {name} --chart pos:0"), store);
+        ok(&format!("chart split vertical --book {name} --chart pos:2"), store);
+        ok(&format!("chart indicator add rsi --book {name} --chart pos:0"), store);
+        ok("template create Swing", store);
+        ok("template indicator add Swing macd", store);
+        ok(&format!("chart set --book {name} --chart pos:1 --template Swing"), store);
+        ok(&format!("chart set --book {name} --chart pos:2 --resolution 1h"), store);
+    }
+
+    #[test]
+    fn a_chartbook_is_saved_as_a_template_and_applied_to_another() {
+        let store = bare();
+        grid_book(&store, "Grid", "SPY");
+        ok("chartbook create Other --symbol QQQ", &store);
+        assert!(ok("chartbook template save Corners --book Grid", &store).contains("4 charts"));
+
+        let listed = json_of(&run("chartbook template list --json", &store));
+        assert_eq!(listed["book_templates"][0]["chartbooks"], 1);
+        assert_eq!(listed["book_templates"][0]["charts"], 4);
+
+        ok("chartbook template apply Corners --book Other", &store);
+        assert_eq!(symbols_of(&store, "Other"), ["QQQ"; 4], "the chartbook lost its symbol");
+        assert_eq!(panes_of(&store, "Other")[1]["template"], swing(&store));
+        assert_eq!(panes_of(&store, "Other")[2]["timeframe"], "1h", "the resolution was not taken");
+        assert_eq!(panes_of(&store, "Other")[0]["timeframe"], "1D");
+        let first = json_of(&run("chart indicator list --book Other --chart pos:0 --json", &store));
+        assert_eq!(first["indicators"][0]["kind"], "rsi");
+        let listed = json_of(&run("chartbook template list --json", &store));
+        assert_eq!(listed["book_templates"][0]["chartbooks"], 2);
+    }
+
+    /// A change to a chartbook on a template reaches the template and every
+    /// other chartbook on it, whether or not it is the one open.
+    #[test]
+    fn a_change_to_a_chartbook_on_a_template_reaches_the_others_on_it() {
+        let store = bare();
+        grid_book(&store, "Grid", "SPY");
+        ok("chartbook template save Corners --book Grid", &store);
+        ok("chartbook create Other --symbol QQQ", &store);
+        ok("chartbook template apply Corners --book Other", &store);
+        ok("chartbook create Loose --symbol IWM", &store);
+        ok("chartbook switch Grid", &store);
+
+        // The open book closes a chart; the closed one follows, by position.
+        ok("chart close --book Grid --chart pos:3", &store);
+        assert_eq!(symbols_of(&store, "Other").len(), 3);
+        // A closed book is changed in turn, and the open one follows.
+        ok("chart indicator add atr --book Other --chart pos:2", &store);
+        let atr = json_of(&run("chart indicator list --book Grid --chart pos:2 --json", &store));
+        assert_eq!(atr["indicators"][0]["kind"], "atr");
+        let templates = crate::book_templates::all(&store);
+        assert_eq!(templates[0].shape.panes.len(), 3);
+        assert_eq!(templates[0].shape.panes[2].indicators[0].kind, IndicatorKind::Atr);
+        // A resolution goes to the same position, from the open book and to it.
+        ok("chart set --book Grid --chart pos:1 --resolution 15m", &store);
+        assert_eq!(panes_of(&store, "Other")[1]["timeframe"], "15m");
+        ok("chart set --book Other --chart pos:0 --resolution 1W", &store);
+        assert_eq!(panes_of(&store, "Grid")[0]["timeframe"], "1W");
+        assert_eq!(panes_of(&store, "Loose")[0]["timeframe"], "1D");
+        // A symbol is the book's own.
+        ok("chart set --book Grid --chart pos:0 --symbol AAPL", &store);
+        assert_eq!(symbols_of(&store, "Other")[0], "QQQ");
+        // And a book on none is left alone.
+        assert_eq!(symbols_of(&store, "Loose"), ["IWM"]);
+    }
+
+    #[test]
+    fn a_chartbook_can_be_made_on_a_template() {
+        let store = bare();
+        grid_book(&store, "Grid", "SPY");
+        ok("chartbook template save Corners --book Grid", &store);
+        let made = ok("chartbook create Oil --symbol CL --template corners", &store);
+        assert!(made.contains("on chartbook template \"Corners\": 4 charts"), "{made}");
+        assert_eq!(symbols_of(&store, "Oil"), ["CL"; 4]);
+        assert_eq!(panes_of(&store, "Oil")[1]["template"], swing(&store));
+        assert_eq!(panes_of(&store, "Oil")[2]["timeframe"], "1h");
+        let listed = json_of(&run("chartbook template list --json", &store));
+        assert_eq!(listed["book_templates"][0]["chartbooks"], 2);
+        // And it is on it: a change there reaches the book it came from.
+        ok("chart close --book Oil --chart pos:3", &store);
+        assert_eq!(symbols_of(&store, "Grid").len(), 3);
+
+        let missing = run("chartbook create Gas --template Nope", &store);
+        assert_eq!(missing.code, super::super::EXIT_NOT_FOUND);
+        assert!(Workspace::load(&store).find("Gas").is_err(), "a refused create made a book");
+    }
+
+    #[test]
+    fn saving_only_ever_makes_a_new_template() {
+        let store = bare();
+        grid_book(&store, "Grid", "SPY");
+        ok("chartbook create One --symbol QQQ", &store);
+        ok("chartbook template save Solo --book One", &store);
+        ok("chartbook create Two --symbol IWM", &store);
+        ok("chartbook template apply Solo --book Two", &store);
+
+        for line in [
+            "chartbook template save solo --book Grid",
+            "chartbook template save Solo --book One",
+            "chartbook template save id:1 --book Grid",
+            "chartbook template save None --book Grid",
+        ] {
+            let refused = run(line, &store);
+            assert_eq!(refused.code, EXIT_USAGE, "{line}: {}", refused.err);
+        }
+        assert!(run("chartbook template save SOLO --book Grid", &store).err.contains("already a chartbook template"));
+        assert_eq!(symbols_of(&store, "Two").len(), 1, "a refused save changed a book on the template");
+        assert_eq!(crate::book_templates::all(&store)[0].shape.panes.len(), 1);
+
+        assert!(ok("chartbook template save Corners --book Grid", &store).contains("new chartbook template"));
+        assert_eq!(crate::book_templates::all(&store).len(), 2);
+        assert_eq!(symbols_of(&store, "Two").len(), 1);
+    }
+
+    #[test]
+    fn a_chartbook_template_is_renamed_let_go_of_and_deleted() {
+        let store = bare();
+        grid_book(&store, "Grid", "SPY");
+        ok("chartbook template save Corners --book Grid", &store);
+        ok("chartbook create Other --symbol QQQ", &store);
+        ok("chartbook template apply Corners --book Other", &store);
+
+        // A name another template has, or one a selector reads as something
+        // else, is refused; a template's own name in another case is not.
+        ok("chartbook create Spare --symbol IWM", &store);
+        ok("chartbook template save Solo --book Spare", &store);
+        for line in ["chartbook template rename Corners solo", "chartbook template rename Corners none"] {
+            assert_eq!(run(line, &store).code, EXIT_USAGE, "{line}");
+        }
+        ok("chartbook template rename Corners CORNERS", &store);
+        ok("chartbook template delete Solo", &store);
+        ok("chartbook delete Spare", &store);
+        ok("chartbook template rename Corners Quarters", &store);
+        assert!(ok("chartbook template list", &store).contains("Quarters"));
+        assert_eq!(run("chartbook template rename Corners X", &store).code, super::super::EXIT_NOT_FOUND);
+        assert_eq!(run("chartbook template apply id:99 --book Grid", &store).code, super::super::EXIT_NOT_FOUND);
+
+        // None lets go and keeps everything; a change stops travelling.
+        ok("chartbook template apply none --book Other", &store);
+        assert_eq!(symbols_of(&store, "Other").len(), 4);
+        ok("chart close --book Other --chart pos:0", &store);
+        assert_eq!(symbols_of(&store, "Grid").len(), 4);
+
+        let gone = ok("chartbook template delete Quarters", &store);
+        assert!(gone.contains("the chartbook on it keeps"), "{gone}");
+        assert!(crate::book_templates::all(&store).is_empty());
+        assert_eq!(symbols_of(&store, "Grid").len(), 4);
+        ok("chart close --book Grid --chart pos:0", &store);
+        assert_eq!(symbols_of(&store, "Other").len(), 3);
+        assert!(Workspace::load(&store).books().iter().all(|b| crate::book_templates::linked(b).is_none()));
+    }
+
+    #[test]
+    fn a_duplicate_is_a_copy_beside_the_original_on_the_same_template() {
+        let store = bare();
+        ok("watchlist create Semis", &store);
+        grid_book(&store, "Grid", "SPY");
+        ok("chartbook watchlist Grid Semis", &store);
+        ok("chartbook create Last --symbol IWM", &store);
+        ok("chartbook template save Corners --book Grid", &store);
+        ok("chartbook duplicate Grid --name Copy --switch", &store);
+
+        let workspace = Workspace::load(&store);
+        assert_eq!(workspace.name_of(1), "Copy", "the copy is not beside the original");
+        assert_eq!(workspace.active(), 1);
+        assert_eq!(symbols_of(&store, "Copy"), symbols_of(&store, "Grid"));
+        assert_eq!(panes_of(&store, "Copy")[1]["template"], swing(&store));
+        assert_eq!(panes_of(&store, "Copy")[0]["indicators"][0]["kind"], "rsi");
+        assert_eq!(workspace.books()[1]["watchlist"], json!(DEFAULT_WATCHLIST), "two books on one watchlist");
+        assert_eq!(crate::book_templates::linked(&workspace.books()[1]), crate::book_templates::linked(&workspace.books()[0]));
+        // Its charts are its own.
+        let ids = |at: usize| charts::leaves(&workspace.books()[at]["layout"]);
+        assert!(ids(1).iter().all(|id| !ids(0).contains(id)));
+        let uids = |at: usize| -> Vec<Value> { charts::panes(&workspace.books()[at]).iter().map(|p| p["drawing_uid"].clone()).collect() };
+        assert!(uids(1).iter().all(|uid| !uids(0).contains(uid)));
+        // And being on the template, a change to it travels.
+        ok("chart close --book Copy --chart pos:0", &store);
+        assert_eq!(symbols_of(&store, "Grid").len(), 3);
+        // The default name.
+        ok("chartbook duplicate Last", &store);
+        let workspace = Workspace::load(&store);
+        assert_eq!(workspace.find("Last copy").unwrap(), workspace.find("Last").unwrap() + 1);
     }
 
     /// A chartbook made from a terminal starts the way one made in the window

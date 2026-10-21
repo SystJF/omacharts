@@ -185,6 +185,11 @@ pub const SELECTOR: &str =
 pub const TEMPLATE_SELECTOR: &str =
     "a chart template's name, case-insensitive, or `id:N` when two of them share one";
 
+/// How a chartbook template is named on the command line.
+pub const BOOK_TEMPLATE_SELECTOR: &str =
+    "a chartbook template's name, case-insensitive, or `id:N` when two of them share one; \
+     for save, a name no chartbook template has yet";
+
 /// How a chart is named on the command line.
 ///
 /// Position, not identity, is the stable way to point at one. Rebuilding an
@@ -638,11 +643,16 @@ pub const SURFACE: &[Noun] = &[
             },
             Verb {
                 name: "create",
-                about: "Make a chartbook holding one chart",
+                about: "Make a chartbook holding one chart, or built from a chartbook template",
                 args: &[Arg::req("NAME", "what to call it")],
                 flags: &[
                     Flag::valued("watchlist", "LIST", "the watchlist it shows (default: the current one)"),
                     Flag::valued("symbol", "SYMBOL", "what its first chart opens on"),
+                    Flag::valued(
+                        "template",
+                        "TEMPLATE",
+                        "a chartbook template to build it from and keep it on; every chart opens on --symbol",
+                    ),
                     Flag::switch("switch", "make it the open chartbook"),
                 ],
                 example: "omacharts chartbook create Semis --watchlist Semis --symbol NVDA --switch",
@@ -686,6 +696,37 @@ pub const SURFACE: &[Noun] = &[
                 args: &[Arg::req("BOOK", SELECTOR), Arg::req("LIST", SELECTOR)],
                 flags: &[],
                 example: "omacharts chartbook watchlist Semis Semis",
+                json: true,
+                writes: true,
+                workspace: true,
+            },
+            Verb {
+                name: "duplicate",
+                about: "Copy a chartbook, charts, settings, drawings and chartbook template and all, \
+                        next to it; the copy shows the default watchlist",
+                args: &[Arg::opt("BOOK", SELECTOR)],
+                flags: &[
+                    Flag::valued("name", "NAME", "what to call the copy (default: the name and \"copy\")"),
+                    Flag::switch("switch", "make the copy the open chartbook"),
+                ],
+                example: "omacharts chartbook duplicate --name \"Macro 2\" --switch",
+                json: true,
+                writes: true,
+                workspace: true,
+            },
+            Verb {
+                name: "template",
+                about: "Chartbook templates: a chartbook's layout and what each chart draws, under \
+                        a name; every change to a chartbook on one reaches the others on it",
+                args: &[
+                    Arg::req("ACTION", "list them; save the chartbook as a new one; apply one, or \
+                                        `none` to let go of it; rename or delete one")
+                        .of(&["list", "save", "apply", "rename", "delete"]),
+                    Arg::opt("TEMPLATE", BOOK_TEMPLATE_SELECTOR),
+                    Arg::opt("NAME", "the new name, for rename"),
+                ],
+                flags: &[Flag::valued("book", "BOOK", "which chartbook (default: the open one)")],
+                example: "omacharts chartbook template save Grid",
                 json: true,
                 writes: true,
                 workspace: true,
@@ -1249,6 +1290,7 @@ const STORED_FIELDS: &[(&str, &str, &str)] = &[
     ("sidebar_shown", "", "presentational: the rail is shown with a mouse or a key"),
     ("sidebar_width", "", "presentational: a width is dragged, never scripted"),
     ("maximized", "", "presentational: remembered so a restart finds it, but filled with a key or the corner"),
+    ("book_template", "chartbook template", ""),
 ];
 
 #[cfg(test)]
