@@ -1828,17 +1828,24 @@ impl Projected {
     /// body, because a grip sits on the body and is the harder target.
     pub fn hit(&self, x: f64, y: f64) -> Option<Grip> {
         let corners = (0..self.corners.len()).map(Grip::Corner);
-        let fixed = [
-            Grip::From,
-            Grip::To,
-            Grip::FromTo,
-            Grip::ToFrom,
-            Grip::Top,
-            Grip::Bottom,
-            Grip::Left,
-            Grip::Right,
-        ];
-        for grip in fixed.into_iter().chain(corners) {
+        // A drawing with points of its own is held by them and only them.
+        // `from` sits on the first of them, so trying it first answered
+        // `From` for the first point — and moving `from` moves nothing that
+        // is drawn.
+        let fixed: &[Grip] = match self.corners.is_empty() {
+            true => &[
+                Grip::From,
+                Grip::To,
+                Grip::FromTo,
+                Grip::ToFrom,
+                Grip::Top,
+                Grip::Bottom,
+                Grip::Left,
+                Grip::Right,
+            ],
+            false => &[],
+        };
+        for grip in fixed.iter().copied().chain(corners) {
             if let Some(at) = self.grip(grip)
                 && distance(at, (x, y)) <= GRIP_REACH
             {
@@ -3088,6 +3095,18 @@ mod zigzag_tests {
         assert_eq!(path.bounds(), (0.0, 0.0, 100.0, 100.0));
         // And a box over the peak takes it.
         assert!(path.touches((40.0, 80.0, 20.0, 20.0)));
+    }
+
+    /// Its first corner is a corner: `from` sits on the same spot, and
+    /// answering that grip dragged an anchor nothing is drawn from.
+    #[test]
+    fn a_zigzag_is_held_by_its_first_corner() {
+        let path = Projected::through(
+            Kind::Zigzag,
+            vec![(0.0, 0.0), (50.0, 100.0), (100.0, 0.0)],
+        );
+        assert_eq!(path.hit(1.0, 1.0), Some(Grip::Corner(0)));
+        assert_eq!(path.hit(99.0, 1.0), Some(Grip::Corner(2)));
     }
 
     /// The whole of it moves together.
