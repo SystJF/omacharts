@@ -6658,8 +6658,13 @@ impl Window {
                                 timeframe,
                                 instrument.session_origin,
                             );
+                            // Left out and cut back as `paint` did, or a tick
+                            // refolding this week, month or year would put back
+                            // what the chart had left out of it.
+                            let drawn =
+                                omacharts_engine::drawable_from(native, start, timeframe, instrument.kind);
                             let tail = omacharts_engine::session::filter(
-                                &native[start..],
+                                &drawn,
                                 pane.session.get(),
                                 &instrument,
                                 timeframe.is_intraday(),

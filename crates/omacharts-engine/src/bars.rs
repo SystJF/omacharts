@@ -528,6 +528,15 @@ fn clip(bars: &[Bar], i: usize) -> Option<(f64, f64)> {
     if bar.volume != 0.0 || bottom <= 0.0 {
         return None;
     }
+    let above = bar.high - prev.high.max(next.high).max(top);
+    let below = prev.low.min(next.low).min(bottom) - bar.low;
+    // Nearly every bar of a pair or an index has no volume, so the ranges
+    // around it are only read for a wick already past the least room it
+    // could be given.
+    let least = STRAY_WICK * (top - bottom).max(top / 100.0);
+    if above.max(below) <= least {
+        return None;
+    }
     let around = i.saturating_sub(STRAY_WICK_AROUND)..(i + 1 + STRAY_WICK_AROUND).min(bars.len());
     let widest = around
         .filter(|&j| j != i)
@@ -535,14 +544,8 @@ fn clip(bars: &[Bar], i: usize) -> Option<(f64, f64)> {
         .map(|b| b.high - b.low)
         .fold(0.0, f64::max);
     let room = STRAY_WICK * widest.max(top - bottom).max(top / 100.0);
-    let high = match bar.high - prev.high.max(next.high).max(top) > room {
-        true => top,
-        false => bar.high,
-    };
-    let low = match prev.low.min(next.low).min(bottom) - bar.low > room {
-        true => bottom,
-        false => bar.low,
-    };
+    let high = if above > room { top } else { bar.high };
+    let low = if below > room { bottom } else { bar.low };
     (high != bar.high || low != bar.low).then_some((high, low))
 }
 
@@ -571,6 +574,21 @@ pub fn drawable(bars: &mut Vec<Bar>, timeframe: Timeframe, kind: InstrumentKind)
     if !timeframe.is_intraday() {
         clip_stray_wicks(bars);
     }
+}
+
+/// [`drawable`] of `native` from `start` on, as the whole series would draw
+/// it: what a live tick refolds into the chart's last bucket, which on a
+/// weekly, monthly or yearly chart reaches back over days that have already
+/// been judged. Each bar is judged with the bars before it in view, which is
+/// all either rule reads behind it.
+pub fn drawable_from(native: &[Bar], start: usize, timeframe: Timeframe, kind: InstrumentKind) -> Vec<Bar> {
+    let Some(first) = native.get(start).map(|bar| bar.ts) else {
+        return Vec::new();
+    };
+    let mut bars = native[start.saturating_sub(2 * (STRAY_WICK_AROUND + 1))..].to_vec();
+    drawable(&mut bars, timeframe, kind);
+    bars.retain(|bar| bar.ts >= first);
+    bars
 }
 
 /// Fold `src` into `target`.
@@ -829,6 +847,29 @@ mod tests {
         };
         assert_eq!(drawn(InstrumentKind::FutureRoot), 3, "the settlement is a price");
         assert_eq!(drawn(InstrumentKind::Equity), 2, "a stock's lone print is not");
+    }
+
+    #[test]
+    fn a_tail_is_drawn_as_the_whole_series_draws_it() {
+        let mut native: Vec<Bar> = (0..40)
+            .map(|i| {
+                let price = 34.0 + (i % 7) as f64 * 0.1;
+                Bar { ts: i, open: price, high: price + 0.1, low: price - 0.1, close: price, volume: 1000.0 }
+            })
+            .collect();
+        native[20] = Bar { ts: 20, open: 39.625, high: 39.625, low: 39.625, close: 39.625, volume: 0.0 };
+        native[30] = Bar { ts: 30, open: 34.2, high: 34.3, low: 20.0, close: 34.2, volume: 0.0 };
+        let mut whole = native.clone();
+        drawable(&mut whole, Timeframe::days(1), InstrumentKind::Etf);
+        assert_eq!(whole.len(), 39, "the print is left out");
+        assert_eq!(whole.iter().find(|b| b.ts == 30).map(|b| b.low), Some(34.2), "and the wick cut");
+
+        for start in 0..=native.len() {
+            let from = native.get(start).map_or(i64::MAX, |b| b.ts);
+            let expected: Vec<Bar> = whole.iter().copied().filter(|b| b.ts >= from).collect();
+            let tail = drawable_from(&native, start, Timeframe::days(1), InstrumentKind::Etf);
+            assert_eq!(tail, expected, "from {start}");
+        }
     }
 
     #[test]
