@@ -161,6 +161,10 @@ struct State {
     /// can see what a press would take hold of. Not while anything is being
     /// dragged: then the grip in hand is the one lit, from `drag`.
     hover_grip: Option<(usize, Grip)>,
+    /// The press just made ended a zig-zag on its last corner. Read by the
+    /// double-click handler, so the second press of a quick double-click
+    /// that already ended the drawing does not go on to open its text.
+    closed_by_press: bool,
     indicators: Vec<Drawn>,
     bar_style: BarStyle,
     bars_hidden: bool,
@@ -1112,6 +1116,7 @@ impl State {
             pointer: None,
             magnet: false,
             hover_grip: None,
+            closed_by_press: false,
             anchored: true,
             overhang: RIGHT_MARGIN,
             lead: 0,
@@ -1418,6 +1423,35 @@ impl State {
                 .filter(|(at, grip)| *at == index && *grip != Grip::Body)
                 .map(|(_, grip)| (grip, Lit::Hover)),
         }
+    }
+
+    /// Whether a press at (`x`, `y`) lands on the last corner a zig-zag
+    /// being laid down has pinned, which ends it there.
+    ///
+    /// A double-click ended one, but only a quick one: two presses further
+    /// apart than the desktop's double-click time are two presses, and each
+    /// pinned another corner on the same spot — a leg nobody can see, and an
+    /// end that comes apart when dragged. A press on the last corner is what
+    /// a slow double-click meant, and something to aim at besides.
+    ///
+    /// Only once two corners are pinned: ending on the first would leave a
+    /// single point, which is no drawing.
+    fn closes_path(&self, width: f64, height: f64, x: f64, y: f64) -> bool {
+        let Some(placing) = &self.placing else { return false };
+        let pinned = placing.points.len().saturating_sub(1);
+        if !placing.kind.is_path() || pinned < 2 {
+            return false;
+        }
+        let (first, visible) = self.slice();
+        if visible == 0 {
+            return false;
+        }
+        let plan = layout(self, width, height);
+        let Some(scale) = price_range(self, &self.bars[first..first + visible], &plan) else {
+            return false;
+        };
+        let projected = self.project(&plan, &scale, placing);
+        projected.corners.get(pinned - 1).is_some_and(|at| (at.0 - x).hypot(at.1 - y) <= omacharts_engine::drawings::GRIP_REACH)
     }
 
     /// The drawing under a pixel, topmost first, and which part of it.
@@ -3720,8 +3754,13 @@ impl ChartView {
         }
         let press = {
             let mut s = state.borrow_mut();
+            s.closed_by_press = false;
             if s.placing.is_none() {
                 Press::Elsewhere
+            } else if s.closes_path(width, height, x, y) {
+                s.drag = None;
+                s.closed_by_press = true;
+                Press::Finish
             } else {
                 let anchor = s.locate_with(width, height, x, y, ctrl);
                 let path = s.placing.as_ref().is_some_and(|d| d.kind.is_path());
@@ -4168,6 +4207,12 @@ impl ChartView {
             if presses < 2 {
                 return;
             }
+            // The press that made this a double-click already ended a
+            // zig-zag on its last corner; the drawing it left is not one to
+            // start typing into.
+            if std::mem::take(&mut state.borrow_mut().closed_by_press) {
+                return;
+            }
             // A zig-zag being laid down: the second click is the end of it.
             // Before everything else, because while one is in hand that is
             // the only thing a double-click can mean.
@@ -4526,8 +4571,21 @@ fn draw_pointer(cr: &cairo::Context, width: f64, height: f64, state: &State) {
         cr.save().ok();
         cr.rectangle(plan.plot_x, plan.price_y, plan.plot_w, plan.price_h);
         cr.clip();
-        let placed = state.project(&plan, &scale, placing);
-        draw_drawing(cr, state, &placed, placing, true, false, None);
+        // On the last corner of a zig-zag a press ends it, so it is drawn as
+        // it will be left — without the leg following the hand — with that
+        // corner lit.
+        let closing = state.pointer.is_some_and(|(x, y)| state.closes_path(width, height, x, y));
+        let shown = match closing {
+            true => {
+                let mut finished = placing.clone();
+                finished.finish_path();
+                Cow::Owned(finished)
+            }
+            false => Cow::Borrowed(placing),
+        };
+        let lit = closing.then(|| (Grip::Corner(shown.points.len().saturating_sub(1)), Lit::Hover));
+        let placed = state.project(&plan, &scale, &shown);
+        draw_drawing(cr, state, &placed, &shown, true, false, lit);
         cr.restore().ok();
     }
 
@@ -8257,6 +8315,30 @@ mod drawing_tests {
         state.tool = Some(DrawingKind::Ellipse);
         assert!(state.begin_placing(800.0, 400.0, 200.0, 150.0, false));
         assert_eq!(state.placing.as_ref().unwrap().config, Some(1));
+    }
+
+    /// A press back on a zig-zag's last corner ends it there, which is
+    /// what a double-click too slow to count as one meant: it used to pin
+    /// another corner on the same spot.
+    #[test]
+    fn a_press_on_the_last_corner_ends_a_zigzag() {
+        let (w, h) = (800.0, 400.0);
+        let mut state = charted(400);
+        state.tool = Some(DrawingKind::Zigzag);
+        assert!(state.begin_placing(w, h, 200.0, 150.0, false));
+        // One corner pinned: ending there would leave no drawing.
+        assert!(!state.closes_path(w, h, 200.0, 150.0));
+
+        // A second corner, pinned the way a press pins one.
+        let corner = state.locate(w, h, 300.0, 100.0).unwrap();
+        let placing = state.placing.as_mut().unwrap();
+        placing.move_last_corner(corner);
+        placing.add_corner(corner);
+
+        assert!(state.closes_path(w, h, 300.0, 100.0));
+        assert!(state.closes_path(w, h, 303.0, 102.0), "a hand a few pixels off still means that corner");
+        assert!(!state.closes_path(w, h, 200.0, 150.0), "the first corner is not where it ends");
+        assert!(!state.closes_path(w, h, 400.0, 200.0));
     }
 
     /// A paste puts the copies down, takes hold of them, and leaves one
