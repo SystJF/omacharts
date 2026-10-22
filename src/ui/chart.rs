@@ -157,6 +157,10 @@ struct State {
     /// has dragged past the start of the series. Zero at rest.
     lead: usize,
     drag: Option<Drag>,
+    /// The grip of a selected drawing the pointer rests on, lit so the hand
+    /// can see what a press would take hold of. Not while anything is being
+    /// dragged: then the grip in hand is the one lit, from `drag`.
+    hover_grip: Option<(usize, Grip)>,
     indicators: Vec<Drawn>,
     bar_style: BarStyle,
     bars_hidden: bool,
@@ -1107,6 +1111,7 @@ impl State {
             visible: 160,
             pointer: None,
             magnet: false,
+            hover_grip: None,
             anchored: true,
             overhang: RIGHT_MARGIN,
             lead: 0,
@@ -1397,6 +1402,22 @@ impl State {
         (0..self.drawings.len())
             .filter(|i| self.project(&plan, &scale, &self.drawings[*i]).touches(rect))
             .collect()
+    }
+
+    /// The grip on drawing `index` that the hand is on, if any, and whether
+    /// it is holding it. A body is never lit: the whole drawing is not a
+    /// point to aim at.
+    fn lit_grip(&self, index: usize) -> Option<(Grip, Lit)> {
+        match self.drag {
+            Some(Drag::Grip { index: held, grip, .. }) => {
+                (held == index && grip != Grip::Body).then_some((grip, Lit::Held))
+            }
+            Some(_) => None,
+            None => self
+                .hover_grip
+                .filter(|(at, grip)| *at == index && *grip != Grip::Body)
+                .map(|(_, grip)| (grip, Lit::Hover)),
+        }
     }
 
     /// The drawing under a pixel, topmost first, and which part of it.
@@ -3494,10 +3515,20 @@ impl ChartView {
                 layout(&s, area.width() as f64, area.height() as f64).control_at(x, y).is_some()
             };
             let (armed, over_drawing, over_indicator) = {
-                let s = state.borrow();
+                let mut s = state.borrow_mut();
                 let (w, h) = (area.width() as f64, area.height() as f64);
                 let free = s.drag.is_none() && s.tool.is_none();
                 let over = free.then(|| s.drawing_at(w, h, x, y)).flatten();
+                // The grip under the hand is lit, which is a redraw of the
+                // chart — but only on the motion that reaches a grip or leaves
+                // one, not on every pixel of travel.
+                if s.drag.is_none() {
+                    let hover = over.filter(|(_, grip)| *grip != Grip::Body);
+                    if s.hover_grip != hover {
+                        s.hover_grip = hover;
+                        area.queue_draw();
+                    }
+                }
                 // Only when nothing drawn is under the pointer, which is
                 // also when a click would select the indicator.
                 let indicator = free
@@ -3531,8 +3562,14 @@ impl ChartView {
         let state = self.state.clone();
         let pointer = self.pointer.clone();
         let on_hover = self.on_hover.clone();
+        let area = self.area.clone();
         motion.connect_leave(move |_| {
-            state.borrow_mut().pointer = None;
+            let mut s = state.borrow_mut();
+            s.pointer = None;
+            if s.hover_grip.take().is_some() {
+                area.queue_draw();
+            }
+            drop(s);
             if let Some(handler) = on_hover.borrow().as_ref() {
                 handler(None);
             }
@@ -4074,9 +4111,12 @@ impl ChartView {
                     }
                     return;
                 }
-                Some(Drag::Grip { .. }) => {
+                Some(Drag::Grip { index, grip, .. }) => {
                     let moved: Vec<Drawing> = {
                         let mut s = state.borrow_mut();
+                        // Let go of where the hand still is: lit as under it,
+                        // no longer as held.
+                        s.hover_grip = (grip != Grip::Body).then_some((index, grip));
                         let before = s.undo.last().cloned().unwrap_or_default();
                         let moved: Vec<Drawing> = s
                             .drawings
@@ -4092,6 +4132,7 @@ impl ChartView {
                         moved
                     };
                     if let Some(view) = view.upgrade() {
+                        view.area.queue_draw();
                         for drawing in moved {
                             view.tell(DrawingEvent::Changed(drawing));
                         }
@@ -4486,7 +4527,7 @@ fn draw_pointer(cr: &cairo::Context, width: f64, height: f64, state: &State) {
         cr.rectangle(plan.plot_x, plan.price_y, plan.plot_w, plan.price_h);
         cr.clip();
         let placed = state.project(&plan, &scale, placing);
-        draw_drawing(cr, state, &placed, placing, true, false);
+        draw_drawing(cr, state, &placed, placing, true, false, None);
         cr.restore().ok();
     }
 
@@ -5652,6 +5693,19 @@ fn preset_number(key: gtk::gdk::Key) -> Option<usize> {
 /// Half the side of a grip, the small square at a selected drawing's anchor.
 const GRIP_HALF: f64 = 3.5;
 
+/// Half the side of the soft square round the grip under the hand. A whole
+/// number of pixels more than the grip's own half, so both edges land on
+/// the same pixel grid and the halo stays as crisp as the grip it frames.
+const GRIP_HALO: f64 = 8.5;
+
+/// How a grip the hand is on is drawn: a size up, in a square halo of its
+/// own colour, and a wider, stronger one once it is held.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Lit {
+    Hover,
+    Held,
+}
+
 /// What has been drawn on the symbol, over the candles and the indicator
 /// lines and under the strips, clipped to the price plot so a line drawn
 /// off the top does not cross an RSI.
@@ -5665,7 +5719,9 @@ fn draw_drawings(cr: &cairo::Context, state: &State, plan: &Layout, scale: &Pric
     for (index, drawing) in state.drawings.iter().enumerate() {
         let projected = state.project(plan, scale, drawing);
         let typing = state.editing == Some(index);
-        draw_drawing(cr, state, &projected, drawing, state.selected.contains(&index), typing);
+        let selected = state.selected.contains(&index);
+        let lit = selected.then(|| state.lit_grip(index)).flatten();
+        draw_drawing(cr, state, &projected, drawing, selected, typing, lit);
         if typing {
             draw_editing_ground(cr, state, drawing);
         }
@@ -5688,6 +5744,7 @@ fn draw_drawing(
     drawing: &Drawing,
     selected: bool,
     typing: bool,
+    lit: Option<(Grip, Lit)>,
 ) {
     let style = drawing.style(&state.configs);
     let colour = style.colour.hex(&state.theme);
@@ -5814,16 +5871,25 @@ fn draw_drawing(
         }
         for grip in drawing.grips() {
             let Some((x, y)) = projected.grip(grip) else { continue };
+            // The grip under the hand says so: without it, nothing tells a
+            // hand reaching for a point whether a press takes the point or
+            // the line, nor, once dragging, which point it has.
+            let shine = lit.filter(|(at, _)| *at == grip).map(|(_, how)| how);
+            if let Some(how) = shine {
+                let (half, alpha) = match how {
+                    Lit::Hover => (GRIP_HALO, 0.22),
+                    Lit::Held => (GRIP_HALO + 2.0, 0.32),
+                };
+                colors::set_source_alpha(cr, &colour, alpha);
+                cr.rectangle(x - half, y - half, 2.0 * half, 2.0 * half);
+                let _ = cr.fill();
+            }
+            let half = GRIP_HALF + if shine.is_some() { 1.0 } else { 0.0 };
             colors::set_source(cr, &state.theme.ui.background);
-            cr.rectangle(
-                x - GRIP_HALF - 1.0,
-                y - GRIP_HALF - 1.0,
-                2.0 * GRIP_HALF + 2.0,
-                2.0 * GRIP_HALF + 2.0,
-            );
+            cr.rectangle(x - half - 1.0, y - half - 1.0, 2.0 * half + 2.0, 2.0 * half + 2.0);
             let _ = cr.fill();
             colors::set_source(cr, &colour);
-            cr.rectangle(x - GRIP_HALF, y - GRIP_HALF, 2.0 * GRIP_HALF, 2.0 * GRIP_HALF);
+            cr.rectangle(x - half, y - half, 2.0 * half, 2.0 * half);
             let _ = cr.fill();
         }
     }
