@@ -1856,6 +1856,10 @@ pub struct Window {
     /// the window has no room for the whole of it. The handle reading back
     /// this width is the window resizing; any other is somebody dragging.
     sidebar_laid: Cell<i32>,
+    /// The clock settings, read once: every streamed tick asks for them, and
+    /// an unset format is the desktop's, which is a GSettings lookup. Read
+    /// again when a preference or a command changes them.
+    clock_settings: Cell<Option<(omacharts_engine::clock::ChartZone, omacharts_engine::clock::TimeFormat)>>,
     store: Rc<Store>,
     index: crate::inventory::Inventory,
     theming: Rc<RefCell<Theming>>,
@@ -1999,6 +2003,7 @@ impl Window {
             sidebar_width: Cell::new(DEFAULT_SIDEBAR_WIDTH),
             sidebar_placed: Cell::new(false),
             sidebar_laid: Cell::new(0),
+            clock_settings: Cell::new(None),
             store: store.clone(),
             index: index.clone(),
             theming: theming.clone(),
@@ -2367,14 +2372,9 @@ impl Window {
                     | omacharts_engine::Params::Stochastic { height, .. } => *height = share,
                     _ => return,
                 }
-                // A height is geometry rather than a choice of indicators, so
-                // dragging one on a chart that is on a template does not take
-                // it off the template: the template takes the height, and the
+                // On a template, the template takes the height, and the
                 // charts on it keep one shape.
-                match pane.template.get() {
-                    Some(template) => resizer.set_template_indicators(template, indicators),
-                    None => resizer.set_indicators_of(&pane, indicators),
-                }
+                resizer.change_indicators_of(&pane, indicators);
             }
         });
 
@@ -2387,7 +2387,7 @@ impl Window {
             let Some(pane) = mover.pane(id) else { return };
             let mut indicators = pane.indicators.borrow().clone();
             if omacharts_engine::indicators::move_pane(&mut indicators, indicator_id, direction) {
-                mover.set_indicators_of(&pane, indicators);
+                mover.change_indicators_of(&pane, indicators);
             }
         });
 
@@ -2402,7 +2402,7 @@ impl Window {
                 .filter(|i| i.id != indicator_id)
                 .cloned()
                 .collect();
-            closer.set_indicators_of(&pane, kept);
+            closer.change_indicators_of(&pane, kept);
         });
 
         // The pointer on a Follow chart draws a crosshair on the other Follow
@@ -6371,6 +6371,10 @@ impl Window {
         timeframe: Timeframe,
         bars: &[omacharts_engine::Bar],
     ) {
+        // The clock goes with them: every way a chart is handed a series
+        // comes through here, the memo included, and a chart painted from
+        // the memo was left reading the default clock.
+        pane.view.set_clock(self.clock_for(instrument));
         let drawn = self.drawn_indicators(pane, instrument, timeframe, bars);
         pane.view.set_indicators(drawn);
     }
@@ -6390,22 +6394,55 @@ impl Window {
         let theme = self.theming.borrow().theme();
         let all = pane.indicators.borrow().clone();
         let colors = omacharts_engine::palette_colors(&all, &theme);
+        let context = omacharts_engine::indicators::Context::of(
+            instrument,
+            timeframe,
+            self.clock_for(instrument).zone,
+        );
         let drawn: Vec<Drawn> = all
             .iter()
             .zip(colors)
             .map(|(indicator, color)| Drawn {
                 color,
-                output: omacharts_engine::indicators::compute(
-                    indicator,
-                    bars,
-                    instrument.session_origin,
-                    timeframe,
-                    Some(instrument.kind),
-                ),
+                output: omacharts_engine::indicators::compute_in(indicator, bars, &context),
                 indicator: indicator.clone(),
             })
             .collect();
         drawn
+    }
+
+    /// The clock a chart of this instrument reads, as the settings say.
+    pub fn clock_for(&self, instrument: &Instrument) -> crate::ui::chart::Clock {
+        let (zone, format) = match self.clock_settings.get() {
+            Some(settings) => settings,
+            None => {
+                let read = (crate::clock::zone(&self.store), crate::clock::format(&self.store));
+                self.clock_settings.set(Some(read));
+                read
+            }
+        };
+        crate::ui::chart::Clock {
+            zone: zone.for_instrument(Some(instrument)),
+            format,
+            named: zone == omacharts_engine::clock::ChartZone::Exchange,
+        }
+    }
+
+    /// Every chart on screen in the time zone and the format the settings now
+    /// name: the axis relabelled, and the indicators of time worked out again,
+    /// since a window typed in the chart's clock moves when the clock does.
+    pub fn adopt_clock(self: &Rc<Self>) {
+        self.clock_settings.set(None);
+        let panes = self.panes.borrow().clone();
+        for pane in &panes {
+            let instrument = pane.instrument.borrow().clone();
+            let Some(instrument) = instrument else { continue };
+            pane.view.set_clock(self.clock_for(&instrument));
+            let timeframe = pane.timeframe.get();
+            let drawn =
+                pane.view.with_bars(|bars| self.drawn_indicators(pane, &instrument, timeframe, bars));
+            pane.view.set_indicators(drawn);
+        }
     }
 
     // -- streaming ---------------------------------------------------------
@@ -6766,16 +6803,26 @@ impl Window {
     /// Indicators belong to one chart, so this is the focused one's.
     pub fn set_indicators(self: &Rc<Self>, indicators: Vec<Indicator>) {
         let pane = self.focused_pane();
-        self.set_indicators_of(&pane, indicators);
+        self.change_indicators_of(&pane, indicators);
     }
 
-    /// Give one chart these indicators as its own.
+    /// Change what a chart shows, from the chart: on a template, the
+    /// template's indicators — and so every chart on it — and otherwise the
+    /// chart's own.
     ///
-    /// A chart on a template lets go of it first, keeping what it showed:
-    /// every way of changing a chart's indicators from the chart itself — the
-    /// picker, the legend, a strip's corner, a command — arrives here, and
-    /// none of them is asking to change every other chart on the template.
-    /// The template's own editor is how that is asked for.
+    /// One rule for every control on the chart — the legend's eye and bin, a
+    /// strip's corner, its settings — so that two buttons side by side cannot
+    /// mean "every chart" and "this chart" between them. A chart is taken off
+    /// its template by choosing None for it, not by touching an indicator.
+    fn change_indicators_of(self: &Rc<Self>, pane: &Rc<ChartPane>, indicators: Vec<Indicator>) {
+        match pane.template.get() {
+            Some(template) => self.set_template_indicators(template, indicators),
+            None => self.set_indicators_of(pane, indicators),
+        }
+    }
+
+    /// Give one chart these indicators as its own, taking it off any
+    /// template first and keeping what it showed.
     fn set_indicators_of(self: &Rc<Self>, pane: &Rc<ChartPane>, indicators: Vec<Indicator>) {
         if pane.template.take().is_some() {
             self.write_header_of(pane);
@@ -6818,9 +6865,7 @@ impl Window {
     ///
     /// Onto one, the chart shows the template's indicators in place of its
     /// own, which go. Onto none, it shows no indicators at all: None is a
-    /// choice of indicators like the others, the empty one. A chart is taken
-    /// off its template keeping what it showed by changing its indicators,
-    /// not by this.
+    /// choice of indicators like the others, the empty one.
     pub fn set_template(self: &Rc<Self>, template: Option<u32>) {
         let pane = self.focused_pane();
         self.put_on_template(&pane, template);
@@ -7128,7 +7173,7 @@ impl Window {
         let timeframe = pane.timeframe.get();
         let all = pane.indicators.borrow().clone();
         let colors = omacharts_engine::palette_colors(&all, &theme);
-        for (indicator, colour) in all.iter().zip(colors) {
+        for (indicator, colour) in all.iter().zip(colors).filter(|(i, _)| i.in_legend) {
             let id = indicator.id;
 
             let dot = gtk::DrawingArea::new();
@@ -7181,12 +7226,13 @@ impl Window {
             toggle.add_css_class("legend-button");
             toggle.set_tooltip_text(Some(if indicator.visible { "Hide" } else { "Show" }));
             let this = self.clone();
+            let shown = pane.clone();
             toggle.connect_clicked(move |_| {
-                let mut indicators = this.indicators();
+                let mut indicators = shown.indicators.borrow().clone();
                 if let Some(found) = indicators.iter_mut().find(|i| i.id == id) {
                     found.visible = !found.visible;
                 }
-                this.set_indicators(indicators);
+                this.change_indicators_of(&shown, indicators);
             });
 
             let settings = gtk::Button::from_icon_name("emblem-system-symbolic");
@@ -7211,7 +7257,7 @@ impl Window {
             remove.connect_clicked(move |_| {
                 let kept: Vec<Indicator> =
                     owner.indicators.borrow().iter().filter(|i| i.id != id).cloned().collect();
-                this.set_indicators_of(&owner, kept);
+                this.change_indicators_of(&owner, kept);
             });
 
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
@@ -8881,6 +8927,15 @@ impl Window {
 
     pub fn indicators(&self) -> Vec<Indicator> {
         self.focused_pane().indicators.borrow().clone()
+    }
+
+    /// What the focused chart is of, and whether it is keeping regular hours
+    /// only: what an editor needs to say what an indicator of time will do
+    /// on it.
+    pub fn focused_market(&self) -> Option<(Instrument, omacharts_engine::Session)> {
+        let pane = self.focused_pane();
+        let instrument = pane.instrument.borrow().clone()?;
+        Some((instrument, pane.session.get()))
     }
 
     /// Open the chart on the symbol last looked at, or — the first time ever —

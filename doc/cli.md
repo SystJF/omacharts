@@ -190,19 +190,20 @@ exits `6`, as a chart verb does.
 Putting a chart on a template replaces its own indicators with the template's.
 `chart set --template none` puts it on none, which is the empty set: the chart
 is left with no indicators. To start from a template and make it the chart's
-own, change the chart's indicators instead — that is the next paragraph.
+own, make a template from it — that is the next paragraph.
 
-**Changing a chart's indicators takes it off its template.** `chart indicator
-add`, `remove` and `set` on a chart that is on one first let go of the
-template, keeping its indicators, then make the change — and say so, because
-otherwise adding an RSI to one chart would add it to every chart on the
-template. To change all of them, change the template:
+**Changing a chart's indicators changes its template.** `chart indicator
+add`, `remove` and `set` on a chart that is on one change the template, and
+every chart on it, the same as the window's Indicators page does — and say
+so, naming the template and how many charts followed:
 
 ```
 omacharts chart indicator add sma --period 200
-# added SMA(200) on pos:0 SPY 1D in "Macro"; it no longer uses chart
-# template "Default", and keeps the indicators it had
+# added SMA(200) on pos:0 SPY 1D in "Macro", in chart template "Default"
 ```
+
+To give one chart a set of its own, make a template from it (right-click the
+chart › Template › Create new template from chart…) and change that one.
 
 Renaming a template keeps every chart on it, since charts name it by id.
 Deleting one leaves its charts with a copy of its indicators, as their own.
@@ -225,6 +226,31 @@ omacharts config set chart_header template,symbol
 `none` is a header with nothing in it. The day's move comes from the same
 cached quotes the watchlist shows, so it is as fresh as the sidebar and fetches
 nothing of its own.
+
+## The clock
+
+Charts read one time zone and write times one way, for the whole app: the time
+axis, the crosshair, the times typed into an indicator, and the times
+`chart drawing` reads and prints. A window that is open changes at once:
+
+```
+omacharts config set chart_time_zone Europe/London
+omacharts config set chart_time_zone exchange
+omacharts config set time_format 12h
+```
+
+The zone is an IANA name, New York until one is set; `exchange` puts each chart
+in the clock of the exchange its instrument trades on. A name that is not a
+zone is refused rather than read back as New York. The format is `24h` or
+`12h`, and until one is set it follows the desktop's clock.
+
+A Session Times range keeps the chart's clock unless it is given one of its
+own, which is what a market named after a city wants — London opens at eight in
+London:
+
+```
+omacharts chart indicator set session_times --add-range custom --name London --from 8am --to 4:30pm --zone Europe/London
+```
 
 ## Link modes
 

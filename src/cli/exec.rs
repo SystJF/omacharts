@@ -11,9 +11,11 @@
 
 use serde_json::{json, Value};
 
+use chrono_tz::Tz;
+use omacharts_engine::indicators::time::{MAX_ALPHA, MIN_ALPHA};
 use omacharts_engine::indicators::{
-    bollinger::MAX_DEVIATIONS, LineStyle, Stroke, MAX_FILL_ALPHA, MAX_PANE_SHARE, MIN_FILL_ALPHA,
-    MIN_PANE_SHARE,
+    bollinger::MAX_DEVIATIONS, Hours, LineStyle, Preset, Stroke, TimeRange, MAX_FILL_ALPHA,
+    MAX_PANE_SHARE, MIN_FILL_ALPHA, MIN_PANE_SHARE,
 };
 use omacharts_engine::providers;
 use omacharts_engine::theme::{
@@ -182,6 +184,9 @@ pub fn dispatch(
                 match required(m, "KEY") {
                     Ok(key) if key == crate::feeds::SETTING => live.adopt_feed(),
                     Ok(key) if key == crate::header::SETTING => live.adopt_header(),
+                    Ok(key) if key == crate::clock::SETTING_ZONE || key == crate::clock::SETTING_FORMAT => {
+                        live.adopt_clock()
+                    }
                     _ => {}
                 }
             }
@@ -1495,26 +1500,47 @@ fn chart_indicator(
     let kind = indicator_kind(m, action)?;
     let edits = Edits::read(m)?;
 
+    // A chart on a template shows the template's indicators, and changing
+    // them from the chart changes the template — and every chart on it — the
+    // same as the window does. Taking a chart off its template is its own
+    // choice: `chart set --template none`.
+    if let Some(id) = chart["template"].as_u64()
+        && let Some(template) = crate::templates::get(store, id as u32)
+    {
+        let mut list: Vec<Value> =
+            template.indicators.iter().map(to_value).collect::<Result<_, _>>()?;
+        let text = edit_indicators(m, action, kind, &edits, &mut list, "this chart's template")?;
+        let indicators: Vec<Indicator> = serde_json::from_value(Value::Array(list))
+            .map_err(|e| Fault::new(super::EXIT_ERROR, e.to_string()))?;
+        crate::templates::set_indicators(store, template.id, indicators.clone());
+        let following = follow_template(workspace, template.id, Some(&to_value(&indicators)?));
+        workspace.save(store);
+        let others = following.saturating_sub(1);
+        let where_at = format!(
+            "{text} on {} in {:?}, in chart template {:?}{}",
+            chart_label(workspace.book(at)?, pane),
+            workspace.name_of(at),
+            template.name,
+            match others {
+                0 => String::new(),
+                1 => ", and on the other chart using it".to_string(),
+                n => format!(", and on the {n} other charts using it"),
+            }
+        );
+        return said(
+            as_json,
+            json!({"chart": pane, "template": template.id, "message": where_at, "charts": following}),
+            where_at,
+        );
+    }
+
     let target = workspace.book_mut(at)?;
     let Some(chart) = charts::pane_mut(target, pane) else {
         return Err(Fault::not_found(format!("no chart {pane}")));
     };
-    // A chart on a template shows the template's indicators, and changing one
-    // of them here would change every chart on it. So the chart lets go of
-    // the template first, keeping what it showed, and says it did — the same
-    // as adding one from the window does. The template itself is changed
-    // with `template indicator`.
-    let left = match chart["template"].as_u64() {
-        Some(id) => {
-            chart["template"] = Value::Null;
-            Some(
-                crate::templates::get(store, id as u32)
-                    .map(|t| t.name)
-                    .unwrap_or_else(|| format!("id:{id}")),
-            )
-        }
-        None => None,
-    };
+    // A template that is no longer there is no template: what the chart shows
+    // is its own, and it is written down as on none, as the window reads it.
+    chart["template"] = Value::Null;
     let indicators = chart["indicators"].as_array_mut().ok_or_else(|| {
         Fault::new(super::EXIT_ERROR, "this chart's indicators are not a list".into())
     })?;
@@ -1525,16 +1551,11 @@ fn chart_indicator(
     // What it actually hit, not just that it worked. A command that named no
     // chart has to say which one it found, or nobody can catch it reaching
     // the wrong one.
-    let mut where_at = format!(
+    let where_at = format!(
         "{text} on {} in {:?}",
         chart_label(workspace.book(at)?, pane),
         workspace.name_of(at)
     );
-    if let Some(name) = left {
-        where_at.push_str(&format!(
-            "; it no longer uses chart template {name:?}, and keeps the indicators it had"
-        ));
-    }
     said(as_json, json!({"chart": pane, "message": where_at}), where_at)
 }
 
@@ -1579,6 +1600,9 @@ fn list_indicators(listed: &[Value], whose: Value, as_json: bool) -> String {
                     "color": i["color"],
                     "stroke": i["stroke"],
                     "visible": i["visible"],
+                    // Absent from an indicator stored before it could be
+                    // left out, which was in the legend.
+                    "in_legend": i.get("in_legend").cloned().unwrap_or(json!(true)),
                 })
             })
             .collect();
@@ -1617,6 +1641,15 @@ fn edit_indicators(
     whose: &str,
 ) -> Result<String, Fault> {
     Ok(match action {
+        // One Session Times holds every range; a second would shade the same
+        // ETH twice, which only reads as the shading being too dark.
+        "add" if kind == IndicatorKind::SessionTimes
+            && indicators.iter().any(|i| is_kind(i, kind)) =>
+        {
+            return Err(Fault::usage(format!(
+                "{whose} already has Session Times; add a range to it with `indicator set session_times --add-range`"
+            )));
+        }
         "add" => {
             let next = indicators
                 .iter()
@@ -1736,6 +1769,7 @@ fn chart_drawing(
     let shows = chart["shows_drawings"].as_bool().unwrap_or(true);
     let sends = chart["sends_drawings"].as_bool().unwrap_or(true);
     let configs = store.drawing_configurations();
+    let zone = chart_zone(store, &symbol, suffix.as_deref());
 
     // What this chart shows: the symbol's, when it is shown what other
     // charts send, and its own either way.
@@ -1759,18 +1793,18 @@ fn chart_drawing(
             true => Ok(format!(
                 "{{\"chart\":{pane},\"symbol\":{},\"shows_drawings\":{shows},\"sends_drawings\":{sends},\"drawings\":[{}]}}\n",
                 json!(spell(&symbol, suffix.as_deref())),
-                listed.iter().map(|d| drawing_json(d, &configs).to_string()).collect::<Vec<_>>().join(",")
+                listed.iter().map(|d| drawing_json(d, &configs, zone).to_string()).collect::<Vec<_>>().join(",")
             )),
             false if listed.is_empty() => Ok(format!("nothing drawn on {}\n", spell(&symbol, suffix.as_deref()))),
-            false => Ok(listed.iter().map(|d| describe_drawing(d, &configs)).collect::<Vec<_>>().join("\n") + "\n"),
+            false => Ok(listed.iter().map(|d| describe_drawing(d, &configs, zone)).collect::<Vec<_>>().join("\n") + "\n"),
         };
     }
 
     // Every flag is read and checked before anything is written, so one bad
     // anchor leaves the symbol's drawings exactly as they were.
-    let from = anchor(m, "from")?;
-    let to = anchor(m, "to")?;
-    let corners = anchors(m, "point")?;
+    let from = anchor(m, "from", zone)?;
+    let to = anchor(m, "to", zone)?;
+    let corners = anchors(m, "point", zone)?;
     if corners.len() == 1 {
         return Err(Fault::usage(
             "a zig-zag needs at least two --point corners; one corner is not a drawing".into(),
@@ -1883,7 +1917,7 @@ fn chart_drawing(
                 };
                 drawing.id = id;
             }
-            format!("drew {}", describe_drawing(&drawing, &configs))
+            format!("drew {}", describe_drawing(&drawing, &configs, zone))
         }
         "set" => {
             let Some(id) = id else {
@@ -1964,7 +1998,7 @@ fn chart_drawing(
                     write_locals(workspace, at, pane, &locals)?;
                 }
             }
-            format!("set {}", describe_drawing(&drawing, &configs))
+            format!("set {}", describe_drawing(&drawing, &configs, zone))
         }
         "remove" => {
             let Some(id) = id else {
@@ -1977,7 +2011,7 @@ fn chart_drawing(
             } else {
                 store.remove_drawing(id);
             }
-            format!("removed {}", describe_drawing(&found, &configs))
+            format!("removed {}", describe_drawing(&found, &configs, zone))
         }
         "clear" => {
             let count = shown(store, &locals).len();
@@ -2165,16 +2199,16 @@ fn find_drawing(
     found.ok_or_else(|| Fault::not_found(format!("no drawing {id} on {}", spell(symbol, suffix))))
 }
 
-fn drawing_json(d: &omacharts_engine::Drawing, configs: &omacharts_engine::Configurations) -> Value {
+fn drawing_json(d: &omacharts_engine::Drawing, configs: &omacharts_engine::Configurations, zone: Tz) -> Value {
     json!({
         "id": d.id,
         "kind": d.kind.key(),
-        "from": {"ts": d.from.ts, "when": spell_moment(d.from.ts), "price": d.from.price},
-        "to": {"ts": d.to.ts, "when": spell_moment(d.to.ts), "price": d.to.price},
+        "from": {"ts": d.from.ts, "when": spell_moment(d.from.ts, zone), "price": d.from.price},
+        "to": {"ts": d.to.ts, "when": spell_moment(d.to.ts, zone), "price": d.to.price},
         // Only a zig-zag has corners of its own; for every other kind they
         // would be `from` and `to` said a second time.
         "corners": d.kind.is_path().then(|| d.corners().iter().map(|a| json!({
-            "ts": a.ts, "when": spell_moment(a.ts), "price": a.price,
+            "ts": a.ts, "when": spell_moment(a.ts, zone), "price": a.price,
         })).collect::<Vec<_>>()),
         "config": d.config,
         // Where a look of its own came from, for a drawing that has one.
@@ -2219,7 +2253,7 @@ fn style_json(style: &omacharts_engine::Style) -> Value {
 
 /// A drawing, said back in one line:
 /// `#3 line  2026-09-01 180.50 → 2026-09-19 192.00  configuration 4 · global`.
-fn describe_drawing(drawing: &omacharts_engine::Drawing, configs: &omacharts_engine::Configurations) -> String {
+fn describe_drawing(drawing: &omacharts_engine::Drawing, configs: &omacharts_engine::Configurations, zone: Tz) -> String {
     let look = match drawing.config {
         Some(n) => format!("configuration {n}"),
         None => describe_style(drawing.kind, drawing.style(configs)),
@@ -2233,12 +2267,12 @@ fn describe_drawing(drawing: &omacharts_engine::Drawing, configs: &omacharts_eng
     };
     // A word is at one point, so saying the same moment twice would be noise.
     let span = match drawing.kind.is_text() {
-        true => format!("{} {:.2}", spell_moment(drawing.from.ts), drawing.from.price),
+        true => format!("{} {:.2}", spell_moment(drawing.from.ts, zone), drawing.from.price),
         false => format!(
             "{} {:.2} → {} {:.2}",
-            spell_moment(drawing.from.ts),
+            spell_moment(drawing.from.ts, zone),
             drawing.from.price,
-            spell_moment(drawing.to.ts),
+            spell_moment(drawing.to.ts, zone),
             drawing.to.price
         ),
     };
@@ -2473,38 +2507,52 @@ fn on_off(on: bool) -> &'static str {
     }
 }
 
-/// A moment as a person would write it: the date alone when it is midnight
-/// local time, the minute otherwise.
-fn spell_moment(ts: i64) -> String {
-    use chrono::{Local, TimeZone};
-    match Local.timestamp_opt(ts, 0).single() {
+/// A moment as a person would write it, in the chart's clock: the date alone
+/// when it is midnight there, the minute otherwise.
+fn spell_moment(ts: i64, zone: Tz) -> String {
+    use chrono::TimeZone;
+    match zone.timestamp_opt(ts, 0).single() {
         Some(at) if at.format("%H:%M").to_string() == "00:00" => at.format("%Y-%m-%d").to_string(),
         Some(at) => at.format("%Y-%m-%dT%H:%M").to_string(),
         None => ts.to_string(),
     }
 }
 
-/// `WHEN,PRICE` as an anchor. The moment is a local date, a local date and
-/// time, or unix seconds; the price is a number.
-fn anchor(m: &clap::ArgMatches, id: &str) -> Result<Option<omacharts_engine::Anchor>, Fault> {
+/// `WHEN,PRICE` as an anchor. The moment is a date, a date and time — both
+/// read in the chart's clock, which is the one its axis is labelled in — or
+/// unix seconds; the price is a number.
+fn anchor(m: &clap::ArgMatches, id: &str, zone: Tz) -> Result<Option<omacharts_engine::Anchor>, Fault> {
     match arg(m, id) {
         None => Ok(None),
-        Some(text) => read_anchor(text, id).map(Some),
+        Some(text) => read_anchor(text, id, zone).map(Some),
     }
 }
 
 /// The same, for a flag that may be given more than once: a zig-zag's
 /// corners, in the order they were typed.
-fn anchors(m: &clap::ArgMatches, id: &str) -> Result<Vec<omacharts_engine::Anchor>, Fault> {
+fn anchors(m: &clap::ArgMatches, id: &str, zone: Tz) -> Result<Vec<omacharts_engine::Anchor>, Fault> {
     m.get_many::<String>(id)
         .into_iter()
         .flatten()
-        .map(|text| read_anchor(text, id))
+        .map(|text| read_anchor(text, id, zone))
         .collect()
 }
 
-fn read_anchor(text: &str, id: &str) -> Result<omacharts_engine::Anchor, Fault> {
-    use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
+/// The clock a chart of this symbol reads, as the settings say.
+///
+/// The whole inventory is read only when each chart keeps its exchange's
+/// clock, which is the one case where which instrument it is matters.
+fn chart_zone(store: &Store, symbol: &str, suffix: Option<&str>) -> Tz {
+    let zone = crate::clock::zone(store);
+    if zone != omacharts_engine::clock::ChartZone::Exchange {
+        return zone.for_instrument(None);
+    }
+    let index = crate::inventory::everything();
+    zone.for_instrument(index.find(symbol, suffix))
+}
+
+fn read_anchor(text: &str, id: &str, zone: Tz) -> Result<omacharts_engine::Anchor, Fault> {
+    use chrono::{NaiveDate, NaiveDateTime, TimeZone};
     let bad = || Fault::usage(format!("--{id} takes WHEN,PRICE — like 2026-09-01,180.5 or 2026-09-01T14:30,180.5 — not {text:?}"));
     let (when, price) = text.rsplit_once(',').ok_or_else(bad)?;
     let price: f64 = price.trim().parse().map_err(|_| bad())?;
@@ -2512,10 +2560,10 @@ fn read_anchor(text: &str, id: &str) -> Result<omacharts_engine::Anchor, Fault> 
     let ts = if let Ok(seconds) = when.parse::<i64>() {
         seconds
     } else if let Ok(at) = NaiveDateTime::parse_from_str(when, "%Y-%m-%dT%H:%M") {
-        Local.from_local_datetime(&at).single().ok_or_else(bad)?.timestamp()
+        zone.from_local_datetime(&at).earliest().ok_or_else(bad)?.timestamp()
     } else if let Ok(day) = NaiveDate::parse_from_str(when, "%Y-%m-%d") {
         let at = day.and_hms_opt(0, 0, 0).ok_or_else(bad)?;
-        Local.from_local_datetime(&at).single().ok_or_else(bad)?.timestamp()
+        zone.from_local_datetime(&at).earliest().ok_or_else(bad)?.timestamp()
     } else {
         return Err(bad());
     };
@@ -2600,6 +2648,14 @@ fn rail_label(store: &Store, book: &Value) -> String {
 
 fn describe_indicator(stored: &Value) -> String {
     let kind = stored["kind"].as_str().unwrap_or("?");
+    // The indicators of time are described by what they cover rather than by
+    // lengths, and the engine already says that the way the legend does.
+    if let Some(found) = IndicatorKind::ALL.into_iter().find(|k| k.key() == kind)
+        && found.category() == omacharts_engine::indicators::Category::Time
+        && let Ok(indicator) = serde_json::from_value::<Indicator>(stored.clone())
+    {
+        return indicator.label();
+    }
     let mut text = IndicatorKind::ALL
         .into_iter()
         .find(|k| k.key() == kind)
@@ -2654,7 +2710,39 @@ struct Edits {
     oversold: Option<f64>,
     bands: Option<Vec<usize>>,
     band_alpha: Option<f64>,
+    /// Session Times' ranges, counted from one as a command names them.
+    add_range: Option<Preset>,
+    remove_range: Option<usize>,
+    range: Option<usize>,
+    name: Option<String>,
+    from: Option<u32>,
+    to: Option<u32>,
+    /// `Some(None)` puts a range back on the chart's own clock.
+    zone: Option<Option<String>>,
+    shade_alpha: Option<f64>,
     visible: Option<bool>,
+    legend: Option<bool>,
+}
+
+/// A time of day as `--from` or `--to` was given it.
+fn time_of_day(m: &clap::ArgMatches, id: &str) -> Result<Option<u32>, Fault> {
+    match arg(m, id) {
+        None => Ok(None),
+        Some(text) => omacharts_engine::clock::parse_time(text).map(Some).ok_or_else(|| {
+            Fault::usage(format!("--{id} takes a time of day such as 9am, 09:30 or 2130, not {text:?}"))
+        }),
+    }
+}
+
+/// A range's place in the list, from one, as a command counts.
+fn place(m: &clap::ArgMatches, id: &str) -> Result<Option<usize>, Fault> {
+    match arg(m, id) {
+        None => Ok(None),
+        Some(text) => match text.parse::<usize>() {
+            Ok(n) if n >= 1 => Ok(Some(n - 1)),
+            _ => Err(Fault::usage(format!("--{id} takes a range's number, from 1, not {text:?}"))),
+        },
+    }
 }
 
 impl Edits {
@@ -2731,7 +2819,34 @@ impl Edits {
             // for the same reason as the height above: a figure it would
             // quietly bring back reads as the command having worked.
             band_alpha: bounded(m, "band-alpha", MIN_FILL_ALPHA, MAX_FILL_ALPHA)?,
+            add_range: match arg(m, "add-range") {
+                None => None,
+                Some(text) => Some(Preset::from_key(text).ok_or_else(|| {
+                    Fault::usage(format!("{text:?} is not a range; try eth, rth, london or custom"))
+                })?),
+            },
+            remove_range: place(m, "remove-range")?,
+            range: place(m, "range")?,
+            shade_alpha: bounded(m, "shade-alpha", MIN_ALPHA, MAX_ALPHA)?,
+            name: arg(m, "name").map(|n| n.trim().to_string()),
+            from: time_of_day(m, "from")?,
+            to: time_of_day(m, "to")?,
+            zone: match arg(m, "zone") {
+                None => None,
+                Some(text) if text.eq_ignore_ascii_case("chart") => Some(None),
+                Some(text) => Some(Some(
+                    text.parse::<chrono_tz::Tz>()
+                        .map_err(|_| {
+                            Fault::usage(format!(
+                                "{text:?} is not a time zone; use an IANA name such as Europe/London, or `chart`"
+                            ))
+                        })?
+                        .name()
+                        .to_string(),
+                )),
+            },
             visible: arg(m, "visible").map(|v| v == "on"),
+            legend: arg(m, "legend").map(|v| v == "on"),
         })
     }
 
@@ -2759,7 +2874,16 @@ impl Edits {
             && self.oversold.is_none()
             && self.bands.is_none()
             && self.band_alpha.is_none()
+            && self.add_range.is_none()
+            && self.remove_range.is_none()
+            && self.range.is_none()
+            && self.shade_alpha.is_none()
+            && self.name.is_none()
+            && self.from.is_none()
+            && self.to.is_none()
+            && self.zone.is_none()
             && self.visible.is_none()
+            && self.legend.is_none()
     }
 
     /// Write what was given, and refuse what this indicator has no use for.
@@ -2951,7 +3075,13 @@ impl Edits {
             }
         }
 
-        if let Some(colour) = &self.color {
+        self.apply_ranges(stored, kind)?;
+
+        // Session Times has no colour of its own: each range carries one,
+        // and `--color` went to them above.
+        if let Some(colour) = &self.color
+            && kind != IndicatorKind::SessionTimes
+        {
             stored["color"] = to_value(colour)?;
         }
         if let Some(width) = self.width {
@@ -2966,6 +3096,120 @@ impl Edits {
         if let Some(visible) = self.visible {
             stored["visible"] = json!(visible);
         }
+        if let Some(listed) = self.legend {
+            stored["in_legend"] = json!(listed);
+        }
+        Ok(())
+    }
+}
+
+impl Edits {
+    /// The flags only Session Times takes: its ranges, and what each one is.
+    ///
+    /// In the order a person would do it: take a range away, add one, then
+    /// set what was asked on the range named with `--range` — or on the one
+    /// just added, which is what somebody adding a range and naming it in
+    /// the same breath means.
+    fn apply_ranges(&self, stored: &mut Value, kind: IndicatorKind) -> Result<(), Fault> {
+        // A colour on Session Times is a range's: it has no line of its own
+        // to give one to, and dropping it would read as having worked.
+        let coloured = self.color.is_some() && kind == IndicatorKind::SessionTimes;
+        let edits_a_range = self.name.is_some()
+            || self.from.is_some()
+            || self.to.is_some()
+            || self.zone.is_some()
+            || self.shade_alpha.is_some()
+            || coloured;
+        let touches = self.add_range.is_some() || self.remove_range.is_some() || self.range.is_some();
+        if !(touches || edits_a_range) {
+            return Ok(());
+        }
+        if kind != IndicatorKind::SessionTimes {
+            let what = match touches {
+                true => "ranges",
+                false if self.shade_alpha.is_some() => "shading",
+                false => "hours",
+            };
+            return Err(Fault::usage(format!("{} has no {what}", kind.short_name())));
+        }
+        let mut ranges: Vec<TimeRange> = serde_json::from_value(stored["params"]["ranges"].clone())
+            .map_err(|e| Fault::new(super::EXIT_ERROR, e.to_string()))?;
+        let numbered = |at: usize, ranges: &[TimeRange]| match at < ranges.len() {
+            true => Ok(at),
+            false => Err(Fault::usage(format!(
+                "there is no range {}; this has {} (see `chart indicator list`)",
+                at + 1,
+                ranges.len()
+            ))),
+        };
+        if let Some(at) = self.remove_range {
+            let at = numbered(at, &ranges)?;
+            ranges.remove(at);
+        }
+        let mut target = match self.range {
+            Some(at) => Some(numbered(at, &ranges)?),
+            None => None,
+        };
+        if ranges.is_empty() && self.add_range.is_none() && edits_a_range {
+            return Err(Fault::usage(
+                "Session Times has no ranges to change; add one with --add-range".into(),
+            ));
+        }
+        if let Some(preset) = self.add_range {
+            if preset.is_among(&ranges) {
+                return Err(Fault::usage(format!(
+                    "{} is already shaded; a second would shade the same bars twice",
+                    preset.range().name
+                )));
+            }
+            ranges.push(preset.range());
+            target = target.or(Some(ranges.len() - 1));
+        }
+        // With one range there is no question which is meant; with more,
+        // only the shading may go on all of them at once.
+        let target = match target {
+            Some(at) => Some(at),
+            None if ranges.len() == 1 => Some(0),
+            None if self.name.is_some() || self.from.is_some() || self.to.is_some() || self.zone.is_some() => {
+                return Err(Fault::usage(format!(
+                    "this has {} ranges; say which with --range N",
+                    ranges.len()
+                )));
+            }
+            None => None,
+        };
+        let colour = self.color.clone();
+        let alpha = self.shade_alpha;
+        let indexes: Vec<usize> = match target {
+            Some(at) => vec![at],
+            None => (0..ranges.len()).collect(),
+        };
+        for at in indexes {
+            let Some(range) = ranges.get_mut(at) else { continue };
+            if let Some(name) = &self.name {
+                range.name = name.clone();
+            }
+            if self.from.is_some() || self.to.is_some() || self.zone.is_some() {
+                let Hours::Clock { from, to, zone } = &mut range.hours else {
+                    return Err(Fault::usage(format!(
+                        "{} follows the instrument's exchange, so it has no hours of its own",
+                        range.name
+                    )));
+                };
+                *from = self.from.unwrap_or(*from);
+                *to = self.to.unwrap_or(*to);
+                if let Some(wanted) = &self.zone {
+                    *zone = wanted.clone();
+                }
+            }
+            if let Some(colour) = &colour {
+                range.color = Some(colour.clone());
+            }
+            if let Some(alpha) = alpha {
+                range.alpha = alpha;
+            }
+        }
+        stored["params"]["ranges"] = to_value(&ranges)?;
         Ok(())
     }
 }
@@ -3968,6 +4212,25 @@ fn config_set(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<Stri
     }
     // The templates themselves are a document `template` keeps, with the
     // charts on them holding copies; written raw, the charts would not follow.
+    // The clock every chart reads: a zone nobody has heard of would be read
+    // back as New York with nothing said, so it is refused here.
+    if key == crate::clock::SETTING_ZONE {
+        let zone = crate::clock::parse_zone(value).map_err(Fault::usage)?;
+        crate::clock::save_zone(store, zone);
+        let text = match zone {
+            omacharts_engine::clock::ChartZone::Exchange => {
+                "each chart reads the time in its own exchange's time zone".to_string()
+            }
+            _ => format!("charts read the time in {}", zone.label()),
+        };
+        return said(as_json, json!({"key": key, "value": zone.key()}), text);
+    }
+    if key == crate::clock::SETTING_FORMAT {
+        let format = crate::clock::parse_format(value).map_err(Fault::usage)?;
+        crate::clock::save_format(store, format);
+        let text = format!("charts write times as {}", format.label());
+        return said(as_json, json!({"key": key, "value": format.key()}), text);
+    }
     if key == crate::templates::SETTING {
         return Err(Fault::usage(
             "chart templates are changed with `omacharts template …`, not `config set`".into(),
@@ -4553,11 +4816,15 @@ mod tests {
                 })
                 .collect()
         };
-        assert_eq!(kinds("Macro"), vec![vec!["volume", "rsi"], vec!["volume", "rsi"]]);
+        assert_eq!(
+            kinds("Macro"),
+            vec![vec!["volume", "session_times", "rsi"], vec!["volume", "session_times", "rsi"]]
+        );
         assert_eq!(kinds("Semis"), vec![Vec::<String>::new()], "a chart on none followed anyway");
 
         run("template indicator set Default rsi --period 21", &store);
         run("template indicator remove Default volume", &store);
+        run("template indicator remove Default session_times", &store);
         let held = json_of(&run("template indicator list Default --json", &store));
         assert_eq!(held["indicators"][0]["params"]["period"], 21);
         assert_eq!(kinds("Macro"), vec![vec!["rsi"], vec!["rsi"]]);
@@ -4573,8 +4840,9 @@ mod tests {
         let out = run("chart set --book Macro --template Default", &store);
         assert_eq!(out.code, 0, "{}", out.err);
         let listed = json_of(&run("chart indicator list --book Macro --json", &store));
-        assert_eq!(listed["indicators"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["indicators"].as_array().unwrap().len(), 2);
         assert_eq!(listed["indicators"][0]["kind"], "volume");
+        assert_eq!(listed["indicators"][1]["kind"], "session_times");
 
         // Onto none: the empty set, and no longer following.
         let out = run("chart set --book Macro --template none", &store);
@@ -4589,23 +4857,28 @@ mod tests {
         );
     }
 
-    /// Adding to a chart on a template lets go of the template first, so the
-    /// template — and every other chart on it — is left as it was.
+    /// Adding to a chart on a template adds to the template, as the window
+    /// does: both charts on it take the indicator, and the reply says so.
     #[test]
-    fn adding_to_a_chart_on_a_template_leaves_the_template_alone() {
+    fn adding_to_a_chart_on_a_template_changes_the_template() {
         let store = Store::memory().unwrap();
         run("chartbook create Macro --switch", &store);
         run("chart split horizontal --book Macro", &store);
         let out = run("chart indicator add sma --book Macro --chart pos:0", &store);
         assert_eq!(out.code, 0, "{}", out.err);
-        assert!(out.out.contains("no longer uses chart template \"Default\""), "{}", out.out);
+        assert!(out.out.contains("in chart template \"Default\", and on the other chart using it"), "{}", out.out);
 
         let workspace = Workspace::load(&store);
         let panes = charts::panes(&workspace.books()[0]);
-        assert_eq!(panes[0]["template"], Value::Null);
-        assert_eq!(panes[0]["indicators"].as_array().unwrap().len(), 2, "kept volume, added sma");
-        assert_eq!(panes[1]["indicators"].as_array().unwrap().len(), 1);
-        assert_eq!(crate::templates::all(&store)[0].indicators.len(), 1);
+        assert!(panes[0]["template"].is_number(), "still on the template");
+        assert_eq!(panes[0]["indicators"].as_array().unwrap().len(), 3, "the template's two, and the SMA");
+        assert_eq!(panes[1]["indicators"].as_array().unwrap().len(), 3, "the other chart follows");
+        assert_eq!(crate::templates::all(&store)[0].indicators.len(), 3);
+
+        // And a second Session Times is refused rather than shaded twice.
+        let refused = run("chart indicator add session_times --book Macro --chart pos:0", &store);
+        assert_eq!(refused.code, super::super::EXIT_USAGE);
+        assert!(refused.err.contains("already has Session Times"), "{}", refused.err);
     }
 
     /// Nothing disappears from a chart when its template goes.
@@ -4620,7 +4893,7 @@ mod tests {
         let workspace = Workspace::load(&store);
         let pane = &charts::panes(&workspace.books()[0])[0];
         assert_eq!(pane["template"], Value::Null);
-        assert_eq!(pane["indicators"].as_array().unwrap().len(), 2);
+        assert_eq!(pane["indicators"].as_array().unwrap().len(), 3);
         assert_eq!(ChartDefaults::load(&store).template, None);
     }
 
@@ -5690,6 +5963,100 @@ mod tests {
                 run(&format!("chart indicator set bollinger --book Macro --deviations {value}"), &store);
             assert_eq!(out.code, super::super::EXIT_USAGE, "{value}: {}", out.err);
         }
+    }
+
+    /// Session Times is a list of ranges: added by name, changed by number,
+    /// taken away by number, and a colour goes to the range it is said of.
+    #[test]
+    fn session_times_holds_ranges_added_changed_and_removed_by_number() {
+        let store = bare();
+        run("chartbook create Macro --switch", &store);
+        let out = run("chart indicator add session_times --book Macro", &store);
+        assert_eq!(out.code, 0, "{}", out.err);
+        assert!(out.out.contains("Sessions · ETH"), "{}", out.out);
+
+        let out = run(
+            "chart indicator set session_times --book Macro --add-range london --color Blue --shade-alpha 0.1",
+            &store,
+        );
+        assert_eq!(out.code, 0, "{}", out.err);
+        let out = run(
+            "chart indicator set session_times --book Macro --add-range custom --name Lunch --from 12pm --to 1:30pm",
+            &store,
+        );
+        assert_eq!(out.code, 0, "{}", out.err);
+        let listed = run("chart indicator list --book Macro --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        let ranges = &parsed["indicators"][0]["params"]["ranges"];
+        assert_eq!(ranges[0]["hours"]["type"], "eth");
+        assert!(ranges[0]["color"].is_null(), "ETH kept its muted default");
+        assert_eq!(ranges[1]["name"], "London");
+        assert_eq!(ranges[1]["hours"]["zone"], "Europe/London");
+        assert_eq!(ranges[1]["color"]["name"], "Blue");
+        assert_eq!(ranges[1]["alpha"], 0.1);
+        assert_eq!(ranges[2]["name"], "Lunch");
+        assert_eq!(ranges[2]["hours"], serde_json::json!({"type": "clock", "from": 720, "to": 810}));
+
+        let out = run("chart indicator set session_times --book Macro --range 3 --zone Europe/Madrid", &store);
+        assert_eq!(out.code, 0, "{}", out.err);
+        let out = run("chart indicator set session_times --book Macro --remove-range 2", &store);
+        assert_eq!(out.code, 0, "{}", out.err);
+        let listed = run("chart indicator list --book Macro --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        let ranges = &parsed["indicators"][0]["params"]["ranges"];
+        assert_eq!(ranges.as_array().map(Vec::len), Some(2));
+        assert_eq!(ranges[1]["hours"]["zone"], "Europe/Madrid");
+
+        for (line, says) in [
+            ("--from 25:00", "time of day"),
+            ("--from 9am", "say which with --range"),
+            ("--range 1 --from 9am", "no hours of its own"),
+            ("--range 9 --shade-alpha 0.1", "no range 9"),
+            ("--add-range tokyo", "invalid value"),
+            ("--add-range eth", "already shaded"),
+            ("--range 2 --zone Mars/Olympus", "not a time zone"),
+        ] {
+            let out = run(&format!("chart indicator set session_times --book Macro {line}"), &store);
+            assert_eq!(out.code, super::super::EXIT_USAGE, "{line}");
+            assert!(out.err.contains(says), "{line}: {}", out.err);
+        }
+        let refused = run("chart indicator add sma --book Macro --add-range eth", &store);
+        assert_eq!(refused.code, super::super::EXIT_USAGE);
+    }
+
+    /// Session shading starts out of the legend and everything else in it,
+    /// and either can be switched.
+    #[test]
+    fn an_indicator_can_be_left_out_of_the_legend() {
+        let store = bare();
+        run("chartbook create Macro --switch", &store);
+        run("chart indicator add sma --book Macro", &store);
+        run("chart indicator add session_times --book Macro", &store);
+        let listed = json_of(&run("chart indicator list --book Macro --json", &store));
+        assert_eq!(listed["indicators"][0]["in_legend"], true);
+        assert_eq!(listed["indicators"][1]["in_legend"], false);
+        let out = run("chart indicator set sma --book Macro --legend off", &store);
+        assert_eq!(out.code, 0, "{}", out.err);
+        run("chart indicator set session_times --book Macro --legend on", &store);
+        let listed = json_of(&run("chart indicator list --book Macro --json", &store));
+        assert_eq!(listed["indicators"][0]["in_legend"], false);
+        assert_eq!(listed["indicators"][1]["in_legend"], true);
+    }
+
+    /// The clock every chart reads is a setting, checked as it is written.
+    #[test]
+    fn the_charts_time_zone_and_format_are_checked_settings() {
+        let store = bare();
+        let out = run("config set chart_time_zone Europe/London", &store);
+        assert_eq!(out.code, 0, "{}", out.err);
+        assert!(out.out.contains("London"), "{}", out.out);
+        assert_eq!(run("config set chart_time_zone exchange", &store).code, 0);
+        let bad = run("config set chart_time_zone London", &store);
+        assert_eq!(bad.code, super::super::EXIT_USAGE);
+        assert!(bad.err.contains("IANA"), "{}", bad.err);
+        assert_eq!(run("config set time_format 12h", &store).code, 0);
+        assert_eq!(run("config set time_format 13h", &store).code, super::super::EXIT_USAGE);
+        assert_eq!(run("config get time_format", &store).out.trim(), "12h");
     }
 
     /// Quietly ignoring a parameter the indicator has no use for would read

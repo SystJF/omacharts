@@ -14,16 +14,21 @@ pub mod bollinger;
 pub mod oscillators;
 pub mod periods;
 pub mod profile;
+pub mod time;
 pub mod vwap;
 
 use serde::{Deserialize, Serialize};
 
+use chrono_tz::Tz;
+
 use crate::bars::{Bar, Timeframe};
+use crate::symbols::Instrument;
 use crate::theme::{ColorChoice, Theme, SWATCH_SEQUENCE};
 
 pub use bands::{Band, BandSeries, Bands, FILL_ALPHA, MAX_FILL_ALPHA, MIN_FILL_ALPHA};
 pub use periods::Reset;
 pub use profile::{Profile, ProfileRow};
+pub use time::{Hours, Preset, Span, Time, TimeRange};
 
 /// How a line is drawn.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -98,10 +103,49 @@ pub enum Kind {
     Macd,
     Atr,
     Stochastic,
+    SessionTimes,
+}
+
+/// The families the picker and the manual sort indicators into.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Category {
+    Averages,
+    Volume,
+    Momentum,
+    Time,
+}
+
+impl Category {
+    pub const ALL: [Category; 4] =
+        [Category::Averages, Category::Volume, Category::Momentum, Category::Time];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Category::Averages => "Averages and bands",
+            Category::Volume => "Volume",
+            Category::Momentum => "Momentum and volatility",
+            Category::Time => "Sessions and time",
+        }
+    }
+
+    /// What typing the family's name into the picker should find.
+    fn aliases(self) -> &'static [&'static str] {
+        match self {
+            Category::Averages => &["average", "averages", "bands", "trend", "overlay"],
+            Category::Volume => &["volume"],
+            Category::Momentum => &["momentum", "volatility", "oscillator", "oscillators"],
+            Category::Time => &["session", "sessions", "time", "hours", "rth", "eth"],
+        }
+    }
+
+    /// Its members, in the order the picker lists them.
+    pub fn kinds(self) -> Vec<Kind> {
+        Kind::ALL.into_iter().filter(|kind| kind.category() == self).collect()
+    }
 }
 
 impl Kind {
-    pub const ALL: [Kind; 10] = [
+    pub const ALL: [Kind; 11] = [
         Kind::Volume,
         Kind::Sma,
         Kind::Ema,
@@ -114,7 +158,33 @@ impl Kind {
         Kind::Macd,
         Kind::Atr,
         Kind::Stochastic,
+        Kind::SessionTimes,
     ];
+
+    pub fn category(self) -> Category {
+        match self {
+            Kind::Sma | Kind::Ema | Kind::Vwap | Kind::Bollinger => Category::Averages,
+            Kind::Volume | Kind::VolumeProfile => Category::Volume,
+            Kind::Rsi | Kind::Macd | Kind::Atr | Kind::Stochastic => Category::Momentum,
+            Kind::SessionTimes => Category::Time,
+        }
+    }
+
+    /// Whether a new one is named in the chart's legend. Session shading is
+    /// the chart's ground, and a line naming the ground is a line nobody
+    /// needs to read.
+    pub fn in_legend_by_default(self) -> bool {
+        !matches!(self, Kind::SessionTimes)
+    }
+
+    /// Whether a colour from the palette is handed to it when nobody chose
+    /// one. Session shading is the chart's ground, not a series: given the
+    /// next sequence colour it would take the blue the first moving average
+    /// was going to get, and shout across the whole chart. Its ranges each
+    /// carry a colour of their own instead.
+    pub fn takes_palette_colour(self) -> bool {
+        !matches!(self, Kind::SessionTimes)
+    }
 
     pub fn name(self) -> &'static str {
         match self {
@@ -130,6 +200,7 @@ impl Kind {
             Kind::Rsi => "Relative Strength Index",
             Kind::Atr => "Average True Range",
             Kind::Stochastic => "Stochastic",
+            Kind::SessionTimes => "Session Times",
         }
     }
 
@@ -148,6 +219,7 @@ impl Kind {
             Kind::Rsi => "RSI",
             Kind::Atr => "ATR",
             Kind::Stochastic => "Stoch",
+            Kind::SessionTimes => "Sessions",
         }
     }
 
@@ -169,6 +241,11 @@ impl Kind {
             Kind::Rsi => &["rsi", "relative strength", "oscillator", "momentum", "overbought"],
             Kind::Atr => &["atr", "average true range", "volatility", "range", "stop"],
             Kind::Stochastic => &["stochastic", "stoch", "kd", "%k", "oscillator", "momentum", "overbought"],
+            Kind::SessionTimes => &[
+                "session times", "sessions", "session", "eth", "rth", "extended hours",
+                "regular hours", "overnight", "london", "asia", "new york", "background",
+                "shading", "time range", "hours",
+            ],
         }
     }
 
@@ -184,6 +261,7 @@ impl Kind {
             Kind::Rsi => "rsi",
             Kind::Atr => "atr",
             Kind::Stochastic => "stochastic",
+            Kind::SessionTimes => "session_times",
         }
     }
 
@@ -240,6 +318,9 @@ impl Kind {
                 oversold: 20.0,
                 d_color: None,
             },
+            // The extended hours, set back: what most charts of a market with
+            // a regular session want, and the one range that needs no clock.
+            Kind::SessionTimes => Params::SessionTimes { ranges: vec![time::Preset::Eth.range()] },
         }
     }
 }
@@ -328,6 +409,11 @@ pub enum Params {
         #[serde(default)]
         d_color: Option<ColorChoice>,
     },
+    SessionTimes {
+        /// The stretches of each day it shades, each in its own colour,
+        /// drawn in this order.
+        ranges: Vec<TimeRange>,
+    },
 }
 
 impl Params {
@@ -377,6 +463,15 @@ pub struct Indicator {
     /// one below it.
     #[serde(default)]
     pub above_price: bool,
+    /// Whether the chart's legend names it. Drawn or not is `visible`; this
+    /// is only whether it takes a line at the top of the chart.
+    #[serde(default = "listed")]
+    pub in_legend: bool,
+}
+
+/// An indicator stored before the legend could leave one out was in it.
+fn listed() -> bool {
+    true
 }
 
 impl Indicator {
@@ -389,6 +484,7 @@ impl Indicator {
             stroke: Stroke::default(),
             visible: true,
             above_price: false,
+            in_legend: kind.in_legend_by_default(),
         }
     }
 
@@ -432,6 +528,14 @@ impl Indicator {
             Params::Stochastic { period, k_smooth, d_period, .. } => {
                 format!("Stoch {period} {k_smooth} {d_period}")
             }
+            // The ranges by name, which is what tells two of these apart.
+            Params::SessionTimes { ranges } => match ranges.len() {
+                0 => "Sessions".to_string(),
+                _ => {
+                    let names: Vec<&str> = ranges.iter().map(|r| r.name.trim()).collect();
+                    format!("Sessions · {}", names.join(", "))
+                }
+            },
         }
     }
 
@@ -481,6 +585,10 @@ pub fn palette_colors(indicators: &[Indicator], theme: &Theme) -> Vec<String> {
             out[i] = choice.resolve(theme);
             continue;
         }
+        if !indicator.kind.takes_palette_colour() {
+            out[i] = theme.ui.text_muted.clone();
+            continue;
+        }
         let free = (0..SWATCH_SEQUENCE.len())
             .map(|n| theme.series(n))
             .find(|hex| !taken.contains(hex));
@@ -504,6 +612,8 @@ pub enum Output {
     Volume { values: Vec<f64>, height: f64 },
     /// A series drawn in a strip of its own, on its own scale.
     Pane(Pane),
+    /// Stretches of time shaded behind the bars.
+    Time(Time),
 }
 
 /// An indicator that cannot share the price scale, and so gets a strip of its
@@ -682,12 +792,44 @@ impl Output {
     }
 }
 
-/// Compute an indicator over `bars`.
+/// What an indicator is computed against, besides its bars.
+#[derive(Clone, Copy, Debug)]
+pub struct Context<'a> {
+    /// The instrument's session open, which is what makes a session-reset
+    /// VWAP on futures start in the evening rather than at midnight.
+    pub session_origin: i64,
+    /// Lets a reset period that is too fine for the chart be promoted rather
+    /// than drawn as nonsense.
+    pub timeframe: Timeframe,
+    /// What sort of thing is charted, which a volume profile sizes its rows by.
+    pub kind: Option<crate::symbols::InstrumentKind>,
+    /// What is charted, which is where its exchange and its day come from.
+    pub instrument: Option<&'a Instrument>,
+    /// The clock the chart reads, which a range of hours typed in it keeps.
+    pub zone: Tz,
+}
+
+impl<'a> Context<'a> {
+    /// Everything there is to know about a chart of `instrument`.
+    pub fn of(instrument: &'a Instrument, timeframe: Timeframe, zone: Tz) -> Context<'a> {
+        Context {
+            session_origin: instrument.session_origin,
+            timeframe,
+            kind: Some(instrument.kind),
+            instrument: Some(instrument),
+            zone,
+        }
+    }
+}
+
+/// Compute an indicator over `bars`, knowing nothing of the instrument beyond
+/// its kind.
 ///
 /// `session_origin` is the instrument's session open, which is what makes a
 /// session-reset VWAP on futures start in the evening rather than at midnight.
 /// `timeframe` lets a reset period that is too fine for the chart be promoted
-/// rather than drawn as nonsense.
+/// rather than drawn as nonsense. The indicators of time need the instrument
+/// itself, for its exchange; see [`compute_in`].
 pub fn compute(
     indicator: &Indicator,
     bars: &[Bar],
@@ -695,6 +837,20 @@ pub fn compute(
     timeframe: Timeframe,
     kind: Option<crate::symbols::InstrumentKind>,
 ) -> Output {
+    let context = Context {
+        session_origin,
+        timeframe,
+        kind,
+        instrument: None,
+        zone: crate::clock::ChartZone::default().for_instrument(None),
+    };
+    compute_in(indicator, bars, &context)
+}
+
+/// Compute an indicator over `bars`, on a chart of what `context` says.
+pub fn compute_in(indicator: &Indicator, bars: &[Bar], context: &Context) -> Output {
+    let Context { session_origin, timeframe, kind, .. } = *context;
+    let schedule = || time::schedule_for(context.instrument);
     match (&indicator.kind, &indicator.params) {
         (Kind::Sma, Params::MovingAverage { period }) => Output::Line(sma(bars, *period)),
         (Kind::Ema, Params::MovingAverage { period }) => Output::Line(ema(bars, *period)),
@@ -770,6 +926,9 @@ pub fn compute(
                 kind,
             ))
         }
+        (Kind::SessionTimes, Params::SessionTimes { ranges }) => {
+            Output::Time(time::session_times(bars, timeframe, ranges, context.zone, schedule()))
+        }
         // Params and kind are set together; a mismatch means a stored
         // indicator from a future version. Draw nothing rather than guess.
         _ => Output::Line(vec![None; bars.len()]),
@@ -837,6 +996,12 @@ pub fn search(query: &str) -> Vec<Kind> {
                 60
             } else if name.contains(&q) || kind.aliases().iter().any(|a| a.contains(&q)) {
                 40
+            } else if kind.category().label().to_lowercase().contains(&q)
+                || kind.category().aliases().iter().any(|a| a.starts_with(&q))
+            {
+                // Its family's name: "volume" finds both volume indicators,
+                // "time" the session one.
+                30
             } else {
                 return None;
             };

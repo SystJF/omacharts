@@ -445,13 +445,13 @@ see [Settings](#settings).
 `omacharts chart indicator ACTION [KIND]` changes a chart's indicators.
 `--book` and `--chart` pick the chart ([Which chart a command acts
 on](#which-chart-a-command-acts-on)). `KIND` is the indicator's name as the
-command takes it, such as `sma`, `rsi` or `volume_profile`. Each indicator's
-name, what it draws, and every parameter's default and range are in
-[Indicators](/manual/indicators/).
+command takes it, such as `sma`, `rsi`, `volume_profile` or `session_times`.
+Each indicator's name, what it draws, and every parameter's default and range
+are in [Indicators](/manual/indicators/) and the page of its family.
 
 | Action | Does |
 |---|---|
-| `list` | One line per indicator, with its lengths: `SMA(50)`, `VWAP · week`, `BB(20,2.5)`. With `--json`, each one's id, kind, parameters, colour, line and visibility |
+| `list` | One line per indicator, with its lengths: `SMA(50)`, `VWAP · week`, `BB(20,2.5)`. With `--json`, each one's id, kind, parameters, colour, line, visibility, and `in_legend`, whether the legend names it |
 | `add KIND` | Adds one, at its defaults plus whatever flags are given |
 | `remove KIND` | Removes every indicator of that kind |
 | `set KIND` | Changes the one of that kind. With two of a kind, `--id N` says which |
@@ -474,10 +474,12 @@ name, what it draws, and every parameter's default and range are in
 | `--height F` | 0.05 to 0.95; Volume defaults to 0.18, the other strips to 0.16 | Volume, RSI, MACD, ATR, stochastic |
 | `--bands LIST` | `1,2,3` or any of them; `none` | VWAP; `1` or `none` for Bollinger |
 | `--band-alpha F` | 0 to 1; 0.16 when not given | VWAP, Bollinger |
-| `--color C` | A colour | The line of any indicator; a profile's bars |
+| `--add-range`, `--remove-range`, `--range`, `--name`, `--from`, `--to`, `--zone`, `--shade-alpha` | See [Session Times](#session-times) | Session Times |
+| `--color C` | A colour | The line of any indicator; a profile's bars; a Session Times range's shading |
 | `--width F` | Pixels; `0` draws no line | Any indicator with a line |
 | `--style S` | `solid`, `dashed`, `dotted` | Any indicator with a line |
 | `--visible B` | `on`, `off` | Any |
+| `--legend B` | `on`, `off`; `on` for a new indicator, `off` for Session Times | Any. Whether the chart's legend names it. It is drawn either way |
 
 A colour is a palette name (`Blue`, `Amber`, `Violet`, `Teal`, `Rose`,
 `Green`, `Orange`, `Cyan`, capitals ignored) or `#rrggbb`. A palette name follows
@@ -512,16 +514,16 @@ omacharts chart indicator add stochastic --k-smooth 5
 
 ```
 $ omacharts chart indicator add sma --period 200
-added SMA(200) on pos:0 SPY 1D in "Chartbook 1"; it no longer uses chart template "Default", and keeps the indicators it had
+added SMA(200) on pos:0 SPY 1D in "Chartbook 1", in chart template "Default"
   [exit 0]
 $ omacharts chart indicator add sma --period 50 --style dashed
-added SMA(50) on pos:0 SPY 1D in "Chartbook 1"
+added SMA(50) on pos:0 SPY 1D in "Chartbook 1", in chart template "Default"
   [exit 0]
 $ omacharts chart indicator set sma --period 100
-omacharts: this chart has 2 of them; say which with --id 2 or 3
+omacharts: this chart's template has 2 of them; say which with --id 3 or 4
   [exit 4]
-$ omacharts chart indicator set sma --id 3 --period 100 --color Amber
-set SMA(100) on pos:0 SPY 1D in "Chartbook 1"
+$ omacharts chart indicator set sma --id 4 --period 100 --color Amber
+set SMA(100) on pos:0 SPY 1D in "Chartbook 1", in chart template "Default"
   [exit 0]
 ```
 
@@ -544,6 +546,65 @@ Refusals:
 A chart template's indicators take the same actions and flags, with the
 template named before the kind: `omacharts template indicator add Momentum
 rsi --period 14`. See [Chart templates](#chart-templates).
+
+### Session Times
+
+`session_times` is [Session Times](/manual/indicators/session-times/), a
+list of ranges shaded behind the bars. Ranges are numbered from 1, in the
+order `list --json` gives them. These flags change the list, and any other
+indicator refuses them.
+
+| Flag | Takes | Does |
+|---|---|---|
+| `--add-range R` | `eth`, `rth`, `asia`, `london`, `new_york`, `custom` | Adds a range at its preset. The flags that follow in the same command change it |
+| `--remove-range N` | A range's number | Removes it, before anything else the command does |
+| `--range N` | A range's number | Which range the other flags change |
+| `--name TEXT` | Words | The range's name, which the legend lists |
+| `--from TIME`, `--to TIME` | A time of day, written any way the editor takes: `9am`, `0930`, `21h30`, `1:30pm` | The range's hours, in the chart's time zone unless it has one of its own. `--to` before `--from` runs past midnight. ETH and RTH have none |
+| `--zone ZONE` | An IANA name such as `Europe/London`, or `chart` for the chart's own time zone | The clock the range's hours keep |
+| `--color C` | A colour | The range's shading. Every range's, when none is named |
+| `--shade-alpha F` | 0.02 to 0.6 | How solid the shading is. Every range's, when none is named |
+
+With one range, the flags change it without `--range`. With more, `--name`,
+`--from`, `--to` and `--zone` need `--range`, or come straight after
+`--add-range`.
+
+```sh
+omacharts chart indicator add session_times
+omacharts template indicator set Default session_times --add-range london
+omacharts template indicator set Default session_times --add-range custom --name Lunch --from 12pm --to 1:30pm
+omacharts template indicator set Default session_times --range 2 --color Blue --shade-alpha 0.1
+omacharts template indicator set Default session_times --remove-range 3
+omacharts template indicator set Default session_times --legend on
+```
+
+```
+$ omacharts template indicator list Default
+Vol
+Sessions · ETH
+  [exit 0]
+$ omacharts template indicator set Default session_times --add-range london
+set Sessions · ETH, London in chart template "Default"
+  [exit 0]
+$ omacharts template indicator set Default session_times --add-range custom --name Lunch --from 12pm --to 1:30pm
+set Sessions · ETH, London, Lunch in chart template "Default"
+  [exit 0]
+$ omacharts template indicator set Default session_times --range 2 --color Blue --shade-alpha 0.1
+set Sessions · ETH, London, Lunch in chart template "Default"
+  [exit 0]
+```
+
+Refusals:
+
+| Refused | Exit | Message |
+|---|---|---|
+| These flags on another indicator: `add sma --add-range london` | 2 | `SMA has no ranges` |
+| ETH or RTH a second time: `--add-range eth` | 2 | `ETH is already shaded; a second would shade the same bars twice` |
+| A range that is not there: `--range 9` | 2 | `` there is no range 9; this has 2 (see `chart indicator list`) `` |
+| Hours or a name with several ranges and none named: `--from 9am` | 2 | `this has 2 ranges; say which with --range N` |
+| Hours on ETH or RTH: `--range 1 --from 9am --to 10am` | 2 | `ETH follows the instrument's exchange, so it has no hours of its own` |
+| A time that is not one: `--from 25:00` | 2 | `--from takes a time of day such as 9am, 09:30 or 2130, not "25:00"` |
+| A zone that is not one: `--zone Mars/X` | 2 | `` "Mars/X" is not a time zone; use an IANA name such as Europe/London, or `chart` `` |
 
 ## Chart templates
 
@@ -593,13 +654,14 @@ new charts open with chart template "Swing"
   [exit 0]
 ```
 
-Adding, removing, hiding, reordering or reconfiguring a chart's own
-indicators takes it off its template. The chart keeps the indicators it
-showed, then makes the change, and the reply says so:
+On a chart that is on a template, adding, removing, hiding, reordering or
+reconfiguring an indicator changes the template, and every chart on it, the
+same as the window does. The reply names the template and how many other
+charts followed:
 
 ```
 $ omacharts chart indicator add sma --period 200
-added SMA(200) on pos:0 SPY 1D in "Chartbook 1"; it no longer uses chart template "Default", and keeps the indicators it had
+added SMA(200) on pos:0 SPY 1D in "Chartbook 1", in chart template "Default", and on the other chart using it
   [exit 0]
 ```
 
@@ -677,7 +739,9 @@ chart 46: sends drawings to other charts off
 | `reset-configs [KIND]` | Puts a kind's nine back as shipped, or every kind's |
 
 An anchor is `WHEN,PRICE`: a date (`2026-09-01`), a date and time
-(`2026-09-01T14:30`) or unix seconds, in local time, then the price.
+(`2026-09-01T14:30`) or unix seconds, then the price. A date or a time is
+read in the chart's time zone, the one its time axis is labelled in
+([Time](/manual/preferences/#time)), and `list` prints them the same way.
 
 | Flag | Takes | Does |
 |---|---|---|
@@ -1312,6 +1376,8 @@ same.
 | `chart_sends_drawings` | on, off | on | Charts › Defaults › Send drawings to other charts | [Drawings](/manual/drawings/) |
 | `chart_template` | a chart template's name or `id:N`, or `none` | `Default` | Charts › Defaults › Template | [Chart templates](/manual/chart-templates/) |
 | `chart_header` | comma-separated `symbol`, `resolution`, `change`, `template`; or `none` | `symbol,resolution` | Charts › Header | [Charts](/manual/charts/) |
+| `chart_time_zone` | an IANA name such as `Europe/London` or `America/Chicago`, or `exchange` for each chart's exchange's own | `America/New_York` | Charts › Other › Time › Time zone | [Preferences](/manual/preferences/#time) |
+| `time_format` | `24h`, `12h` | the desktop's clock format | Charts › Other › Time › Time format | [Preferences](/manual/preferences/#time) |
 | `timeframes` | comma-separated resolutions, such as `5m,15m,1h,4h,1D,1W`; an entry that is not a resolution is skipped | `5m,15m,1h,4h,1D,1W` | Charts › Other › Preset resolutions | [Charts](/manual/charts/) |
 | `sync_crosshair` | on, off | on | Chart settings › Crosshair across Follow charts | [Chart settings](/manual/chart-settings/) |
 | `provider` | `yahoo`, `tos` | `yahoo` | Data › Data feed | [Market data feeds](/manual/market-data/) |
@@ -1335,10 +1401,11 @@ set theme to midnight
 
 ### When a setting is checked and takes effect
 
-`provider`, `chart_header` and `chart_template` are checked as they are
-written. A feed that does not exist, a header part that is not one, or a
-header part named twice is refused with exit 2; a template that does not
-exist with exit 3. Every other
+`provider`, `chart_header`, `chart_template`, `chart_time_zone` and
+`time_format` are checked as they are written. A feed that does not exist, a
+header part that is not one, a header part named twice, a time zone that is
+not one or a time format that is not one is refused with exit 2; a template
+that does not exist with exit 3. Every other
 value is accepted as typed, and one the app cannot use counts as the
 default. `config set theme nope` succeeds, and the window opens in the first
 theme on offer, System on an Omarchy desktop.
@@ -1351,10 +1418,23 @@ omacharts: no such data feed: "thinkorswimm"; the feeds are yahoo, tos
 $ omacharts config set chart_header symbol,banana
 omacharts: "banana" is not part of a header; try symbol, resolution, change, template
   [exit 2]
+
+$ omacharts config set chart_time_zone Europe/London
+charts read the time in London
+  [exit 0]
+
+$ omacharts config set chart_time_zone London
+omacharts: "London" is not a time zone; use an IANA name such as Europe/London, or `exchange`
+  [exit 2]
+
+$ omacharts config set time_format 12h
+charts write times as 12-hour (3:30 PM)
+  [exit 0]
 ```
 
-With a window open, a new `provider` switches the charts' feed at once, and a
-new `chart_header` changes every header at once. The chart defaults apply to
+With a window open, a new `provider` switches the charts' feed at once, a
+new `chart_header` changes every header at once, and a new `chart_time_zone`
+or `time_format` redraws every chart's times at once. The chart defaults apply to
 the next chart made, by a split or a new chartbook. `timeframes`
 written from a terminal is read when the window next opens.
 

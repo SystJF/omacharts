@@ -4,6 +4,8 @@
 //! looking when you want them. Two pages: how the bars are read and scaled,
 //! and what is drawn on top of them.
 
+mod time;
+
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
@@ -121,7 +123,6 @@ impl ChartSettings {
             Focus::Indicators => dialog.set_visible_page(&indicators_page),
             // One indicator of a template is the template's to change, so the
             // gear on such a chart lands on the list that says so.
-            Focus::Indicator(_) if owner.locked() => dialog.set_visible_page(&indicators_page),
             Focus::Indicator(id) => {
                 dialog.set_visible_page(&indicators_page);
                 open_indicator_panel_for(
@@ -201,7 +202,6 @@ fn template_rows(
     let rebuild: Rc<Again> = Rc::new(RefCell::new(None));
     let fill = {
         let window = window.clone();
-        let dialog = dialog.clone();
         let group = group.clone();
         let list = list.clone();
         let rebuild = rebuild.clone();
@@ -257,22 +257,8 @@ fn template_rows(
             }
             group.add(&choice);
             rows.borrow_mut().push(choice.upcast());
-
-            if let Some(id) = current {
-                let edit = adw::ActionRow::new();
-                edit.set_title("Edit Chart Template…");
-                edit.set_activatable(true);
-                edit.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-                let window = window.clone();
-                let dialog = dialog.clone();
-                let list = list.clone();
-                edit.connect_activated(move |_| {
-                    let list = list.clone();
-                    TemplateEditor::present(&window, id, &dialog, move || list.run());
-                });
-                group.add(&edit);
-                rows.borrow_mut().push(edit.upcast());
-            }
+            // No way into a second editor for the template: the list below
+            // is the template's while the chart is on one, and says so.
         }
     };
     let fill: Rc<dyn Fn()> = Rc::new(fill);
@@ -587,8 +573,27 @@ impl Owner {
         Rc::new(Owner { app: app.clone(), window: app.window.clone(), template: Some(template) })
     }
 
+    /// The template whose indicators these are: the one being edited, or
+    /// the one the focused chart is on. A chart on a template shows the
+    /// template's indicators, so changing them from the chart changes the
+    /// template — and every chart on it — rather than a copy nobody asked
+    /// for.
+    fn target(&self) -> Option<u32> {
+        self.template.or_else(|| self.app.focused_template())
+    }
+
+    /// The name of the template a chart's settings are editing through, when
+    /// they are: what the page says so the change is not a surprise.
+    fn through_template(&self) -> Option<String> {
+        if self.template.is_some() {
+            return None;
+        }
+        let id = self.app.focused_template()?;
+        self.app.templates().into_iter().find(|t| t.id == id).map(|t| t.name)
+    }
+
     fn indicators(&self) -> Vec<Indicator> {
-        match self.template {
+        match self.target() {
             None => self.app.indicators(),
             Some(id) => self
                 .app
@@ -602,7 +607,7 @@ impl Owner {
 
     /// Changing a template's redraws every chart on it, as it changes.
     fn set_indicators(&self, indicators: Vec<Indicator>) {
-        match self.template {
+        match self.target() {
             None => self.app.set_indicators(indicators),
             Some(id) => self.app.set_template_indicators(id, indicators),
         }
@@ -622,18 +627,13 @@ impl Owner {
         self.app.bar_scheme()
     }
 
-    /// How many rows a profile is drawing. A template draws nothing.
+    /// How many rows a profile is drawing. A template draws nothing of its
+    /// own, but the chart in front of whoever is editing it does.
     fn profile_rows(&self, id: u32) -> Option<usize> {
         match self.template {
             None => self.app.profile_rows(id),
             Some(_) => None,
         }
-    }
-
-    /// A chart on a template shows the template's indicators, which are
-    /// changed in the template's own editor rather than from the chart.
-    fn locked(&self) -> bool {
-        self.template.is_none() && self.app.focused_template().is_some()
     }
 }
 
@@ -763,22 +763,26 @@ fn rebuild_indicators(
     let indicators = owner.indicators();
     let refresh = Refresh::rebuilding(owner, dialog, list);
 
-    // Shown but not editable: what the chart is drawing is still worth
-    // reading here, and the rows lose their controls (see `indicator_row`).
-    let locked = owner.locked();
-    list.add.set_visible(!locked);
-    // A template's list, and a chart's on a template, say nothing: the
-    // heading and the template row above it already do.
-    list.group.set_description(match (locked || owner.template.is_some(), indicators.is_empty()) {
-        (true, _) => None,
-        (false, true) => Some("Nothing yet."),
-        (false, false) => Some(
-            "Drag to reorder. The list is the chart, top to bottom; colours come from the theme.",
+    // On a template, what is being edited is the template, and the page says
+    // so before anything is changed: a change here reaches every chart on it.
+    let through = owner.through_template();
+    let description = match (&through, owner.template.is_some(), indicators.is_empty()) {
+        // The heading names the template; this says only what that means.
+        (Some(_), _, _) => Some("A change here reaches every chart that uses it.".to_string()),
+        (None, true, _) => None,
+        (None, false, true) => Some("Nothing yet.".to_string()),
+        (None, false, false) => Some(
+            "Drag to reorder. The list is the chart, top to bottom; colours come from the theme."
+                .to_string(),
         ),
-    });
-    if locked && indicators.is_empty() {
-        return;
+    };
+    list.group.set_description(description.as_deref());
+    list.group.set_title(match (&through, owner.template) {
+        (Some(name), _) => format!("On the {name} template"),
+        (None, Some(_)) => "Indicators in the template".to_string(),
+        (None, None) => "On the chart".to_string(),
     }
+    .as_str());
 
     // The price plot is a row of the list because strips can be stacked above it
     // as well as below, and a list showing only the strips could not say which
@@ -894,14 +898,6 @@ fn indicator_row(
         let _ = cr.fill();
     });
     row.add_prefix(&swatch);
-
-    // A template's indicators on one of its charts: named, with nothing to
-    // pull, switch or throw away, so the row cannot look like something it
-    // will not do.
-    if owner.locked() {
-        row.set_activatable(false);
-        return row;
-    }
 
     // Order is a property of the list, so its controls sit on the list side of
     // the row. It decides two things at once: which strip is stacked above
@@ -1049,12 +1045,33 @@ fn open_indicator_panel_for(owner: &Rc<Owner>, refresh: &Refresh, id: u32, panel
     let colour = drawn_colour(owner, &indicators, id);
 
     let page = adw::PreferencesPage::new();
-    page.add(&parameters_group(owner, refresh, &indicator));
-    if let Some(group) = appearance_group(owner, refresh, &colour, &indicator) {
-        page.add(&group);
+    // Said before anything can be changed, however the panel was reached —
+    // the list, the gear on the chart, the add path — because a change here
+    // reaches charts that are not on screen.
+    if let Some(name) = owner.through_template() {
+        let warning = adw::PreferencesGroup::new();
+        let banner = adw::ActionRow::new();
+        banner.set_title(&format!("Editing the {name} template"));
+        banner.set_subtitle("A change here reaches every chart that uses it.");
+        banner.add_prefix(&gtk::Image::from_icon_name("dialog-information-symbolic"));
+        // A note, not a control: the keyboard goes past it to the first
+        // setting, which is what a panel opens on.
+        banner.set_focusable(false);
+        banner.set_activatable(false);
+        warning.add(&banner);
+        page.add(&warning);
     }
-    for group in band_groups(owner, refresh, &colour, &indicator) {
-        page.add(&group);
+    if indicator.kind == Kind::SessionTimes {
+        time::fill(owner, refresh, &page, indicator.id);
+    } else {
+        page.add(&parameters_group(owner, refresh, &indicator));
+        if let Some(group) = appearance_group(owner, refresh, &colour, &indicator) {
+            page.add(&group);
+        }
+        for group in band_groups(owner, refresh, &colour, &indicator) {
+            page.add(&group);
+        }
+        page.add(&legend_group(owner, refresh, &indicator));
     }
 
     let header = adw::HeaderBar::new();
@@ -1628,7 +1645,32 @@ fn parameters_group(
                 ),
             );
         }
+        // Edited on a page of its own; see `time`.
+        Params::SessionTimes { .. } => {}
     }
+    group
+}
+
+/// Last on every indicator's page: whether the chart's legend names it.
+///
+/// Apart from whether it is drawn at all, which is the switch on its row in
+/// the list: an indicator can be on the chart and not take a line at the top
+/// of it, which is what session shading wants and an average might.
+fn legend_group(owner: &Rc<Owner>, refresh: &Refresh, indicator: &Indicator) -> adw::PreferencesGroup {
+    let id = indicator.id;
+    let group = adw::PreferencesGroup::new();
+    group.set_title("Legend");
+    let row = adw::SwitchRow::new();
+    row.set_title("Show in chart legend");
+    row.set_active(indicator.in_legend);
+    let owner = owner.clone();
+    let refresh = refresh.clone();
+    row.connect_active_notify(move |row| {
+        let on = row.is_active();
+        update(&owner, id, |indicator| indicator.in_legend = on);
+        refresh.run();
+    });
+    group.add(&row);
     group
 }
 
@@ -1925,7 +1967,8 @@ fn reset_row(
             | Params::Rsi { .. }
             | Params::Macd { .. }
             | Params::Atr { .. }
-            | Params::Stochastic { .. } => {}
+            | Params::Stochastic { .. }
+            | Params::SessionTimes { .. } => {}
         });
         refresh.run();
     });
@@ -2350,26 +2393,63 @@ fn pick_indicator(owner: &Rc<Owner>, refresh: &Refresh) {
     let dialog = adw::Dialog::new();
     dialog.set_title("Add an indicator");
     dialog.set_content_width(420);
-    dialog.set_content_height(380);
+    // Tall enough for every family under its heading without scrolling.
+    dialog.set_content_height(620);
     dialog.set_child(Some(&content));
 
     let shown: Rc<RefCell<Vec<Kind>>> = Rc::new(RefCell::new(Vec::new()));
+    // Grouped under their families while nothing is typed, which is when the
+    // list is being browsed; once something is, it is a ranked answer, and
+    // headings would scatter the best match away from the top.
+    let grouped = Rc::new(std::cell::Cell::new(true));
+    {
+        let shown = shown.clone();
+        let grouped = grouped.clone();
+        rows.set_header_func(move |row, before| {
+            if !grouped.get() {
+                row.set_header(None::<&gtk::Widget>);
+                return;
+            }
+            let kinds = shown.borrow();
+            let category = |row: &gtk::ListBoxRow| {
+                kinds.get(row.index().max(0) as usize).map(|kind| kind.category())
+            };
+            let this = category(row);
+            if this.is_none() || before.and_then(category) == this {
+                row.set_header(None::<&gtk::Widget>);
+                return;
+            }
+            let heading = gtk::Label::new(this.map(|c| c.label()));
+            heading.set_xalign(0.0);
+            heading.add_css_class("heading");
+            heading.add_css_class("dim-label");
+            heading.set_margin_start(10);
+            heading.set_margin_top(if before.is_some() { 14 } else { 6 });
+            heading.set_margin_bottom(4);
+            row.set_header(Some(&heading));
+        });
+    }
 
     let fill = {
         let rows = rows.clone();
         let shown = shown.clone();
+        let grouped = grouped.clone();
         move |query: &str| {
             while let Some(child) = rows.first_child() {
                 rows.remove(&child);
             }
-            let kinds = indicators::search(query);
+            let browsing = query.trim().is_empty();
+            grouped.set(browsing);
+            let kinds = match browsing {
+                true => indicators::Category::ALL.iter().flat_map(|c| c.kinds()).collect(),
+                false => indicators::search(query),
+            };
+            // Filled before the rows, which the header function reads.
+            *shown.borrow_mut() = kinds.clone();
             for kind in &kinds {
                 let name = gtk::Label::new(Some(kind.name()));
                 name.set_xalign(0.0);
                 name.set_hexpand(true);
-                let short = gtk::Label::new(Some(kind.short_name()));
-                short.add_css_class("symbol-kind");
-                short.set_valign(gtk::Align::Center);
 
                 let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
                 row_box.set_margin_top(7);
@@ -2377,13 +2457,20 @@ fn pick_indicator(owner: &Rc<Owner>, refresh: &Refresh) {
                 row_box.set_margin_start(10);
                 row_box.set_margin_end(10);
                 row_box.append(&name);
-                row_box.append(&short);
+                // The chip is the short name the chart will show; where that
+                // is the name itself, it would be saying it twice.
+                if !kind.short_name().eq_ignore_ascii_case(kind.name()) {
+                    let short = gtk::Label::new(Some(kind.short_name()));
+                    short.add_css_class("symbol-kind");
+                    short.set_valign(gtk::Align::Center);
+                    row_box.append(&short);
+                }
 
                 let row = gtk::ListBoxRow::new();
                 row.set_child(Some(&row_box));
                 rows.append(&row);
             }
-            *shown.borrow_mut() = kinds;
+            rows.invalidate_headers();
             if let Some(first) = rows.row_at_index(0) {
                 rows.select_row(Some(&first));
             }
@@ -2426,12 +2513,10 @@ fn pick_indicator(owner: &Rc<Owner>, refresh: &Refresh) {
         let at = row.index().max(0) as usize;
         let Some(kind) = shown.borrow().get(at).copied() else { return };
         let id = owner_for_pick.next_indicator_id();
-        // Putting it on takes a chart off its template; not adding it after
-        // all puts the chart back.
-        let was_on = match owner_for_pick.template {
-            None => owner_for_pick.app.focused_template(),
-            Some(_) => None,
-        };
+        // On a template it goes onto the template, like every other change
+        // made here, so there is no template to go back onto if it is not
+        // added after all: it simply comes off again.
+        let was_on = None;
         let mut indicators = owner_for_pick.indicators();
         indicators.push(Indicator::new(id, kind));
         owner_for_pick.set_indicators(indicators);

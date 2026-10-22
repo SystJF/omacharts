@@ -9,7 +9,9 @@ description: >-
   open", "a 2x2 of the majors with RSI on each, linked", "put a 200-day
   average on this", "add AMD to my semis list", "what have I got open". Also
   for indicators (moving average, VWAP, Bollinger bands, volume profile,
-  RSI, MACD, ATR), resolutions and sessions, bar styles and colours, watchlists and their
+  RSI, MACD, ATR), for session times — "shade the overnight", "shade
+  the London session", "show RTH", "a lunch hour background" — and for
+  which time zone and 12 or 24 hours the charts show, resolutions and sessions, bar styles and colours, watchlists and their
   sections, chartbooks, link modes, the instrument search, and the cached
   price data. Also for marking a chart up — "draw the trendline", "box the
   range", "circle that gap", "mark the breakout", "label this high" — which
@@ -59,14 +61,14 @@ to the stored arrangement — you cannot tell last week's from what is on screen
 desktop theme. A hex is for when one exact colour was asked for.
 
 **Most charts are on a chart template.** New charts open on one ("Default",
-holding volume unless the user changed it), and a chart on a template shows
-the template's indicators. `chart indicator add` on such a chart takes it off
-the template first and says so in its reply — right for "put a 200-day on
-this", wrong for "RSI on all my charts", which is `template indicator add` on
-the template they share. `template list` says which template has how many
-charts. `chart set --template none` is not a way off a template that keeps the
-indicators: None is the empty set, and the chart is left with none. To keep
-them and tweak, change the chart's indicators instead.
+holding volume and Session Times unless the user changed it), and a chart on a template shows
+the template's indicators. `chart indicator add` on such a chart changes the
+template — every chart on it takes the change, and the reply says how many —
+which is right for "RSI on all my charts" and surprising for "put a 200-day on
+this one". Say which it will be before running it on a chart that shares its
+template; `template list` says which template has how many charts.
+`chart set --template none` is not a way off a template that keeps the
+indicators: None is the empty set, and the chart is left with none.
 
 **A feed change is immediate, and a sign-in needs the user.** `config set
 provider tos` switches a window that is open to the other feed on the spot
@@ -79,6 +81,18 @@ feed delivers bars — polled on a timer, or streamed as each print arrives —
 and, for a feed that streams, what the open window holds a subscription to and
 whether anything has ticked. A chart on a streamed feed is never refetched on
 a timer; if it looks still, `provider status` is where to look first.
+
+**Times are the chart's.** A time given to a command — a range's `--from`
+and `--to`, a drawing's `WHEN` — is read in the clock the charts read,
+`config get chart_time_zone` (New York unless set; `exchange` means each
+chart's own exchange). A market named by its city keeps that city's clock
+with `--zone`: London opens at 08:00 `Europe/London` whichever week it is,
+which in New York time moves by an hour twice a year.
+
+**Sessions follow the instrument's exchange.** ES's day starts at five in the
+afternoon in Chicago the evening before; regular hours are the cash session
+for index futures, the pit hours for crude or gold, and the exchange's own
+day for a listing abroad. There is no holiday calendar.
 
 **`watchlist feed --json` is the only command that prints a price**, and only
 for the default watchlist. Otherwise "what's X doing" means putting it on screen.
@@ -120,6 +134,20 @@ omacharts chart set --chart pos:0 --template Momentum
 omacharts chart set --chart pos:1 --template Momentum
 omacharts template indicator set Momentum rsi --period 21
 ```
+
+**Shade the sessions.** Session Times is one indicator holding ranges, each
+shaded behind the bars. New charts get it from the "Default" template with
+the extended hours set back, so changing it there changes every chart on
+it. Add London and a custom lunch hour, then recolour the second range:
+
+```
+omacharts template indicator set Default session_times --add-range london
+omacharts template indicator set Default session_times --add-range custom --name Lunch --from 12pm --to 1:30pm
+omacharts template indicator set Default session_times --range 2 --color Blue --shade-alpha 0.1
+```
+
+A chart on no template gets its own with `chart indicator add session_times`,
+which starts with ETH.
 
 **Each chart has a link mode**, which is what a click in the watchlist does
 to it. `focus` (the default) takes the click only while it is the focused
