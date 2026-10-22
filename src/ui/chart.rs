@@ -444,11 +444,26 @@ impl Layout {
 /// down passes happen to run in rather than by anything about the market.
 ///
 /// So each column is aggregated first: first open, last close, lowest low,
-/// highest high, summed volume. Nothing is sampled and nothing is averaged,
-/// which is what makes this safe to do to a price chart — a column's wick is
-/// exactly the union of the wicks it stands for, so no high and no low can go
-/// missing at any zoom, and no gap between two of them is filled in. It is
-/// the picture the old code was trying to draw, for a bounded amount of work.
+/// highest high. Nothing is sampled, which is what makes this safe to do to a
+/// price chart — a column's wick is exactly the union of the wicks it stands
+/// for, so no high and no low can go missing at any zoom, and no gap between
+/// two of them is filled in. It is the picture the old code was trying to
+/// draw, for a bounded amount of work.
+///
+/// Which bars share a pixel is decided from the start of the series, not
+/// from the first bar on screen. The bars are cut into groups of the same
+/// whole number, at multiples of it counted from the first bar, and every
+/// group goes to the pixel its middle falls in, counted from where the
+/// series begins rounded to a whole pixel. Counted from the screen, scrolling
+/// by one bar moved every boundary, so every column took a different open
+/// and close and candles all across the chart flipped colour at each step.
+/// Counted from the series, a scroll moves the columns by whole pixels or
+/// not at all, and only the ones at the edges, cut off by the plot, change.
+///
+/// A group is half a pixel or more, so a pixel holds one or two of them.
+/// Columns of whole groups a pixel or wider were one to two pixels each,
+/// and every candle doubled in thickness the moment the chart held more bars
+/// than the plot had pixels.
 ///
 /// At a bar a pixel or wider there is nothing to aggregate and the visible
 /// slice is borrowed as it is, untouched, which is the case every chart at a
@@ -469,10 +484,30 @@ struct Columns<'a> {
     /// How many real bars the columns stand for.
     visible: usize,
     plot_x: f64,
-    /// One column's width, never less than a pixel.
+    /// Where the first column begins: `plot_x` at a bar a column, the
+    /// pixel the first bars fall in past that.
+    left: f64,
+    /// One column's width: a bar's, or a pixel once a bar is narrower.
     bar_w: f64,
+    /// One bar's width.
+    bar_px: f64,
+    /// Where the first visible bar begins, which a span of bars is placed
+    /// from.
+    start: f64,
     /// The visible bars the columns were made from.
     slice: &'a [Bar],
+    /// Bars to a group: the fewest that make half a pixel.
+    per: usize,
+    /// The visible groups, counted from the start of the series, and the
+    /// pixel the first column is, counted from the series' own first pixel.
+    groups: std::ops::RangeInclusive<usize>,
+    pixel: i64,
+}
+
+/// The fewest whole bars that make a group at least half a pixel wide,
+/// shaved so half a pixel each exactly is not two.
+fn bars_per_column(bar_px: f64) -> usize {
+    ((0.5 / bar_px) - 1e-9).ceil().max(1.0) as usize
 }
 
 impl<'a> Columns<'a> {
@@ -480,18 +515,41 @@ impl<'a> Columns<'a> {
     /// more than one bar to a pixel.
     fn of(bars: &'a [Bar], first: usize, visible: usize, plot_x: f64, plot_w: f64) -> Columns<'a> {
         let visible = visible.max(1);
-        let columns = (plot_w.floor().max(1.0) as usize).min(visible);
-        let bar_w = plot_w / columns as f64;
-        if columns >= visible || bars.len() < visible {
-            return Columns { bars: Cow::Borrowed(bars), first, visible, plot_x, bar_w, slice: bars };
+        let bar_px = plot_w.max(1.0) / visible as f64;
+        let per = bars_per_column(bar_px);
+        let mut columns = Columns {
+            bars: Cow::Borrowed(bars),
+            first,
+            visible,
+            plot_x,
+            left: plot_x,
+            bar_w: bar_px,
+            bar_px,
+            start: plot_x,
+            slice: bars,
+            per,
+            groups: 0..=0,
+            pixel: 0,
+        };
+        if bar_px >= 1.0 || bars.len() < visible {
+            return columns;
         }
-        let mut aggregated = Vec::with_capacity(columns);
-        for at in 0..columns {
-            // Integer division, so the columns tile the slice exactly and
-            // every one of them gets at least one bar.
-            let from = at * visible / columns;
-            let to = (at + 1) * visible / columns;
-            let group = &bars[from..to];
+        // Where the series' first bar would begin, rounded to a pixel: the
+        // origin every group's pixel is counted from.
+        let origin = (plot_x - first as f64 * bar_px).round();
+        let groups = first / per..=(first + visible - 1) / per;
+        let end = plot_x + visible as f64 * bar_px;
+        let from = columns.group_pixel(*groups.start()).max((plot_x.round() - origin) as i64);
+        let to = columns.group_pixel(*groups.end()).min((end.round() - origin) as i64 - 1).max(from);
+        columns.groups = groups;
+        columns.pixel = from;
+        columns.left = origin + from as f64;
+        columns.bar_w = 1.0;
+        columns.start = origin + first as f64 * bar_px;
+        let count = (to - from + 1) as usize;
+        let mut aggregated = Vec::with_capacity(count);
+        for at in 0..count {
+            let Some(group) = bars.get(columns.span(at)) else { continue };
             let (Some(opening), Some(closing)) = (group.first(), group.last()) else {
                 continue;
             };
@@ -508,18 +566,86 @@ impl<'a> Columns<'a> {
                 column.low = column.low.min(bar.low);
                 column.volume += bar.volume;
             }
+            // A group's worth, so a pixel holding two is not twice as tall
+            // as its neighbour holding one: a comb across the volume.
+            column.volume *= per as f64 / group.len() as f64;
             aggregated.push(column);
         }
-        Columns { bars: Cow::Owned(aggregated), first, visible, plot_x, bar_w, slice: bars }
+        columns.bars = Cow::Owned(aggregated);
+        columns
     }
 
     fn len(&self) -> usize {
         self.bars.len()
     }
 
+    /// Whether a column is a pixel holding several bars rather than a bar.
+    fn sub_pixel(&self) -> bool {
+        self.bar_px < 1.0
+    }
+
+    /// The pixel a group falls in, counted from the series' first pixel.
+    fn group_pixel(&self, group: usize) -> i64 {
+        ((group as f64 + 0.5) * self.per as f64 * self.bar_px).floor() as i64
+    }
+
+    /// The first group in `pixel` or past it. Worked out from
+    /// [`group_pixel`](Columns::group_pixel) itself, so the two can never
+    /// disagree about a group sitting on a boundary.
+    fn group_from(&self, pixel: i64) -> usize {
+        let wide = self.per as f64 * self.bar_px;
+        let mut group = (pixel as f64 / wide - 0.5).ceil().max(0.0) as usize;
+        while group > 0 && self.group_pixel(group - 1) >= pixel {
+            group -= 1;
+        }
+        while self.group_pixel(group) < pixel {
+            group += 1;
+        }
+        group
+    }
+
+    /// The visible bars a column stands for, counted from the first visible
+    /// bar. The two at the ends are cut short by the edges of the plot.
+    fn span(&self, at: usize) -> std::ops::Range<usize> {
+        if !self.sub_pixel() {
+            return at..at + 1;
+        }
+        let (first, last) = (*self.groups.start(), *self.groups.end());
+        let pixel = self.pixel + at as i64;
+        let from = if at == 0 { first } else { self.group_from(pixel).max(first) };
+        let to = if at + 1 >= self.len() { last + 1 } else { self.group_from(pixel + 1).min(last + 1) };
+        let bar = |group: usize| (group * self.per).clamp(self.first, self.first + self.visible) - self.first;
+        bar(from)..bar(to)
+    }
+
+    /// How far left of `plot_x` the first column begins.
+    fn shift(&self) -> f64 {
+        self.plot_x - self.left
+    }
+
     /// The middle of a column, which is where a candle is centred.
     fn x(&self, at: usize) -> f64 {
-        self.plot_x + (at as f64 + 0.5) * self.bar_w
+        self.left + (at as f64 + 0.5) * self.bar_w
+    }
+
+    /// How many bars a column stands for, on average: one at a bar a
+    /// column, and as many as a pixel holds past that.
+    fn bars_each(&self) -> f64 {
+        match self.sub_pixel() {
+            true => 1.0 / self.bar_px,
+            false => 1.0,
+        }
+    }
+
+    /// The pixel a column holding several bars is, as a left edge and a
+    /// width. `None` at a bar a column, where a column is drawn by its
+    /// middle.
+    ///
+    /// Filled rather than stroked down the middle, so every pixel under the
+    /// bars is drawn and the chart is solid, with nothing for a scroll to
+    /// open and close between the columns.
+    fn tile(&self, at: usize) -> Option<(f64, f64)> {
+        self.sub_pixel().then_some((self.left + at as f64, 1.0))
     }
 
     /// A column's wick as high-low pairs, one per run of its bars whose ranges
@@ -527,10 +653,8 @@ impl<'a> Columns<'a> {
     /// any gap between two bars that happened to share the column.
     fn wicks(&self, at: usize) -> impl Iterator<Item = (f64, f64)> + '_ {
         let group = match self.bars {
-            Cow::Borrowed(_) => std::slice::from_ref(&self.bars[at]),
-            Cow::Owned(_) => {
-                &self.slice[at * self.visible / self.len()..(at + 1) * self.visible / self.len()]
-            }
+            Cow::Borrowed(_) => self.bars.get(at..at + 1).unwrap_or_default(),
+            Cow::Owned(_) => self.slice.get(self.span(at)).unwrap_or_default(),
         };
         let mut group = group.iter().peekable();
         std::iter::from_fn(move || {
@@ -552,24 +676,18 @@ impl<'a> Columns<'a> {
 
     /// The same, counted from the first visible bar.
     fn offset(&self, at: usize) -> usize {
-        ((at + 1) * self.visible / self.len()).saturating_sub(1)
+        self.span(at).end.saturating_sub(1)
     }
 
     /// Where a bar's own column begins, in pixels. For the things drawn across
     /// a span of bars rather than at one.
     fn left_of(&self, index: usize) -> f64 {
-        self.plot_x + self.column_of(index) * self.bar_w
+        self.start + index.saturating_sub(self.first) as f64 * self.bar_px
     }
 
     /// How wide the bars from `from` up to but not including `to` are.
     fn width_of(&self, from: usize, to: usize) -> f64 {
-        (self.column_of(to) - self.column_of(from)) * self.bar_w
-    }
-
-    /// Which column a bar falls in, kept fractional: rounding here and again
-    /// at the pixel would move a span by a column.
-    fn column_of(&self, index: usize) -> f64 {
-        index.saturating_sub(self.first) as f64 * self.len() as f64 / self.visible as f64
+        self.left_of(to) - self.left_of(from)
     }
 }
 
@@ -4047,7 +4165,7 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     let decimals = omacharts_engine::price_decimals(step, (low + high) / 2.0, kind);
 
     draw_price_grid(cr, state, plot_x, plot_w, price_y, price_h, &scale, &to_y);
-    draw_time_axis(cr, state, &columns.bars, plot_x, plot_w, height, bar_w, bars_x);
+    draw_time_axis(cr, state, &columns.bars, columns.bars_each(), plot_x, plot_w, height, bar_w, bars_x - columns.shift());
     // Shaded things go under the candles; lines go over. A band drawn on top
     // of the bars hides the thing it is describing.
     //
@@ -4073,17 +4191,7 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
         match &drawn.output {
             Output::Volume { .. } => {
                 if max_volume > 0.0 {
-                    draw_volume(
-                        cr,
-                        state,
-                        &drawn.indicator,
-                        &columns.bars,
-                        bars_x,
-                        bar_w,
-                        row.top,
-                        row.height,
-                        max_volume,
-                    );
+                    draw_volume(cr, state, &drawn.indicator, &columns, row.top, row.height, max_volume);
                 }
                 // Named like the others now that it is one strip among several.
                 // Three unlabelled boxes under a chart is a puzzle.
@@ -4283,6 +4391,7 @@ fn draw_time_axis(
     cr: &cairo::Context,
     state: &State,
     bars: &[Bar],
+    per: f64,
     plot_x: f64,
     plot_w: f64,
     height: f64,
@@ -4304,28 +4413,19 @@ fn draw_time_axis(
     // timeframe step on from the last bar or back from the first, so the
     // axis keeps reading as the chart is dragged past its data.
     let before = ((bars_x - plot_x) / bar_w).round().max(0.0) as i64;
+    // What rounding to a column left over: the columns sit off the grid by
+    // the part of one scrolled past the left edge.
+    let nudge = bars_x - plot_x - before as f64 * bar_w;
     let total = (plot_w / bar_w).round().max(1.0) as i64;
-    let step = state.timeframe.seconds();
-    let time_at = |column: i64| -> Option<i64> {
-        let at = column - before;
-        if at >= 0 && (at as usize) < bars.len() {
-            return Some(bars[at as usize].ts);
-        }
-        if step <= 0 {
-            return None;
-        }
-        let timeframe = state.timeframe;
-        if at < 0 {
-            bars.first().map(|b| timeframe.shift(b.ts, at))
-        } else {
-            bars.last().map(|b| timeframe.shift(b.ts, at - bars.len() as i64 + 1))
-        }
-    };
+    // A column zoomed out far enough stands for `per` bars, so the room past
+    // the data steps by that many too, or its dates crawl.
+    let step = (state.timeframe.seconds() as f64 * per).round() as i64;
+    let time_at = |column: i64| axis_time(bars, state.timeframe, per, column - before);
     let utc = state.timeframe.is_calendar();
     let (ticks, tick_seconds) = axis_ticks(total, plot_w, step, utc, time_at);
     for column in ticks {
         let Some(ts) = time_at(column) else { continue };
-        let x = plot_x + (column as f64 + 0.5) * bar_w;
+        let x = plot_x + nudge + (column as f64 + 0.5) * bar_w;
         if x < plot_x + 18.0 || x > plot_x + plot_w - 18.0 {
             continue;
         }
@@ -4342,6 +4442,30 @@ fn draw_time_axis(
             cr.move_to(x - extents.width() / 2.0, height - 7.0);
             let _ = cr.show_text(&label);
         }
+    }
+}
+
+/// The moment the time axis gives the column `at`, counted from the first
+/// one drawn: its own time over the data, and in the empty room either side
+/// the time that column would be, `per` bars on from the last column or
+/// back from the first.
+///
+/// By the column, not the bar: once a column stands for several bars, a
+/// bar's time to a column made the room's dates crawl, so that a year of
+/// it read as a fraction of one and its labels sat out of step with the
+/// data's.
+fn axis_time(bars: &[Bar], timeframe: Timeframe, per: f64, at: i64) -> Option<i64> {
+    if let Some(bar) = usize::try_from(at).ok().and_then(|at| bars.get(at)) {
+        return Some(bar.ts);
+    }
+    if timeframe.seconds() <= 0 {
+        return None;
+    }
+    let per = per.max(1.0);
+    let steps = |columns: i64| (columns as f64 * per).round() as i64;
+    match at < 0 {
+        true => bars.first().map(|b| timeframe.shift(b.ts, steps(at))),
+        false => bars.last().map(|b| timeframe.shift(b.ts, steps(at - bars.len() as i64 + 1))),
     }
 }
 
@@ -4401,7 +4525,7 @@ fn candles(
             });
             for (high, low) in columns.wicks(i) {
                 let Some((top, bottom)) = body else {
-                    draw_wick(cr, x, to_y(high), to_y(low));
+                    draw_wick(cr, x, columns.tile(i), to_y(high), to_y(low));
                     continue;
                 };
                 let (high, low) = (to_y(high).round(), to_y(low).round());
@@ -4416,7 +4540,7 @@ fn candles(
             }
         }
         if any {
-            let _ = cr.stroke();
+            stroke_wicks(cr, columns);
         }
         if !any {
             continue;
@@ -4450,10 +4574,27 @@ fn candles(
 
 /// A bar's high-low line, a pixel long at least: when the two round to the
 /// same row, a line from there to itself draws nothing and the bar vanishes.
-fn draw_wick(cr: &cairo::Context, x: f64, high: f64, low: f64) {
+///
+/// Across the column's whole pixels instead, as a box, where its columns
+/// [tile](Columns::tile); [`stroke_wicks`] then fills rather than strokes.
+fn draw_wick(cr: &cairo::Context, x: f64, tile: Option<(f64, f64)>, high: f64, low: f64) {
     let top = high.round();
-    cr.move_to(x, top);
-    cr.line_to(x, low.round().max(top + 1.0));
+    let bottom = low.round().max(top + 1.0);
+    match tile {
+        Some((left, width)) => cr.rectangle(left, top, width, bottom - top),
+        None => {
+            cr.move_to(x, top);
+            cr.line_to(x, bottom);
+        }
+    }
+}
+
+/// Put down the wicks [`draw_wick`] traced for these columns.
+fn stroke_wicks(cr: &cairo::Context, columns: &Columns) {
+    let _ = match columns.sub_pixel() {
+        true => cr.fill(),
+        false => cr.stroke(),
+    };
 }
 
 /// Open and close as ticks either side of a high-low line.
@@ -4470,7 +4611,7 @@ fn ohlc(cr: &cairo::Context, scheme: &BarScheme, columns: &Columns, to_y: &impl 
             any = true;
             let x = columns.x(i).round() + 0.5;
             for (high, low) in columns.wicks(i) {
-                draw_wick(cr, x, to_y(high), to_y(low));
+                draw_wick(cr, x, columns.tile(i), to_y(high), to_y(low));
             }
             if tick > 1.0 {
                 let open = to_y(bar.open).round() + 0.5;
@@ -4483,24 +4624,21 @@ fn ohlc(cr: &cairo::Context, scheme: &BarScheme, columns: &Columns, to_y: &impl 
         }
         if any {
             colors::set_source(cr, scheme.outline(direction));
-            let _ = cr.stroke();
+            stroke_wicks(cr, columns);
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_volume(
     cr: &cairo::Context,
     state: &State,
     indicator: &Indicator,
-    bars: &[Bar],
-    plot_x: f64,
-    bar_w: f64,
+    columns: &Columns,
     top: f64,
     height: f64,
     max_volume: f64,
 ) {
-    let body_w = (bar_w * 0.68).clamp(1.0, 24.0);
+    let body_w = (columns.bar_w * 0.68).clamp(1.0, 24.0);
     // A tenth of the strip clear at the top, so the tallest bar does not
     // reach the line above it. Bars run under the name, which is short.
     let inner_top = top + height * 0.1;
@@ -4509,14 +4647,18 @@ fn draw_volume(
     for rising in [false, true] {
         let colour = if rising { &up } else { &down };
         let mut any = false;
-        for (i, bar) in bars.iter().enumerate() {
+        for (i, bar) in columns.bars.iter().enumerate() {
             if (bar.close >= bar.open) != rising || bar.volume <= 0.0 {
                 continue;
             }
             any = true;
             let h = (bar.volume / max_volume * inner_h).max(1.0);
-            let x = plot_x + (i as f64 + 0.5) * bar_w - body_w / 2.0;
-            cr.rectangle(x.round(), (inner_top + inner_h - h).round(), body_w.round(), h.round());
+            // A column's own pixel once it holds several bars, for the
+            // reason the wicks take it.
+            let (x, w) = columns
+                .tile(i)
+                .unwrap_or(((columns.x(i) - body_w / 2.0).round(), body_w.round()));
+            cr.rectangle(x, (inner_top + inner_h - h).round(), w, h.round());
         }
         if any {
             colors::set_source_alpha(cr, colour, 0.85);
@@ -4885,8 +5027,10 @@ fn draw_histogram(
             any = true;
             let y = to_y(*value);
             let (top, h) = (y.min(base), (y - base).abs().max(1.0));
-            let x = columns.x(at) - body_w / 2.0;
-            cr.rectangle(x.round(), top.round(), body_w.round(), h.round());
+            let (x, w) = columns
+                .tile(at)
+                .unwrap_or(((columns.x(at) - body_w / 2.0).round(), body_w.round()));
+            cr.rectangle(x, top.round(), w, h.round());
         }
         if any {
             colors::set_source_alpha(cr, colour, 0.85);
@@ -6290,16 +6434,17 @@ mod tests {
     #[test]
     fn a_column_keeps_the_extremes_of_every_bar_it_stands_for() {
         let bars = ramp(3000);
-        let columns = Columns::of(&bars, 0, 3000, PAD, 1500.0);
-        assert_eq!(columns.len(), 1500, "a column a pixel");
+        let columns = Columns::of(&bars, 0, 3000, PAD, 750.0);
+        assert_eq!(columns.len(), 750, "a column a pixel");
         for (at, column) in columns.bars.iter().enumerate() {
-            let group = &bars[at * 2..at * 2 + 2];
+            let group = &bars[at * 4..at * 4 + 4];
             assert_eq!(column.ts, group[0].ts, "a column starts when its first bar does");
             assert_eq!(column.open, group[0].open, "first open");
-            assert_eq!(column.close, group[1].close, "last close");
+            assert_eq!(column.close, group[3].close, "last close");
             assert_eq!(column.high, highest(group), "highest high");
             assert_eq!(column.low, lowest(group), "lowest low");
-            assert_eq!(column.volume, group[0].volume + group[1].volume, "summed volume");
+            let summed: f64 = group.iter().map(|bar| bar.volume).sum();
+            assert_eq!(column.volume, summed / 2.0, "a group's worth of volume, two groups to a pixel");
         }
         // Which is also what keeps the price axis the same axis: the scale is
         // worked out from the highest high and the lowest low on screen.
@@ -6322,13 +6467,18 @@ mod tests {
     #[test]
     fn columns_tile_the_bars_even_when_the_two_do_not_divide() {
         let bars = ramp(1000);
-        let columns = Columns::of(&bars, 13, 1000, PAD, 299.0);
-        assert_eq!(columns.len(), 299);
+        let columns = Columns::of(&bars, 13, 1000, PAD, 149.5);
+        assert_eq!(columns.len(), 150, "a column a pixel");
+        let mut next = 0;
+        for at in 0..columns.len() {
+            let span = columns.span(at);
+            assert_eq!(span.start, next, "column {at} begins at {}, not after the last", span.start);
+            assert!(!span.is_empty(), "column {at} stands for nothing");
+            next = span.end;
+        }
+        assert_eq!(next, 1000, "the last bars are in no column");
         assert_eq!(highest(&columns.bars), highest(&bars), "a high went missing");
         assert_eq!(lowest(&columns.bars), lowest(&bars), "a low went missing");
-        let drawn: f64 = columns.bars.iter().map(|bar| bar.volume).sum();
-        let real: f64 = bars.iter().map(|bar| bar.volume).sum();
-        assert!((drawn - real).abs() < 1e-6, "{drawn} of {real}");
         assert_eq!(columns.bars[0].open, bars[0].open, "the screen still opens where it did");
         assert_eq!(
             columns.bars.last().expect("a column").close,
@@ -6343,15 +6493,15 @@ mod tests {
     /// average that has slid off the candles it describes.
     #[test]
     fn every_column_reads_its_series_from_a_bar_inside_it() {
-        let (first, visible, wide) = (25usize, 1000usize, 300.0);
+        let (first, visible, wide) = (25usize, 1000usize, 150.0);
         let bars = ramp(first + visible);
         let columns = Columns::of(&bars[first..], first, visible, PAD, wide);
-        assert_eq!(columns.len(), 300);
+        assert_eq!(columns.len(), 150);
 
         let mut previous: Option<usize> = None;
         for at in 0..columns.len() {
-            let from = first + at * visible / columns.len();
-            let to = first + (at + 1) * visible / columns.len();
+            let span = columns.span(at);
+            let (from, to) = (first + span.start, first + span.end);
             let source = columns.source(at);
             assert!(
                 (from..to).contains(&source),
@@ -6369,27 +6519,87 @@ mod tests {
         );
     }
 
+    /// Scrolling a zoomed-out chart by a bar has to slide the columns along,
+    /// not cut them again. Cut from the first bar on screen, every column
+    /// took a different open and close at every step, and candles all across
+    /// the chart flickered between rising and falling.
+    #[test]
+    fn scrolling_by_a_bar_keeps_every_whole_column_as_it_was() {
+        let (visible, wide) = (1000usize, 299.0);
+        let bars: Vec<Bar> = ramp(1100)
+            .into_iter()
+            .enumerate()
+            .map(|(i, bar)| {
+                let swing = if i % 3 == 0 { 2.0 } else { -1.5 };
+                Bar { open: bar.close - swing, ..bar }
+            })
+            .collect();
+        let whole = |first: usize| -> Vec<Bar> {
+            let columns = Columns::of(&bars[first..first + visible], first, visible, PAD, wide);
+            (0..columns.len())
+                .filter(|&at| at > 0 && at + 1 < columns.len())
+                .map(|at| columns.bars[at])
+                .collect()
+        };
+        for first in 40..48 {
+            let (before, after) = (whole(first), whole(first + 1));
+            let same = after.iter().filter(|column| before.contains(column)).count();
+            assert!(same + 2 >= after.len(), "from bar {first}: {same} of {} columns kept", after.len());
+        }
+    }
+
     /// The other half of the mapping: the things drawn across a span of bars
     /// rather than at one — a volume profile's width, say — have to land on
     /// the same columns the candles did.
     #[test]
     fn a_span_of_bars_covers_the_columns_those_bars_are_drawn_in() {
-        let (first, visible, wide) = (10usize, 600usize, 300.0);
+        let (first, visible, wide) = (11usize, 600usize, 300.0);
         let bars = ramp(first + visible);
         let columns = Columns::of(&bars[first..], first, visible, PAD, wide);
         assert!(
             (columns.width_of(first, first + visible) - wide).abs() < 1e-9,
             "the visible bars are the whole plot"
         );
-        for at in 0..columns.len() {
-            let from = first + at * visible / columns.len();
-            let left = PAD + at as f64 * columns.bar_w;
+        // A column is the pixel its bars fall in, so each bar begins inside
+        // the pixel it is drawn in.
+        for at in 1..columns.len() {
+            let from = first + columns.span(at).start;
+            let left = columns.x(at) - columns.bar_w / 2.0;
             assert!(
-                (columns.left_of(from) - left).abs() < 1e-9,
+                (columns.left_of(from) - (left + 0.5)).abs() <= 0.5 + 1e-9,
                 "bar {from} starts at {} rather than {left}",
                 columns.left_of(from)
             );
         }
+    }
+
+    /// `count` daily bars from day `from`, rising a dollar a day.
+    fn daily(from: i64, count: usize) -> Vec<Bar> {
+        (0..count as i64)
+            .map(|i| {
+                let price = 100.0 + i as f64;
+                Bar { ts: (from + i) * 86_400, open: price, high: price + 1.0, low: price - 1.0, close: price, volume: 1.0 }
+            })
+            .collect()
+    }
+
+    /// The empty room past a zoomed-out chart's data is dated a column at a
+    /// time, carrying on from the columns over the data: one bar's time to
+    /// a column, four bars to each, made a year of room read as a quarter
+    /// of one.
+    #[test]
+    fn the_room_past_zoomed_out_bars_is_dated_by_the_column() {
+        let day = 86_400;
+        let bars = daily(0, 1000);
+        let columns = Columns::of(&bars, 0, 1000, PAD, 125.0);
+        assert_eq!((columns.bars_each(), columns.len()), (8.0, 125));
+        let at = |column: i64| axis_time(&columns.bars, Timeframe::days(1), columns.bars_each(), column);
+        assert_eq!(at(3), Some(24 * day), "a column over the data is its first bar's");
+        assert_eq!(at(124), Some(992 * day));
+        assert_eq!(at(125), Some(1000 * day), "the room begins where the next column would");
+        assert_eq!(at(134), Some(1072 * day));
+        assert_eq!(at(-1), Some(-8 * day));
+        assert_eq!(at(-10), Some(-80 * day));
     }
 
     /// A chart with a volume strip under it, which is the arrangement that
@@ -6587,6 +6797,86 @@ mod tests {
         let drawn = frame(20.0, 100.0, |cr| draw_candles(cr, &state, &columns, &to_y));
         let alpha = |y: usize| drawn[(y * 20 + x) * 4 + 3];
         assert!((11..90).all(|y| alpha(y) != 0), "a body with no height leaves no gap");
+    }
+
+    /// Past a bar a pixel, a column is under a pixel wide. A one-pixel wick
+    /// or volume bar rounded from each middle left a pixel out wherever two
+    /// rounded to one, and the gaps moved as the chart scrolled: stripes
+    /// crawling across it. Wherever the scroll stands, every pixel across
+    /// the bars is drawn.
+    #[test]
+    fn zoomed_out_columns_leave_no_gap_between_them() {
+        let state = charted(1);
+        let (visible, wide) = (1400usize, 450.0);
+        let bars = ramp(visible + 4);
+        let to_y = |price: f64| 100.0 - (price - 90.0) / 20.0;
+        let w = (PAD * 2.0 + wide) as usize;
+        for first in 0..4 {
+            let columns = Columns::of(&bars[first..first + visible], first, visible, PAD, wide);
+            assert_eq!(columns.per, 2);
+            let candles = frame(w as f64, 100.0, |cr| draw_candles(cr, &state, &columns, &to_y));
+            let volume = frame(w as f64, 100.0, |cr| draw_volume(cr, &state, &Indicator::new(1, indicators::Kind::Volume), &columns, 0.0, 100.0, 2000.0));
+            for x in PAD as usize..(PAD + wide) as usize {
+                let inked = |pixels: &[u8]| (0..100).any(|y| pixels[(y * w + x) * 4 + 3] != 0);
+                assert!(inked(&candles), "from bar {first}, no wick at {x}");
+                assert!(inked(&volume), "from bar {first}, no volume at {x}");
+            }
+            let outside = |pixels: &[u8]| (0..100).any(|y| pixels[(y * w + PAD as usize - 1) * 4 + 3] != 0);
+            assert!(!outside(&volume), "from bar {first}, volume left of the bars");
+        }
+    }
+
+    /// Columns of the fewest bars that fill a pixel were one to two pixels
+    /// wide, so the chart's candles doubled in thickness the moment it held
+    /// more bars than it had pixels. At every zoom past a bar a pixel, a
+    /// column is drawn one pixel wide, and every pixel is one column's.
+    #[test]
+    fn a_zoomed_out_candle_is_a_pixel_wide_at_every_zoom() {
+        let bars = ramp(4000);
+        let wide = 400.0;
+        for visible in (401..4000).step_by(37) {
+            let columns = Columns::of(&bars[..visible], 0, visible, PAD, wide);
+            let drawn: Vec<f64> = (0..columns.len())
+                .map(|at| {
+                    let (x, w) = columns.tile(at).expect("a pixel");
+                    assert_eq!(w, 1.0, "{visible} bars: column {at} is {w} wide");
+                    x
+                })
+                .collect();
+            assert!(drawn.windows(2).all(|two| two[1] == two[0] + 1.0), "{visible} bars: a pixel skipped or shared");
+            assert_eq!(drawn.len(), wide as usize, "{visible} bars: {} of {wide} pixels", drawn.len());
+        }
+    }
+
+    /// Bars are grouped into pixels counted from the series. Counted from
+    /// the plot's edge, a scroll that moved the bars a fraction of a pixel
+    /// regrouped them, and candles all along the chart changed colour. Now
+    /// a scroll moves every column by the same whole pixels, holding the
+    /// same bars, and only those at the edges come and go.
+    #[test]
+    fn scrolling_moves_whole_columns_by_whole_pixels() {
+        let (visible, wide) = (1300usize, 400.0);
+        let bars = ramp(1400);
+        let shown = |first: usize| -> Vec<(usize, usize, f64)> {
+            let columns = Columns::of(&bars[first..first + visible], first, visible, PAD, wide);
+            (1..columns.len() - 1)
+                .map(|at| {
+                    let span = columns.span(at);
+                    (first + span.start, first + span.end, columns.x(at))
+                })
+                .collect()
+        };
+        for first in 40..80 {
+            let (before, after) = (shown(first), shown(first + 1));
+            let moved: Vec<f64> = after
+                .iter()
+                .filter_map(|(from, to, x)| before.iter().find(|(f, t, _)| f == from && t == to).map(|(_, _, was)| x - was))
+                .collect();
+            assert!(moved.windows(2).all(|two| two[0] == two[1]), "from bar {first}: columns moved by {moved:?}");
+            assert!(moved.iter().all(|by| by.fract() == 0.0), "from bar {first}: moved by part of a pixel");
+            let kept = moved.len();
+            assert!(kept + 2 >= after.len(), "from bar {first}: {kept} of {} still the same", after.len());
+        }
     }
 
     #[test]
