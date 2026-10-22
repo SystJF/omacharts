@@ -637,6 +637,20 @@ impl<'a> Columns<'a> {
         }
     }
 
+    /// A candle body's whole pixels, as a left edge and a width: an odd
+    /// number of them, with the pixel the wick runs down in the middle.
+    ///
+    /// Rounded apart, the body's left edge and the wick each took the nearest
+    /// pixel on their own, so which side of the middle the wick fell on
+    /// depended on where the column's centre sat within its pixel. Anything
+    /// that resized the plot — a panel opening beside it — moved every centre
+    /// and knocked half the wicks a pixel off their bodies.
+    fn body(&self, at: usize) -> (f64, f64) {
+        let wanted = (self.bar_w * 0.68).clamp(1.0, 24.0);
+        let width = ((wanted - 1.0) / 2.0).round() * 2.0 + 1.0;
+        (self.x(at).round() - (width - 1.0) / 2.0, width)
+    }
+
     /// The pixel a column holding several bars is, as a left edge and a
     /// width. `None` at a bar a column, where a column is drawn by its
     /// middle.
@@ -4493,7 +4507,6 @@ fn candles(
         return;
     }
     let (bars, bar_w) = (&columns.bars, columns.bar_w);
-    let body_w = (bar_w * 0.68).clamp(1.0, 24.0);
     // Below about three pixels a candle is a line; outlining it just muddies
     // the colour.
     let hairline = bar_w < 3.0;
@@ -4556,10 +4569,10 @@ fn candles(
             if (bar.close >= bar.open) != rising {
                 continue;
             }
-            let x = columns.x(i) - body_w / 2.0;
+            let (x, w) = columns.body(i);
             let top = to_y(bar.open.max(bar.close)).round();
             let bottom = to_y(bar.open.min(bar.close)).round();
-            cr.rectangle(x.round(), top, body_w.round(), (bottom - top).max(1.0));
+            cr.rectangle(x, top, w, (bottom - top).max(1.0));
         }
         if hollow {
             // Hollow: stroke the outline and leave the background showing.
@@ -4638,7 +4651,6 @@ fn draw_volume(
     height: f64,
     max_volume: f64,
 ) {
-    let body_w = (columns.bar_w * 0.68).clamp(1.0, 24.0);
     // A tenth of the strip clear at the top, so the tallest bar does not
     // reach the line above it. Bars run under the name, which is short.
     let inner_top = top + height * 0.1;
@@ -4655,9 +4667,7 @@ fn draw_volume(
             let h = (bar.volume / max_volume * inner_h).max(1.0);
             // A column's own pixel once it holds several bars, for the
             // reason the wicks take it.
-            let (x, w) = columns
-                .tile(i)
-                .unwrap_or(((columns.x(i) - body_w / 2.0).round(), body_w.round()));
+            let (x, w) = columns.tile(i).unwrap_or_else(|| columns.body(i));
             cr.rectangle(x, (inner_top + inner_h - h).round(), w, h.round());
         }
         if any {
@@ -5011,7 +5021,6 @@ fn draw_histogram(
     to_y: &impl Fn(f64) -> f64,
 ) {
     let base = to_y(0.0);
-    let body_w = (columns.bar_w * 0.68).clamp(1.0, 24.0);
     for rising in [false, true] {
         let colour = state.scheme.volume(if rising { Direction::Up } else { Direction::Down });
         let mut any = false;
@@ -5027,9 +5036,7 @@ fn draw_histogram(
             any = true;
             let y = to_y(*value);
             let (top, h) = (y.min(base), (y - base).abs().max(1.0));
-            let (x, w) = columns
-                .tile(at)
-                .unwrap_or(((columns.x(at) - body_w / 2.0).round(), body_w.round()));
+            let (x, w) = columns.tile(at).unwrap_or_else(|| columns.body(at));
             cr.rectangle(x, top.round(), w, h.round());
         }
         if any {
@@ -6797,6 +6804,31 @@ mod tests {
         let drawn = frame(20.0, 100.0, |cr| draw_candles(cr, &state, &columns, &to_y));
         let alpha = |y: usize| drawn[(y * 20 + x) * 4 + 3];
         assert!((11..90).all(|y| alpha(y) != 0), "a body with no height leaves no gap");
+    }
+
+    /// The body and the wick were rounded to pixels apart, so a resize —
+    /// the settings panel opening beside the chart — put half the wicks a
+    /// pixel right of their bodies' middles. At every width, they line up.
+    #[test]
+    fn a_wick_runs_down_the_middle_of_its_body() {
+        let state = charted(1);
+        let bars = [Bar { ts: 0, open: 40.0, high: 90.0, low: 10.0, close: 60.0, volume: 0.0 }; 3];
+        let to_y = |price: f64| 100.0 - price;
+        for tenths in 120..400 {
+            let wide = tenths as f64 / 10.0;
+            let w = (wide + 2.0).ceil() as usize;
+            let columns = Columns::of(&bars, 0, 3, 0.3, wide);
+            let drawn = frame(w as f64, 100.0, |cr| draw_candles(cr, &state, &columns, &to_y));
+            let inked = |y: usize| (0..w).filter(|x| drawn[(y * w + x) * 4 + 3] != 0).collect::<Vec<_>>();
+            let (wicks, bodies) = (inked(20), inked(50));
+            assert_eq!(wicks.len(), 3, "at {wide}px, wicks at {wicks:?}");
+            for (i, wick) in wicks.iter().enumerate() {
+                let nearest = |x: usize| wicks.iter().min_by_key(|w| w.abs_diff(x)) == Some(wick);
+                let body: Vec<_> = bodies.iter().filter(|x| nearest(**x)).collect();
+                assert_eq!(*body[body.len() / 2], *wick, "at {wide}px, candle {i}: body {body:?}, wick {wick}");
+                assert_eq!(body.len() % 2, 1, "at {wide}px, an even body has no middle");
+            }
+        }
     }
 
     /// Past a bar a pixel, a column is under a pixel wide. A one-pixel wick
