@@ -460,10 +460,8 @@ impl Layout {
 /// Counted from the series, a scroll moves the columns by whole pixels or
 /// not at all, and only the ones at the edges, cut off by the plot, change.
 ///
-/// A group is half a pixel or more, so a pixel holds one or two of them.
-/// Columns of whole groups a pixel or wider were one to two pixels each,
-/// and every candle doubled in thickness the moment the chart held more bars
-/// than the plot had pixels.
+/// A group is half a pixel or more, so a pixel holds one or two of them and
+/// a column is still exactly a pixel, as wide as it was before grouping.
 ///
 /// At a bar a pixel or wider there is nothing to aggregate and the visible
 /// slice is borrowed as it is, untouched, which is the case every chart at a
@@ -645,10 +643,18 @@ impl<'a> Columns<'a> {
     /// depended on where the column's centre sat within its pixel. Anything
     /// that resized the plot — a panel opening beside it — moved every centre
     /// and knocked half the wicks a pixel off their bodies.
+    ///
+    /// Odd only while that leaves a pixel to the next candle. Neighbours land
+    /// as few as the column's width rounded down apart, and at three to four
+    /// pixels a column a three-pixel body touched them, fusing a run of
+    /// candles into one block. There the body keeps the width it had, and
+    /// the wick takes the same side of its middle on every candle.
     fn body(&self, at: usize) -> (f64, f64) {
         let wanted = (self.bar_w * 0.68).clamp(1.0, 24.0);
-        let width = ((wanted - 1.0) / 2.0).round() * 2.0 + 1.0;
-        (self.x(at).round() - (width - 1.0) / 2.0, width)
+        let room = (self.bar_w.floor() - 1.0).max(1.0);
+        let odd = ((wanted - 1.0) / 2.0).round() * 2.0 + 1.0;
+        let width = if odd <= room { odd } else { wanted.round().min(room) };
+        (self.x(at).round() - ((width - 1.0) / 2.0).floor(), width)
     }
 
     /// The pixel a column holding several bars is, as a left edge and a
@@ -6808,7 +6814,8 @@ mod tests {
 
     /// The body and the wick were rounded to pixels apart, so a resize —
     /// the settings panel opening beside the chart — put half the wicks a
-    /// pixel right of their bodies' middles. At every width, they line up.
+    /// pixel right of their bodies' middles. At every width, they line up:
+    /// on the middle of an odd body, and just left of it on an even one.
     #[test]
     fn a_wick_runs_down_the_middle_of_its_body() {
         let state = charted(1);
@@ -6825,8 +6832,23 @@ mod tests {
             for (i, wick) in wicks.iter().enumerate() {
                 let nearest = |x: usize| wicks.iter().min_by_key(|w| w.abs_diff(x)) == Some(wick);
                 let body: Vec<_> = bodies.iter().filter(|x| nearest(**x)).collect();
-                assert_eq!(*body[body.len() / 2], *wick, "at {wide}px, candle {i}: body {body:?}, wick {wick}");
-                assert_eq!(body.len() % 2, 1, "at {wide}px, an even body has no middle");
+                assert_eq!(*body[(body.len() - 1) / 2], *wick, "at {wide}px, candle {i}: body {body:?}, wick {wick}");
+            }
+        }
+    }
+
+    /// A body as wide as the gap to its neighbour touched it, and a run of
+    /// candles going the same way read as one block. From two pixels a
+    /// column, where there is room for one, a pixel always parts them.
+    #[test]
+    fn neighbouring_bodies_never_touch() {
+        let bars = ramp(400);
+        for hundredths in 200..1600 {
+            let bar_w = hundredths as f64 / 100.0;
+            let columns = Columns::of(&bars, 0, 40, 0.3, bar_w * 40.0);
+            for at in 1..columns.len() {
+                let ((was, width), (left, _)) = (columns.body(at - 1), columns.body(at));
+                assert!(left - (was + width) >= 1.0, "at {bar_w}px a column, bodies {} and {at} touch", at - 1);
             }
         }
     }
@@ -6858,10 +6880,10 @@ mod tests {
         }
     }
 
-    /// Columns of the fewest bars that fill a pixel were one to two pixels
-    /// wide, so the chart's candles doubled in thickness the moment it held
-    /// more bars than it had pixels. At every zoom past a bar a pixel, a
-    /// column is drawn one pixel wide, and every pixel is one column's.
+    /// Grouping by whole bars must not make columns wider than a pixel, or
+    /// the candles thicken the moment the chart holds more bars than it has
+    /// pixels. At every zoom past a bar a pixel, a column is drawn one pixel
+    /// wide, and every pixel is one column's.
     #[test]
     fn a_zoomed_out_candle_is_a_pixel_wide_at_every_zoom() {
         let bars = ramp(4000);
