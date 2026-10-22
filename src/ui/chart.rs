@@ -1454,6 +1454,17 @@ impl State {
         projected.corners.get(pinned - 1).is_some_and(|at| (at.0 - x).hypot(at.1 - y) <= omacharts_engine::drawings::GRIP_REACH)
     }
 
+    /// The pointer over grip `grip` of drawing `index`, or holding it.
+    fn grip_cursor(&self, width: f64, height: f64, index: usize, grip: Grip, held: bool) -> &'static str {
+        let (first, visible) = self.slice();
+        let Some(drawing) = self.drawings.get(index).filter(|_| visible > 0) else { return "default" };
+        let plan = layout(self, width, height);
+        let Some(scale) = price_range(self, &self.bars[first..first + visible], &plan) else {
+            return "default";
+        };
+        grip_cursor(&self.project(&plan, &scale, drawing), grip, held)
+    }
+
     /// The drawing under a pixel, topmost first, and which part of it.
     fn drawing_at(&self, width: f64, height: f64, x: f64, y: f64) -> Option<(usize, Grip)> {
         let (first, visible) = self.slice();
@@ -1644,15 +1655,32 @@ type Handler<F> = Rc<RefCell<Option<Box<F>>>>;
 const PASTE_OFFSET: f64 = 16.0;
 
 /// The cursor for a grip: which way it moves what it is on.
-fn grip_cursor(grip: Grip) -> &'static str {
+///
+/// The same over a grip and while it is held, so the pointer does not turn
+/// into an arrow halfway through resizing a box.
+fn grip_cursor(projected: &Projected, grip: Grip, held: bool) -> &'static str {
     match grip {
         Grip::Top | Grip::Bottom => "ns-resize",
         Grip::Left | Grip::Right => "ew-resize",
-        // The two diagonals, each naming the corners it runs between.
-        Grip::From | Grip::To => "nwse-resize",
-        Grip::FromTo | Grip::ToFrom => "nesw-resize",
-        Grip::Corner(_) => "move",
-        Grip::Body => "pointer",
+        Grip::Body => match held {
+            true => "grabbing",
+            false => "grab",
+        },
+        // A box's corner, by the diagonal it sits on as drawn rather than by
+        // which anchor it is: a box drawn from the bottom up has `from` at
+        // its bottom left, and its anchors named the wrong diagonal.
+        Grip::From | Grip::To | Grip::FromTo | Grip::ToFrom if projected.kind.is_bounded() => {
+            let Some((x, y)) = projected.grip(grip) else { return "default" };
+            let (left, top, w, h) = projected.bounds();
+            match (x < left + w / 2.0) == (y < top + h / 2.0) {
+                true => "nwse-resize",
+                false => "nesw-resize",
+            }
+        }
+        // A point: the ring round it says it is under the hand, and the
+        // arrow's tip shows exactly where it will land, which a hand or a
+        // cross of arrows would cover.
+        _ => "default",
     }
 }
 
@@ -3548,7 +3576,7 @@ impl ChartView {
                 let s = state.borrow();
                 layout(&s, area.width() as f64, area.height() as f64).control_at(x, y).is_some()
             };
-            let (armed, over_drawing, over_indicator) = {
+            let (armed, over_drawing, over_indicator, holding) = {
                 let mut s = state.borrow_mut();
                 let (w, h) = (area.width() as f64, area.height() as f64);
                 let free = s.drag.is_none() && s.tool.is_none();
@@ -3570,16 +3598,28 @@ impl ChartView {
                     && !over_edge
                     && !over_control
                     && s.indicator_at(w, h, x, y).is_some();
-                (s.tool.is_some(), over.map(|(_, grip)| grip), indicator)
+                let holding = match s.drag {
+                    Some(Drag::Grip { index, grip, .. }) => Some(s.grip_cursor(w, h, index, grip, true)),
+                    _ => None,
+                };
+                (
+                    s.tool.is_some(),
+                    over.map(|(index, grip)| s.grip_cursor(w, h, index, grip, false)),
+                    indicator,
+                    holding,
+                )
             };
-            area.set_cursor_from_name(Some(match (over_edge, over_control, armed, over_drawing) {
-                (true, _, _, _) => "ns-resize",
-                (_, true, _, _) => "pointer",
-                (_, _, true, _) => "crosshair",
+            area.set_cursor_from_name(Some(match (holding, over_edge, over_control, armed, over_drawing) {
+                // A grip in hand keeps its cursor wherever the hand takes it,
+                // over a pane's edge or a control included.
+                (Some(cursor), ..) => cursor,
+                (_, true, ..) => "ns-resize",
+                (_, _, true, ..) => "pointer",
+                (_, _, _, true, _) => "crosshair",
                 // What the grip under the pointer will do, said by the
                 // pointer itself. A handle in the middle of an edge that
                 // looks like every other handle is a handle nobody tries.
-                (_, _, _, Some(grip)) => grip_cursor(grip),
+                (.., Some(cursor)) => cursor,
                 // A hand over an indicator: a click there selects it. No
                 // highlight on hover, which across a dense chart would
                 // flicker on every line the pointer crossed.
@@ -3894,6 +3934,7 @@ impl ChartView {
                         // moves is forgotten at the end.
                         s.remember();
                         s.drag = Some(Drag::Grip { index, grip, origin });
+                        area.set_cursor_from_name(Some(s.grip_cursor(width, height, index, grip, true)));
                     }
                     drop(s);
                     area.queue_draw();
@@ -4156,6 +4197,10 @@ impl ChartView {
                         // Let go of where the hand still is: lit as under it,
                         // no longer as held.
                         s.hover_grip = (grip != Grip::Body).then_some((index, grip));
+                        if let Some(view) = view.upgrade() {
+                            let (w, h) = (view.area.width() as f64, view.area.height() as f64);
+                            view.area.set_cursor_from_name(Some(s.grip_cursor(w, h, index, grip, false)));
+                        }
                         let before = s.undo.last().cloned().unwrap_or_default();
                         let moved: Vec<Drawing> = s
                             .drawings
