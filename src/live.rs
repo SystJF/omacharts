@@ -1043,4 +1043,49 @@ mod tests {
         live.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// What a chart would not draw — here a wick nobody could have traded —
+    /// goes through memory and back to the cache as it was served. A series
+    /// in memory is written back whole, so anything cleaned on the way in
+    /// would replace the bar the provider sent.
+    #[test]
+    fn a_stray_wick_is_written_back_as_it_was_served() {
+        let dir = std::env::temp_dir().join(format!("omacharts-live-wick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("omacharts.db");
+        let store = Store::open_at(&path).unwrap();
+        let daily = Timeframe::days(1);
+        let fx = |ts, open, high, low, close| Bar { ts, open, high, low, close, volume: 0.0 };
+        // EURUSD around 2012-01-27, as Yahoo serves it.
+        let served = [
+            fx(0, 1.3107, 1.3180, 1.3095, 1.3107),
+            fx(86_400, 1.3089, 1.3160, 0.7606, 1.3093),
+            fx(172_800, 1.3207, 1.3208, 1.3084, 1.3208),
+        ];
+        store.write_bars("fake:EURUSD", daily, &served);
+
+        let inner = Arc::new(Mutex::new(FakeState::default()));
+        let provider: Arc<dyn Provider> = Arc::new(Fake { inner: inner.clone() });
+        let live = Live::new(provider, Some(path.clone()));
+        live.watch(1, series("EURUSD", daily), "EURUSD", Some(172_800));
+        push(&inner, "EURUSD", daily, Update::Snapshot(vec![served[2], fx(259_200, 1.32, 1.33, 1.31, 1.32)]));
+        live.drain();
+        let Ok(Written::Merged { series: merged, bars }) = live.written().recv_blocking() else {
+            panic!("a merge first");
+        };
+        assert_eq!(bars[1], served[1], "memory holds what was served");
+        live.merged(&merged, bars);
+
+        push(&inner, "EURUSD", daily, Update::Bar(fx(259_200, 1.32, 1.34, 1.31, 1.33)));
+        live.drain();
+        live.flush();
+        assert!(matches!(live.written().recv_blocking(), Ok(Written::Flushed { .. })));
+        let cached = store.load_bars("fake:EURUSD", daily);
+        assert_eq!(cached[..3], served, "and so does the cache, after a flush");
+        assert_eq!(cached[3].close, 1.33);
+
+        live.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

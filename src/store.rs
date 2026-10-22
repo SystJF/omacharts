@@ -476,6 +476,9 @@ impl Store {
         let _ = self.conn.execute("UPDATE quotes SET fetched_at = ?2 WHERE key = ?1", params![key, at]);
     }
 
+    /// The series exactly as the provider gave it. Never cleaned here: what
+    /// is read may be written back, so a chart cleans what it draws with
+    /// [`omacharts_engine::drawable`] instead.
     pub fn load_bars(&self, key: &str, timeframe: Timeframe) -> Vec<Bar> {
         let row: Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> = self
             .conn
@@ -1318,6 +1321,23 @@ mod tests {
 
         let coverage = store.coverage("yahoo:ES=F", Timeframe::days(1)).unwrap();
         assert_eq!((coverage.first_ts, coverage.last_ts, coverage.count), (100, 300, 3));
+    }
+
+    #[test]
+    fn what_a_chart_would_not_draw_is_still_read_and_merged_as_served() {
+        let store = Store::memory().unwrap();
+        let daily = Timeframe::days(1);
+        let phantom = Bar { ts: 200, open: 40.0, high: 40.0, low: 40.0, close: 40.0, volume: 0.0 };
+        let stray = Bar { ts: 300, open: 34.2, high: 34.3, low: 0.5, close: 34.2, volume: 0.0 };
+        let served = [bar(100, 34.0), phantom, stray, bar(400, 34.1)];
+        store.write_bars("k", daily, &served);
+        assert_eq!(store.load_bars("k", daily), served);
+
+        // A merge hands back what it wrote, which a live series keeps and
+        // writes again: so it is the cache, not what a chart draws.
+        let merged = store.merge_bars("k", daily, &[bar(500, 34.3)]);
+        assert_eq!(merged[..4], served);
+        assert_eq!(store.load_bars("k", daily), merged);
     }
 
     #[test]

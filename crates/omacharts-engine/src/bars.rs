@@ -397,6 +397,200 @@ pub fn opens_are_degenerate(bars: &[Bar]) -> bool {
     doji as f64 / measurable.len() as f64 > DEGENERATE
 }
 
+/// How far outside its neighbours a print that never traded may sit and still
+/// be believed. Thin futures settle 1–3% outside the days around them with
+/// no volume, and those are real; the phantoms seen were 7–15% off.
+const PHANTOM_GAP: f64 = 0.05;
+
+/// And how many steps of the grain its prices are quoted in. On a penny
+/// stock 5% is a tick or two, which is an ordinary day's move, not a print
+/// nobody made.
+const PHANTOM_TICKS: f64 = 3.0;
+
+/// Drop prints that never traded and sit well outside the market around them.
+///
+/// Yahoo now and then serves a bar with no volume and one price for all four,
+/// far from the days either side: EXUS.DE on 2025-10-24 is 39.63 flat between
+/// two days that traded around 34.1. Drawn, it is a spike on the daily chart
+/// and the high and the close of the week folded from it.
+///
+/// Applied as a series is read, never as it is stored: the cache keeps what
+/// the provider said, so a bar is judged once both its neighbours are there,
+/// and a change to the rule reaches every series already cached.
+///
+/// A flat bar with no volume is also what a quiet day looks like, every day
+/// of a fund priced once at its NAV, a thin future's settlement, and the one
+/// print a thin listing gets on a crash day. Those stay: a quiet day carries
+/// the last close, a fund's neighbours have no volume either, a settlement
+/// lands within a few percent of the days around it, and a crash is still
+/// down the next day. Only a new price more than [`PHANTOM_GAP`] and
+/// [`PHANTOM_TICKS`] outside both traded neighbours goes, and only when the
+/// next day is back: nearer the day before than half the way to the print.
+///
+/// What is judged follows from that and nothing else: any provider and any
+/// resolution, but only a bar between two that traded. A series that never
+/// reports volume — an index, a currency pair, a published series —
+/// is never judged. The last bar is not either, having nothing after it, and
+/// two such bars in a row are both kept, since neither has traded neighbours,
+/// so dropping one never changes whether another is a phantom.
+pub fn drop_phantoms(bars: &mut Vec<Bar>) {
+    let phantoms: Vec<usize> = bars
+        .windows(3)
+        .enumerate()
+        .filter(|(_, w)| is_phantom(&w[0], &w[1], &w[2]))
+        .map(|(i, _)| i + 1)
+        .collect();
+    for i in phantoms.into_iter().rev() {
+        bars.remove(i);
+    }
+}
+
+/// The grain `bars` are quoted in: the coarsest power of ten every price of
+/// theirs is a whole number of, to within the rounding a price stored as a
+/// 32-bit float carries. 0.01 for a penny stock quoted in cents; much finer
+/// for a split-adjusted price, which is a quotient and has no grain at all.
+fn grain(bars: [&Bar; 3]) -> f64 {
+    let prices = || bars.into_iter().flat_map(|b| [b.open, b.high, b.low, b.close]);
+    let Some(lowest) = prices().filter(|p| *p > 0.0).min_by(f64::total_cmp) else {
+        return 0.0;
+    };
+    let top = lowest.log10().floor() as i32;
+    (top - 8..=top)
+        .rev()
+        .map(|power| 10f64.powi(power))
+        .find(|step| prices().all(|p| ((p / step) - (p / step).round()).abs() < 1e-3))
+        .unwrap_or(0.0)
+}
+
+fn is_phantom(prev: &Bar, bar: &Bar, next: &Bar) -> bool {
+    let flat = bar.open == bar.close && bar.high == bar.close && bar.low == bar.close;
+    let traded = prev.volume > 0.0 && next.volume > 0.0;
+    let carried = bar.close == prev.close;
+    if bar.volume != 0.0 || !flat || !traded || carried || bar.close <= 0.0 {
+        return false;
+    }
+    let (high, low) = (prev.high.max(next.high), prev.low.min(next.low));
+    let (gap, edge) = match bar.close {
+        c if c > high => (c - high, high),
+        c if c < low => (low - c, low),
+        _ => return false,
+    };
+    let far = gap > PHANTOM_GAP * edge && (gap / grain([prev, bar, next])).round() >= PHANTOM_TICKS;
+    let back = (next.close - prev.close).abs() < 0.5 * (bar.close - prev.close).abs();
+    far && back
+}
+
+/// How far past its own body and both neighbours a wick on a bar that never
+/// traded may reach and still be believed, in widths of the widest range
+/// around it. The strays seen reach 33–59 of them. Nothing real comes near:
+/// the most in 36 years of ^VIX, ^IRX and ^TNX is under 5, and ^VIX on
+/// 2024-08-05, from 23 to 65.73 and back to 38.57, is under 2.
+const STRAY_WICK: f64 = 10.0;
+
+/// How many bars either side that range is taken from. One is too few: a
+/// yield pinned near zero has days with no range at all, and against them a
+/// move of a basis point is a hundred widths.
+const STRAY_WICK_AROUND: usize = 5;
+
+/// Cut back wicks that reach far past everything around them on a bar that
+/// never traded.
+///
+/// Yahoo served EURUSD and GBPUSD on 2012-01-27 with a low of 0.76 and 0.64,
+/// a day that otherwise traded around 1.31 and 1.57: the other side of the
+/// pair, put where the low goes. Drawn, the whole chart is squeezed to fit a
+/// spike nobody could have traded, and the week folded from it carries it.
+///
+/// Never stored: the cache keeps what the provider said. The bar stays,
+/// since its open and close are good; only the wick goes, back to the body,
+/// rather than to a price nobody printed. A wick is cut only on a bar with no
+/// volume — a currency pair, an index — when it reaches past the bar's body
+/// and both neighbours' same extremes by more than [`STRAY_WICK`] times the
+/// widest of: the ranges of the [`STRAY_WICK_AROUND`] bars either side, its
+/// own body, and a hundredth of its price. What is measured is how far the
+/// wick is from anything the market did that week, not how far it is from
+/// the price, which near zero is no distance at all. A bar whose body is at
+/// or under zero is not judged, nor are the first and the last.
+pub fn clip_stray_wicks(bars: &mut [Bar]) {
+    let clipped: Vec<(usize, f64, f64)> = (1..bars.len().saturating_sub(1))
+        .filter_map(|i| clip(bars, i).map(|(high, low)| (i, high, low)))
+        .collect();
+    for (i, high, low) in clipped {
+        if let Some(bar) = bars.get_mut(i) {
+            (bar.high, bar.low) = (high, low);
+        }
+    }
+}
+
+/// The high and low `bars[i]` should be drawn with, when either is a stray.
+fn clip(bars: &[Bar], i: usize) -> Option<(f64, f64)> {
+    let (prev, bar, next) = (bars.get(i.checked_sub(1)?)?, bars.get(i)?, bars.get(i + 1)?);
+    let (top, bottom) = (bar.open.max(bar.close), bar.open.min(bar.close));
+    if bar.volume != 0.0 || bottom <= 0.0 {
+        return None;
+    }
+    let above = bar.high - prev.high.max(next.high).max(top);
+    let below = prev.low.min(next.low).min(bottom) - bar.low;
+    // Nearly every bar of a pair or an index has no volume, so the ranges
+    // around it are only read for a wick already past the least room it
+    // could be given.
+    let least = STRAY_WICK * (top - bottom).max(top / 100.0);
+    if above.max(below) <= least {
+        return None;
+    }
+    let around = i.saturating_sub(STRAY_WICK_AROUND)..(i + 1 + STRAY_WICK_AROUND).min(bars.len());
+    let widest = around
+        .filter(|&j| j != i)
+        .filter_map(|j| bars.get(j))
+        .map(|b| b.high - b.low)
+        .fold(0.0, f64::max);
+    let room = STRAY_WICK * widest.max(top - bottom).max(top / 100.0);
+    let high = if above > room { top } else { bar.high };
+    let low = if below > room { bottom } else { bar.low };
+    (high != bar.high || low != bar.low).then_some((high, low))
+}
+
+/// A stored series as a chart at `timeframe` draws it: the
+/// prints that never traded left out ([`drop_phantoms`]) and, on bars of a
+/// day or longer, the wicks nobody could have traded cut back
+/// ([`clip_stray_wicks`]).
+///
+/// On the way to the screen only, never on the way to the cache. A series in
+/// memory is written back as it stands — a live one every few seconds — so a
+/// cut wick that reached memory would replace the one the provider sent.
+///
+/// The same for every provider: both rules read nothing but the bars. Wicks
+/// are not judged within the day, where an index really does spike and come
+/// back inside an hour.
+///
+/// A future's prints are all kept: one with no volume is its settlement,
+/// which the exchange sets every day whether or not anybody traded, and on a
+/// fast day it can sit far from both neighbours. Palladium on 2026-01-27
+/// settled 14% down with no trades, 8% under the next day, while platinum did
+/// the same 3.6% under its own.
+pub fn drawable(bars: &mut Vec<Bar>, timeframe: Timeframe, kind: InstrumentKind) {
+    if !kind.settles_untraded() {
+        drop_phantoms(bars);
+    }
+    if !timeframe.is_intraday() {
+        clip_stray_wicks(bars);
+    }
+}
+
+/// [`drawable`] of `native` from `start` on, as the whole series would draw
+/// it: what a live tick refolds into the chart's last bucket, which on a
+/// weekly, monthly or yearly chart reaches back over days that have already
+/// been judged. Each bar is judged with the bars before it in view, which is
+/// all either rule reads behind it.
+pub fn drawable_from(native: &[Bar], start: usize, timeframe: Timeframe, kind: InstrumentKind) -> Vec<Bar> {
+    let Some(first) = native.get(start).map(|bar| bar.ts) else {
+        return Vec::new();
+    };
+    let mut bars = native[start.saturating_sub(2 * (STRAY_WICK_AROUND + 1))..].to_vec();
+    drawable(&mut bars, timeframe, kind);
+    bars.retain(|bar| bar.ts >= first);
+    bars
+}
+
 /// Fold `src` into `target`.
 ///
 /// `origin` shifts the bucket boundaries, in seconds. Futures sessions open at
@@ -491,6 +685,192 @@ fn week_start(ts: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_crash_print_and_a_tick_or_two_on_a_penny_are_kept() {
+        let at = |ts, o, h, l, c, v| Bar { ts, open: o, high: h, low: l, close: c, volume: v };
+        let kept = |mut bars: Vec<Bar>| {
+            let n = bars.len();
+            drop_phantoms(&mut bars);
+            bars.len() == n
+        };
+        // 4BRZ.SW on 2020-03-12, as Yahoo serves it: the day's one print was
+        // a quarter down, and the next day was still most of the way there.
+        assert!(kept(vec![
+            at(1, 29.3, 29.3, 29.3, 29.3, 65.0),
+            at(2, 22.135, 22.135, 22.135, 22.135, 0.0),
+            at(3, 24.89, 24.89, 24.89, 24.89, 58.0),
+        ]));
+        // HME.V on 2015-08-24: 0.14 under a low of 0.15 is 7%, and one tick.
+        assert!(kept(vec![
+            at(1, 0.17, 0.17, 0.15, 0.17, 171_700.0),
+            at(2, 0.14, 0.14, 0.14, 0.14, 0.0),
+            at(3, 0.16, 0.16, 0.16, 0.16, 149_500.0),
+        ]));
+
+        // 1127.HK on 2021-07-19: five ticks over two days that traded at
+        // 0.85, and back the next. Nobody paid 0.91.
+        let mut bars = vec![
+            at(1, 0.85, 0.86, 0.85, 0.86, 36_000.0),
+            at(2, 0.91, 0.91, 0.91, 0.91, 0.0),
+            at(3, 0.85, 0.85, 0.85, 0.85, 16_000.0),
+        ];
+        drop_phantoms(&mut bars);
+        assert_eq!(bars.len(), 2);
+    }
+
+    #[test]
+    fn a_flat_print_that_never_traded_is_dropped() {
+        let bar = |ts, low: f64, high: f64, volume| Bar { ts, open: low, high, low, close: high, volume };
+        // EXUS.DE around 2025-10-24, as Yahoo serves it.
+        let mut bars = vec![
+            bar(1, 34.035, 34.155, 79_416.0),
+            bar(2, 39.625, 39.625, 0.0),
+            bar(3, 34.29, 34.385, 124_400.0),
+        ];
+        drop_phantoms(&mut bars);
+        assert_eq!(bars.iter().map(|b| b.ts).collect::<Vec<_>>(), [1, 3]);
+    }
+
+    #[test]
+    fn quiet_days_funds_settlements_and_the_last_bar_are_kept() {
+        let bar = |ts, price, volume| Bar { ts, open: price, high: price + 1.0, low: price - 1.0, close: price, volume };
+        let flat = |ts, price| Bar { ts, open: price, high: price, low: price, close: price, volume: 0.0 };
+        let kept = |mut bars: Vec<Bar>| {
+            let n = bars.len();
+            drop_phantoms(&mut bars);
+            bars.len() == n
+        };
+
+        // Nothing traded, so the last price is carried: inside the range.
+        assert!(kept(vec![bar(1, 100.0, 10.0), flat(2, 100.0), bar(3, 100.5, 10.0)]));
+        // A fund priced once a day at its NAV: no neighbour traded either.
+        assert!(kept(vec![flat(1, 100.0), flat(2, 103.0), flat(3, 100.0)]));
+        // A thin future settling a little outside the days around it.
+        assert!(kept(vec![bar(1, 100.0, 10.0), flat(2, 103.0), bar(3, 100.0, 10.0)]));
+        // The last close carried, however far the next day gaps from it.
+        assert!(kept(vec![bar(1, 100.0, 10.0), flat(2, 100.0), bar(3, 80.0, 10.0)]));
+        // The newest bar has nothing after it to disagree with.
+        assert!(kept(vec![bar(1, 100.0, 10.0), bar(2, 100.0, 10.0), flat(3, 120.0)]));
+    }
+
+    #[test]
+    fn a_wick_far_past_everything_on_a_bar_nobody_traded_is_cut_to_the_body() {
+        let fx = |ts, o, h, l, c| Bar { ts, open: o, high: h, low: l, close: c, volume: 0.0 };
+        // EURUSD around 2012-01-27, as Yahoo serves it.
+        let mut bars = vec![
+            fx(1, 1.3107, 1.3180, 1.3095, 1.3107),
+            fx(2, 1.3089, 1.3160, 0.7606, 1.3093),
+            fx(3, 1.3207, 1.3208, 1.3084, 1.3208),
+        ];
+        clip_stray_wicks(&mut bars);
+        assert_eq!((bars[1].high, bars[1].low), (1.3160, 1.3089), "the low goes back to the body");
+        assert_eq!(bars[1].close, 1.3093, "the rest of the bar is believed");
+
+        // The same, turned over: the stray is the high.
+        let mut turned = vec![fx(1, 0.763, 0.764, 0.759, 0.763), fx(2, 0.764, 1.3148, 0.760, 0.764), fx(3, 0.757, 0.764, 0.757, 0.757)];
+        clip_stray_wicks(&mut turned);
+        assert_eq!(turned[1].high, 0.764);
+    }
+
+    #[test]
+    fn crash_days_traded_wicks_and_the_ends_are_kept() {
+        let at = |ts, o, h, l, c, v| Bar { ts, open: o, high: h, low: l, close: c, volume: v };
+        let kept = |mut bars: Vec<Bar>| {
+            let before = bars.clone();
+            clip_stray_wicks(&mut bars);
+            bars == before
+        };
+        // ^TNX on 2020-03-09: a real low 18% under the body.
+        assert!(kept(vec![at(1, 0.70, 0.76, 0.66, 0.74, 0.0), at(2, 0.49, 0.58, 0.398, 0.54, 0.0), at(3, 0.56, 0.78, 0.55, 0.76, 0.0)]));
+        // GME on 2021-01-28: a low half the body, but it traded.
+        assert!(kept(vec![at(1, 249.0, 380.0, 249.0, 347.0, 9e7), at(2, 265.0, 483.0, 112.0, 193.0, 5e7), at(3, 414.0, 414.0, 250.0, 325.0, 5e7)]));
+        // The first and the newest bar have no neighbour on one side.
+        assert!(kept(vec![at(1, 1.3, 1.3, 0.7, 1.3, 0.0), at(2, 1.3, 1.31, 1.29, 1.3, 0.0), at(3, 1.3, 2.0, 1.29, 1.3, 0.0)]));
+    }
+
+    #[test]
+    fn a_panic_in_an_index_and_a_basis_point_off_zero_are_kept() {
+        let index = |rows: &[(f64, f64, f64, f64)]| -> Vec<Bar> {
+            let at = |(i, &(open, high, low, close)): (usize, &(f64, f64, f64, f64))| {
+                Bar { ts: i as i64, open, high, low, close, volume: 0.0 }
+            };
+            rows.iter().enumerate().map(at).collect()
+        };
+        let kept = |mut bars: Vec<Bar>| {
+            let before = bars.clone();
+            clip_stray_wicks(&mut bars);
+            bars == before
+        };
+        // ^VIX on 2024-08-05, as Yahoo serves it: a high 70% over the body
+        // and twice the day before's, but reaching past the days around it
+        // by under three of their ranges.
+        assert!(kept(index(&[(20.52, 29.66, 20.01, 23.39), (23.39, 65.73, 23.39, 38.57), (33.71, 34.77, 24.02, 27.71)])));
+        // ^IRX around 2011-11-02: a high of 0.02 over days pinned at 0.005
+        // is four times the price, and one basis point and a half.
+        let mut irx = vec![(0.01, 0.015, 0.01, 0.015), (0.015, 0.015, 0.01, 0.01), (0.01, 0.01, 0.005, 0.01)];
+        irx.extend([(0.005, 0.005, 0.005, 0.005); 2]);
+        irx.push((0.005, 0.02, 0.005, 0.005));
+        irx.extend([(0.005, 0.005, 0.005, 0.005); 3]);
+        irx.push((0.005, 0.01, 0.005, 0.005));
+        assert!(kept(index(&irx)));
+    }
+
+    #[test]
+    fn a_bar_within_the_day_keeps_its_wick() {
+        let fx = |ts, o, h, l, c| Bar { ts, open: o, high: h, low: l, close: c, volume: 0.0 };
+        let served = vec![
+            fx(1, 1.3107, 1.3180, 1.3095, 1.3107),
+            fx(2, 1.3089, 1.3160, 0.7606, 1.3093),
+            fx(3, 1.3207, 1.3208, 1.3084, 1.3208),
+        ];
+        let drawn = |timeframe: Timeframe| {
+            let mut bars = served.clone();
+            drawable(&mut bars, timeframe, InstrumentKind::Equity);
+            bars[1].low
+        };
+        assert_eq!(drawn(Timeframe::days(1)), 1.3089, "a day");
+        assert_eq!(drawn(Timeframe::weeks(1)), 1.3089, "folded to weeks");
+        assert_eq!(drawn(Timeframe::hours(1)), 0.7606, "within the day");
+    }
+
+    /// Palladium's settlement on 2026-01-27: no trades, one price, 8% under
+    /// the next day. A stock's print like that goes; a future's stays.
+    #[test]
+    fn a_futures_settlement_with_no_trades_is_kept() {
+        let day = |ts, price: f64, volume| Bar { ts, open: price, high: price, low: price, close: price, volume };
+        let served = vec![day(1, 2169.9, 24.0), day(2, 1861.8, 0.0), day(3, 2025.4, 34.0)];
+        let drawn = |kind| {
+            let mut bars = served.clone();
+            drawable(&mut bars, Timeframe::days(1), kind);
+            bars.len()
+        };
+        assert_eq!(drawn(InstrumentKind::FutureRoot), 3, "the settlement is a price");
+        assert_eq!(drawn(InstrumentKind::Equity), 2, "a stock's lone print is not");
+    }
+
+    #[test]
+    fn a_tail_is_drawn_as_the_whole_series_draws_it() {
+        let mut native: Vec<Bar> = (0..40)
+            .map(|i| {
+                let price = 34.0 + (i % 7) as f64 * 0.1;
+                Bar { ts: i, open: price, high: price + 0.1, low: price - 0.1, close: price, volume: 1000.0 }
+            })
+            .collect();
+        native[20] = Bar { ts: 20, open: 39.625, high: 39.625, low: 39.625, close: 39.625, volume: 0.0 };
+        native[30] = Bar { ts: 30, open: 34.2, high: 34.3, low: 20.0, close: 34.2, volume: 0.0 };
+        let mut whole = native.clone();
+        drawable(&mut whole, Timeframe::days(1), InstrumentKind::Etf);
+        assert_eq!(whole.len(), 39, "the print is left out");
+        assert_eq!(whole.iter().find(|b| b.ts == 30).map(|b| b.low), Some(34.2), "and the wick cut");
+
+        for start in 0..=native.len() {
+            let from = native.get(start).map_or(i64::MAX, |b| b.ts);
+            let expected: Vec<Bar> = whole.iter().copied().filter(|b| b.ts >= from).collect();
+            let tail = drawable_from(&native, start, Timeframe::days(1), InstrumentKind::Etf);
+            assert_eq!(tail, expected, "from {start}");
+        }
+    }
 
     #[test]
     fn prices_mark_their_thousands() {
