@@ -5572,6 +5572,15 @@ fn draw_crosshair(
         return;
     }
     let crosshair = &state.theme.ui.crosshair;
+    // A drawing's point in hand: the labels are its price and its time, so
+    // they wear its colour and read as the point's rather than the pointer's.
+    let held = match state.drag {
+        Some(Drag::Grip { index, grip, .. }) if grip != Grip::Body => {
+            state.drawings.get(index).map(|d| d.style(&state.configs).colour.hex(&state.theme))
+        }
+        _ => None,
+    };
+    let tint = held.as_deref().unwrap_or(crosshair);
 
     // Snap to the centre of the bar under the pointer.
     let index_in_view = ((px - plot_x) / bar_w).floor();
@@ -5604,7 +5613,7 @@ fn draw_crosshair(
             plot_x + plot_w,
             py.round() + 0.5,
             width,
-            crosshair,
+            tint,
         );
     }
 
@@ -5623,10 +5632,10 @@ fn draw_crosshair(
             // badly for a moment.
             let x = (snapped_x - w / 2.0).clamp(plot_x, (plot_x + plot_w - w).max(plot_x));
             let y = height - TIME_AXIS_H + 2.0;
-            colors::set_source(cr, crosshair);
+            colors::set_source(cr, tint);
             cr.rectangle(x, y, w, TIME_AXIS_H - 4.0);
             let _ = cr.fill();
-            colors::set_source(cr, colors::readable_on(crosshair));
+            colors::set_source(cr, colors::readable_on(tint));
             cr.move_to(x + 5.0, y + TIME_AXIS_H - 10.0);
             let _ = cr.show_text(&label);
         }

@@ -75,7 +75,7 @@ A finished drawing is left selected.
 | <kbd>Shift</kbd> + drag on empty chart | Adds every drawing the box touches to the selection |
 | <kbd>Ctrl</kbd> + <kbd>A</kbd> | Selects every drawing on the chart |
 | Click empty chart, <kbd>Esc</kbd> | Clears the selection |
-| Drag an end or a corner | Moves that point. With <kbd>Ctrl</kbd> held it snaps to the candle, as when placing. The point under the pointer is ringed in the drawing's colour, and the ring grows while you drag it |
+| Drag an end or a corner | Moves that point. With <kbd>Ctrl</kbd> held it snaps to the candle, as when placing. The point under the pointer is ringed in the drawing's colour, and the ring grows while you drag it. While you drag, the price and time on the axes are the point's, in the drawing's colour |
 | Drag the body | Moves the whole drawing, and every other selected drawing with it |
 | <kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd> | Nudges the selection a pixel; ten with <kbd>Shift</kbd> |
 | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>↑</kbd> / <kbd>↓</kbd> | Brings it to the front or sends it to the back among the drawings. Every drawing sits over the candles |
