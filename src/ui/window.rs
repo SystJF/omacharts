@@ -4746,8 +4746,7 @@ impl Window {
         // gets you throttled.
         let quote: crate::ui::watchlist::QuoteLookup = Rc::new(move |instrument: &Instrument| {
             let provider = window.upgrade()?.provider();
-            let symbol = provider.symbol_for(instrument)?;
-            let quote = crate::cli::quote_at(&store, &format!("{}:{symbol}", provider.id()))?;
+            let quote = crate::cli::quote(&store, provider.as_ref(), instrument)?;
             Some(Quote { last: quote.last, change: quote.change, change_pct: quote.change_pct })
         });
 
@@ -6295,11 +6294,14 @@ impl Window {
         // specific to a provider: the repair only fires when the series it is
         // given has no bodies, which is true of Yahoo's currency pairs and
         // not of its crypto.
-        let bars = if instrument.kind.is_continuous() {
+        let mut bars = if instrument.kind.is_continuous() {
             omacharts_engine::repair_continuous_opens(&bars)
         } else {
             bars
         };
+        // Then what nobody could have traded, left out or cut back: here,
+        // on the way to the screen, and never where the bars are kept.
+        omacharts_engine::drawable(&mut bars, timeframe, instrument.kind);
         let bars = omacharts_engine::session::filter(
             &bars,
             pane.session.get(),
@@ -6961,10 +6963,8 @@ impl Window {
     fn write_change_of(self: &Rc<Self>, pane: &Rc<ChartPane>) {
         let instrument = pane.instrument.borrow().clone();
         let provider = self.provider();
-        let quote = instrument.and_then(|instrument| {
-            let symbol = provider.symbol_for(&instrument)?;
-            crate::cli::quote_at(&self.store, &format!("{}:{symbol}", provider.id()))
-        });
+        let quote =
+            instrument.and_then(|instrument| crate::cli::quote(&self.store, provider.as_ref(), &instrument));
         // In the chart's own colours for a rise and a fall, as its candles
         // are painted — a chart whose rises are red says so here too.
         let scheme = pane_scheme(pane, &self.theme());

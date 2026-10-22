@@ -503,7 +503,19 @@ pub struct Quote {
 
 /// Read an instrument's move from the cache.
 pub fn quote(store: &Store, provider: &dyn Provider, instrument: &Instrument) -> Option<Quote> {
-    quote_at(store, &cache_key(provider, instrument)?)
+    let key = cache_key(provider, instrument)?;
+    quote_from(store, &key, &daily_bars(store, &key, instrument.kind))
+}
+
+/// The daily bars cached under `key`, as a chart draws them.
+pub fn daily_bars(
+    store: &Store,
+    key: &str,
+    kind: omacharts_engine::InstrumentKind,
+) -> Vec<omacharts_engine::Bar> {
+    let mut bars = store.load_bars(key, Timeframe::days(1));
+    omacharts_engine::drawable(&mut bars, Timeframe::days(1), kind);
+    bars
 }
 
 /// The move of the series cached under `key`: its latest close against the
@@ -513,10 +525,16 @@ pub fn quote(store: &Store, provider: &dyn Provider, instrument: &Instrument) ->
 /// fetched for the bar widget. Newer means the later session first, then the
 /// later fetch: a chart refreshed a minute after the widget's batch has the
 /// fresher close for the same day.
-pub fn quote_at(store: &Store, key: &str) -> Option<Quote> {
+#[cfg(test)]
+fn quote_at(store: &Store, key: &str) -> Option<Quote> {
+    quote_from(store, key, &store.load_bars(key, Timeframe::days(1)))
+}
+
+/// The same, from daily bars already loaded: [`daily_bars`], so that what a
+/// chart would not draw is not quoted either.
+pub fn quote_from(store: &Store, key: &str, bars: &[omacharts_engine::Bar]) -> Option<Quote> {
     let daily = Timeframe::days(1);
-    let bars = store.load_bars(key, daily);
-    let from_bars = match bars.as_slice() {
+    let from_bars = match bars {
         [.., previous, last] => {
             let fetched_at = store.coverage(key, daily).map_or(0, |c| c.fetched_at);
             Some((last.ts, fetched_at, last.close, previous.close))
@@ -843,7 +861,7 @@ fn entry_json(store: &Store, provider: &dyn Provider, instrument: &Instrument) -
     );
     let quote = quote(store, provider, instrument);
     if let Some(key) = cache_key(provider, instrument) {
-        let bars = store.load_bars(&key, Timeframe::days(1));
+        let bars = daily_bars(store, &key, instrument.kind);
         let mut closes: Vec<(i64, f64)> = bars.iter().map(|bar| (bar.ts, bar.close)).collect();
         // The line ends where the price beside it does. A batch of closes is
         // usually newer than the bars: its close replaces the day it shares

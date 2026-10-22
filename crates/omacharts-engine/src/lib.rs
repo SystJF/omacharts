@@ -22,7 +22,7 @@ pub mod symbols;
 pub mod theme;
 
 pub use bars::{
-    bucket_of, drop_phantoms, grouped_decimals, price_decimals, repair_continuous_opens, resample, Bar, BarStyle,
+    bucket_of, drawable, grouped_decimals, price_decimals, repair_continuous_opens, resample, Bar, BarStyle,
     Timeframe,
 };
 pub use indicators::{palette_colors, Indicator, Kind as IndicatorKind, Output, Params, Reset};

@@ -45,6 +45,14 @@ impl InstrumentKind {
         matches!(self, InstrumentKind::Fx | InstrumentKind::Crypto)
     }
 
+    /// Whether a day nobody traded still gets a price of its own: a future's
+    /// settlement, set by the exchange whether or not a contract changed
+    /// hands. Such a bar is a real price however far it moved, so it is
+    /// never taken for a print that never traded.
+    pub fn settles_untraded(self) -> bool {
+        matches!(self, InstrumentKind::FutureRoot)
+    }
+
     pub fn from_key(key: &str) -> Option<InstrumentKind> {
         Some(match key {
             "index" => InstrumentKind::Index,
