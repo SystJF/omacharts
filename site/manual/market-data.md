@@ -74,6 +74,14 @@ Schwab ends a session after a while. Charts stop updating and say so, and Prefer
 
 The session stays on this machine and is not in backups ([Where your data lives](/manual/your-data/#where-everything-is)).
 
+## Bars nobody traded
+
+Now and then a feed serves a bar that nobody could have traded. EXUS.DE on 24 October 2025 is one price, 39.63, with no volume, between days that traded near 34. EURUSD on 27 January 2012 has a low of 0.76 on a day that traded around 1.31.
+
+Omacharts leaves a print like the first off the chart. It draws a wick like the second back to the bar's body, on daily bars and longer. The sidebar and the Omarchy plugin quote from the same bars.
+
+What counts is how far the bar sits from the bars around it, so a real crash day stays. A future's settlement always stays, because the exchange sets one even on a day nobody trades.
+
 ## See also
 
 - [Feeds and signing in from the CLI](/manual/cli/#market-data)
