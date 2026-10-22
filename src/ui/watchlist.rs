@@ -601,13 +601,16 @@ impl Watchlist {
         // the corner controls, where a sidebar keeps its "new". It used to be
         // a strip of its own at the foot of the rail, which cost a row's
         // height and sat where nobody was looking.
+        //
+        // On the corner's line rather than the name's: it stands against the
+        // toggle, and centred in the band like the name it sat 2px below it.
         let add = gtk::Button::from_icon_name("list-add-symbolic");
         add.add_css_class("flat");
         add.add_css_class("rail-add");
         add.set_tooltip_text(Some(ADD_TIP));
         add.set_halign(gtk::Align::End);
-        add.set_valign(gtk::Align::Center);
-        add.set_margin_top(7);
+        add.set_valign(gtk::Align::Start);
+        add.set_margin_top(crate::theming::CORNER_BUTTON_TOP);
         add.set_margin_end(crate::ui::window::RAIL_ADD_END);
 
         let band = gtk::Overlay::new();

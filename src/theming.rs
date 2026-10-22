@@ -253,6 +253,11 @@ fn legacy_bar_colours(id: &str) -> Option<BarScheme> {
 /// change together.
 pub(crate) const CORNER_PAD_START: i32 = 8;
 
+/// How far down the window's corner stands its buttons: the `margin-top`
+/// and `padding-top` of `.window-corner` below, 2 + 8. The rail's + stands
+/// at the same height, beside the toggle. The two change together.
+pub(crate) const CORNER_BUTTON_TOP: i32 = 10;
+
 /// The app's CSS: libadwaita's named colours, redefined from the theme, plus
 /// the few classes we add ourselves.
 pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
@@ -478,7 +483,8 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
    rule; see `CORNER_WIDTH`. Inside it, the two buttons touch and stand
    centred on the axis's column, more padding at the start than at the end
    because the end has the box's margin beyond it; the start is
-   `CORNER_PAD_START`, which the rail's + is placed by.
+   `CORNER_PAD_START`, which the rail's + is placed by, and its top edge is
+   `CORNER_BUTTON_TOP`.
 
    It stands a focus ring's width in from the window's edges: in a split the
    chart under it wears that ring, and a ground laid over the ring cut a
@@ -847,6 +853,11 @@ button.rail-add {
 .chart-pane:hover .pane-expand:hover,
 button.rail-switcher:hover,
 button.rail-add:hover { background: alpha(currentColor, 0.12); }
+/* The + is 11px of ink in its 16px box, a pixel above the box's middle,
+   and the toggle beside it is 15px, a pixel below: so the + reads high
+   against it. A pixel more padding on top, one less below, keeps its box
+   level with the toggle's and moves only the glyph. */
+button.rail-add { padding: 3px 2px 1px; }
 .window-corner button:checked,
 button.rail-switcher.open { background: alpha(currentColor, 0.15); }
 .window-corner button:checked:hover,
