@@ -20,7 +20,7 @@ state:
 capture: bin/headless-window cli chart screenshot --output /tmp/theme-THEME.png   (four, joined 2x2 with magick +append/-append, resized to 1600 wide)
 crop: none
 -->
-{% include figure.html src="/assets/manual/themes/four-themes.jpg" alt="The same NVDA daily chart under four desktop themes" caption="The same chart under Tokyo Night, Everforest, Catppuccin Latte and Gruvbox." wide="true" %}
+{% include figure.html src="/assets/manual/themes/four-themes.jpg" alt="The same NVDA daily chart under four desktop themes" caption="The same chart under Tokyo Night, Everforest, Catppuccin Latte and Gruvbox." %}
 
 ## Choosing a theme
 

@@ -184,7 +184,7 @@ state:
 capture: bin/headless-window shot second-chartbook.png
 crop: none, resized to 1600 wide
 -->
-{% include figure.html src="/assets/manual/quick-start/second-chartbook.jpg" alt="The Semis chartbook with its watchlist holding NVDA, AMD and AVGO, and two chartbook tabs along the bottom" caption="The *Semis* chartbook, with both chartbooks in the strip." wide="true" %}
+{% include figure.html src="/assets/manual/quick-start/second-chartbook.jpg" alt="The Semis chartbook with its watchlist holding NVDA, AMD and AVGO, and two chartbook tabs along the bottom" caption="The *Semis* chartbook, with both chartbooks in the strip." %}
 
 <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>←</kbd> goes back to the first
 chartbook, as you left it. <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>→</kbd>

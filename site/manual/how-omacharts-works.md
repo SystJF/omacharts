@@ -25,7 +25,7 @@ state:
 capture: bin/headless-window shot window.png
 crop: none, resized to 2000 wide
 -->
-{% include figure.html src="/assets/manual/how-omacharts-works/window.jpg" alt="The window with the drawing tools on the left, a daily SPY chart with two moving averages, the Default watchlist in the sidebar and four chartbook tabs along the bottom" caption="The window with the drawing tools, the sidebar and the chartbook strip shown." wide="true" %}
+{% include figure.html src="/assets/manual/how-omacharts-works/window.jpg" alt="The window with the drawing tools on the left, a daily SPY chart with two moving averages, the Default watchlist in the sidebar and four chartbook tabs along the bottom" caption="The window with the drawing tools, the sidebar and the chartbook strip shown." %}
 
 Around the chart:
 

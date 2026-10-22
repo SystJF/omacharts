@@ -28,7 +28,7 @@ capture:
   magick ( semis.png -resize 990x ) ( -size 20x10 xc:#16161e ) ( commodities.png -resize 990x ) +append -quality 88
 crop: none
 -->
-{% include figure.html src="/assets/manual/chartbook-templates/two-books-one-template.jpg" alt="Two chartbooks side by side with the same arrangement: NVDA daily, hourly and 15-minute on the left, GLD daily, hourly and 15-minute on the right" caption="*Semis* and *Commodities*, both on the *Desk* template, each with its own symbols." wide="true" %}
+{% include figure.html src="/assets/manual/chartbook-templates/two-books-one-template.jpg" alt="Two chartbooks side by side with the same arrangement: NVDA daily, hourly and 15-minute on the left, GLD daily, hourly and 15-minute on the right" caption="*Semis* and *Commodities*, both on the *Desk* template, each with its own symbols." %}
 
 ## Creating a template
 

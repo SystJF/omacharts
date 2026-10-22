@@ -19,7 +19,7 @@ state:
 capture: bin/headless-window cli chart screenshot --output /tmp/candles.png
 crop: none (resized to 2000 wide)
 -->
-{% include figure.html src="/assets/manual/charts/daily-candles.jpg" alt="An NVDA daily candle chart with its header and a volume strip" caption="A daily chart. The header shows the symbol, the resolution, the day's move and the chart template." wide="true" %}
+{% include figure.html src="/assets/manual/charts/daily-candles.jpg" alt="An NVDA daily candle chart with its header and a volume strip" caption="A daily chart. The header shows the symbol, the resolution, the day's move and the chart template." %}
 
 ## Resolutions
 
@@ -114,7 +114,7 @@ state:
 capture: bin/headless-window cli chart screenshot --output /tmp/ohlc.png
 crop: none (resized to 2000 wide)
 -->
-{% include figure.html src="/assets/manual/charts/daily-ohlc.jpg" alt="The same NVDA daily chart drawn as OHLC bars" caption="The same chart as OHLC bars." wide="true" %}
+{% include figure.html src="/assets/manual/charts/daily-ohlc.jpg" alt="The same NVDA daily chart drawn as OHLC bars" caption="The same chart as OHLC bars." %}
 
 ### Colouring
 
@@ -145,7 +145,7 @@ state:
 capture: bin/headless-window cli chartbook screenshot --output /tmp/colourings.png
 crop: none (resized to 2000 wide)
 -->
-{% include figure.html src="/assets/manual/charts/colourings.jpg" alt="Four NVDA daily charts of the same two months, one in each colouring" caption="Filled, Red up (top); Hollow, Monochrome (bottom)." wide="true" %}
+{% include figure.html src="/assets/manual/charts/colourings.jpg" alt="Four NVDA daily charts of the same two months, one in each colouring" caption="Filled, Red up (top); Hollow, Monochrome (bottom)." %}
 
 Set them per chart from the chart menu's **Bar style** submenu or the **Style** and **Colouring** rows of Chart settings. To change every chart at once, use **Apply to all charts now** in Preferences ([Chart settings](/manual/chart-settings/#defaults-for-new-charts)).
 
@@ -179,7 +179,7 @@ state:
 capture: bin/headless-window cli chart screenshot --output /tmp/log.png
 crop: none (resized to 2000 wide)
 -->
-{% include figure.html src="/assets/manual/charts/weekly-log.jpg" alt="NVDA weekly bars from 2007 to 2026 on a logarithmic price axis" caption="Twenty years of weekly bars on a logarithmic scale." wide="true" %}
+{% include figure.html src="/assets/manual/charts/weekly-log.jpg" alt="NVDA weekly bars from 2007 to 2026 on a logarithmic price axis" caption="Twenty years of weekly bars on a logarithmic scale." %}
 
 ### The price axis menu
 

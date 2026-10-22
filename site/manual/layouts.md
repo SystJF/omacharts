@@ -23,7 +23,7 @@ state:
 capture: bin/headless-window cli chartbook screenshot --output /tmp/grid.png
 crop: none (resized to 2000 wide)
 -->
-{% include figure.html src="/assets/manual/layouts/two-by-two.jpg" alt="Four daily charts in a two-by-two: SPY top left, QQQ bottom left, GLD top right, TLT bottom right" caption="SPY, QQQ, GLD and TLT in a two-by-two." wide="true" %}
+{% include figure.html src="/assets/manual/layouts/two-by-two.jpg" alt="Four daily charts in a two-by-two: SPY top left, QQQ bottom left, GLD top right, TLT bottom right" caption="SPY, QQQ, GLD and TLT in a two-by-two." %}
 
 ## Splitting a chart
 
@@ -61,7 +61,7 @@ state:
 capture: bin/headless-window cli chartbook screenshot --output /tmp/bigleft.png
 crop: none (resized to 2000 wide)
 -->
-{% include figure.html src="/assets/manual/layouts/big-left.jpg" alt="Three NVDA charts: a daily chart filling the left half, an hourly chart top right and a 15-minute chart bottom right" caption="The daily on the left, the hourly and the 15-minute stacked on the right." wide="true" %}
+{% include figure.html src="/assets/manual/layouts/big-left.jpg" alt="Three NVDA charts: a daily chart filling the left half, an hourly chart top right and a 15-minute chart bottom right" caption="The daily on the left, the hourly and the 15-minute stacked on the right." %}
 
 ## Maximising a chart
 

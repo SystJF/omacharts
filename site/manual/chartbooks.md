@@ -37,7 +37,7 @@ state:
 capture: bin/headless-window shot semis.png, then magick -resize 2000x -quality 88
 crop: none
 -->
-{% include figure.html src="/assets/manual/chartbooks/semis-chartbook.jpg" alt="The Semis chartbook: three NVDA charts, the Semis watchlist in the sidebar, and four chartbook tabs along the bottom" caption="The *Semis* chartbook, its watchlist beside it, and the strip of chartbooks along the bottom." wide="true" %}
+{% include figure.html src="/assets/manual/chartbooks/semis-chartbook.jpg" alt="The Semis chartbook: three NVDA charts, the Semis watchlist in the sidebar, and four chartbook tabs along the bottom" caption="The *Semis* chartbook, its watchlist beside it, and the strip of chartbooks along the bottom." %}
 
 ## The strip
 

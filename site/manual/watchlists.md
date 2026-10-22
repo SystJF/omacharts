@@ -182,7 +182,7 @@ state:
 capture: bin/headless-window shot linked.png, then magick -resize 2000x -quality 88
 crop: none
 -->
-{% include figure.html src="/assets/manual/linking/follow-and-pinned.jpg" alt="The Semis chartbook after a click on AMD: the daily and 15-minute charts show AMD, the pinned hourly chart still shows SPY, and the pointer on the 15-minute chart draws a matching line on the daily chart" caption="After a click on AMD in the sidebar. The two Follow charts show AMD; the pinned chart still shows SPY." wide="true" %}
+{% include figure.html src="/assets/manual/linking/follow-and-pinned.jpg" alt="The Semis chartbook after a click on AMD: the daily and 15-minute charts show AMD, the pinned hourly chart still shows SPY, and the pointer on the 15-minute chart draws a matching line on the daily chart" caption="After a click on AMD in the sidebar. The two Follow charts show AMD; the pinned chart still shows SPY." %}
 
 ### Link modes
 

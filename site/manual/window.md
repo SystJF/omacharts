@@ -22,7 +22,7 @@ state:
 capture: bin/headless-window shot /tmp/anatomy.png
 crop: none (resized to 2000 wide)
 -->
-{% include figure.html src="/assets/manual/window/anatomy.jpg" alt="The window with the drawing tools on the left, an NVDA daily chart, the sidebar on the right and three chartbook tabs along the bottom" caption="One chart, with the drawing tools and the sidebar out and three chartbooks in the strip." wide="true" %}
+{% include figure.html src="/assets/manual/window/anatomy.jpg" alt="The window with the drawing tools on the left, an NVDA daily chart, the sidebar on the right and three chartbook tabs along the bottom" caption="One chart, with the drawing tools and the sidebar out and three chartbooks in the strip." %}
 
 ## Parts of the window
 
