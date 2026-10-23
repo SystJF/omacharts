@@ -1781,6 +1781,11 @@ fn opening_candidates(
 pub(crate) const CORNER_WIDTH: i32 =
     crate::ui::chart::PRICE_AXIS_W as i32 + omacharts_engine::frame::RING_WIDTH as i32;
 
+/// How tall the window's corner is before it has been laid out: its
+/// buttons' top, a 22-pixel button with 2 of padding each side, and the 7
+/// of padding under it in `.window-corner`.
+const CORNER_HEIGHT: i32 = crate::theming::CORNER_BUTTON_TOP + 26 + 7;
+
 /// Where the rail's + stands from the window's right edge: against the
 /// toggle, the way the toggle stands against the menu.
 pub(crate) const RAIL_ADD_END: i32 = CORNER_WIDTH - crate::theming::CORNER_PAD_START;
@@ -2926,9 +2931,27 @@ impl Window {
         let topmost = self.mounted().leaves().into_iter().find(|id| {
             rects.get(id).is_some_and(|(x, y, w, _)| at(*y, 0.0) && at(x + w, right))
         });
+        // And how far down it stands, in the chart's own pixels, so the
+        // chart can keep its prices out from under it. Measured where the
+        // corner has been laid out, and its stylesheet height before then.
+        let cover = match railed {
+            true => 0.0,
+            false => self.corner.borrow().as_ref().map_or(0.0, |corner| {
+                let low = corner.height().max(0) as f32;
+                let measured = topmost
+                    .and_then(|id| self.panes.borrow().iter().find(|pane| pane.id == id).cloned())
+                    .filter(|_| low > 0.0)
+                    .and_then(|pane| corner.compute_point(&pane.view.root, &gtk::graphene::Point::new(0.0, low)));
+                match measured {
+                    Some(point) => point.y().max(0.0) as f64,
+                    None => CORNER_HEIGHT as f64,
+                }
+            }),
+        };
         for pane in self.panes.borrow().iter() {
-            let margin = if Some(pane.id) == topmost { clearance } else { 0 };
-            pane.set_corner_clearance(margin);
+            let under = Some(pane.id) == topmost;
+            pane.set_corner_clearance(if under { clearance } else { 0 });
+            pane.view.set_covered_axis_top(if under { cover } else { 0.0 });
         }
 
         // The same on the left, for the drawing tools' toggle, which drops

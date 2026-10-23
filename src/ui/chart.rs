@@ -158,6 +158,11 @@ struct State {
     lead: usize,
     drag: Option<Drag>,
     indicators: Vec<Drawn>,
+    /// How far down the price axis something stands over its top, in
+    /// pixels: the window's corner, on the chart under it. The labels there
+    /// fade out under its edge, and the last price and the crosshair's
+    /// price stop below it rather than slide under.
+    covered_axis_top: f64,
     bar_style: BarStyle,
     bars_hidden: bool,
     show_grid: bool,
@@ -1111,6 +1116,7 @@ impl State {
             overhang: RIGHT_MARGIN,
             lead: 0,
             indicators: Vec::new(),
+            covered_axis_top: 0.0,
             bar_style: BarStyle::default(),
             bars_hidden: false,
             show_grid: true,
@@ -3209,6 +3215,20 @@ impl ChartView {
         self.redraw();
     }
 
+    /// Say how far down the top of the price axis the window's corner
+    /// stands, or 0 on a chart it is not over.
+    pub fn set_covered_axis_top(&self, px: f64) {
+        let changed = {
+            let mut state = self.state.borrow_mut();
+            let changed = state.covered_axis_top != px;
+            state.covered_axis_top = px;
+            changed
+        };
+        if changed {
+            self.redraw();
+        }
+    }
+
     /// Put live bars into the series in place: each replaces the bar with
     /// its timestamp or joins the end, and nothing else about the chart
     /// moves. A view anchored to the right edge follows a new bar on its
@@ -4439,6 +4459,7 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
         }
     }
 
+    draw_axis_fade(cr, state, plot_x + plot_w, width);
     draw_last_price(cr, state, plot_x, plot_w, price_y, width, decimals, &to_y);
 
     if state.trouble.is_some() {
@@ -5397,14 +5418,47 @@ fn draw_last_price(
     let _ = cr.stroke();
     cr.restore().ok();
 
+    // The tag stops under the window's corner rather than slide beneath
+    // it; the line stays at the price.
     draw_tag(
         cr,
         &grouped_decimals(last.close, decimals),
         plot_x + plot_w,
-        y,
+        below_cover(state, y),
         width,
         tag,
     );
+}
+
+/// How far a label fades out under the edge of whatever covers the top of
+/// the price axis.
+const AXIS_FADE_H: f64 = 10.0;
+
+/// The labels under the window's corner fade out into it rather than end at
+/// its edge, which cut a price through its digits. Drawn in the chart's own
+/// colour, which is the corner's ground, so the two read as one.
+fn draw_axis_fade(cr: &cairo::Context, state: &State, axis_x: f64, width: f64) {
+    let top = state.covered_axis_top;
+    if top <= 0.0 {
+        return;
+    }
+    let (r, g, b, _) = colors::rgba(&state.theme.ui.background);
+    let fade = cairo::LinearGradient::new(0.0, top, 0.0, top + AXIS_FADE_H);
+    fade.add_color_stop_rgba(0.0, r, g, b, 1.0);
+    fade.add_color_stop_rgba(1.0, r, g, b, 0.0);
+    let x = axis_x.round() + 1.0;
+    cr.rectangle(x, 0.0, width - x, top + AXIS_FADE_H);
+    let _ = cr.set_source(&fade);
+    let _ = cr.fill();
+}
+
+/// Where a chip centred at `y` on the price axis is drawn: there, or just
+/// below the window's corner if it would reach under it.
+fn below_cover(state: &State, y: f64) -> f64 {
+    match state.covered_axis_top {
+        top if top > 0.0 => y.max((top + AXIS_CHIP_H / 2.0).round() + 0.5),
+        _ => y,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5458,7 +5512,7 @@ fn draw_crosshair(
             state,
             &grouped_decimals(price, decimals),
             plot_x + plot_w,
-            py.round() + 0.5,
+            below_cover(state, py.round() + 0.5),
             width,
             crosshair,
         );
