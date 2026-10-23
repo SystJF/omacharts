@@ -68,7 +68,9 @@ impl End {
             return Some(End::Ago(count, span));
         }
         if text.len() == 10 {
-            let day = NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()?;
+            let day = NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                .or_else(|_| NaiveDate::parse_from_str(text, "%Y/%m/%d"))
+                .ok()?;
             return (1800..=2200).contains(&day.year()).then_some(End::Day(day));
         }
         match calendar(text)? {
@@ -819,11 +821,13 @@ mod tests {
         assert_eq!(slice("2024:2025").1, Some(day(2025, 12, 31)), "the end is held whole, pandas-style");
         assert_eq!(slice(":2020"), (None, Some(day(2020, 12, 31)), ":2020".into()));
         assert_eq!(slice("2026-03-21:"), (Some(day(2026, 3, 21)), None, "2026-03-21:".into()));
+        assert_eq!(Range::parse("2026/03/21:2026/09/30"), Range::parse("2026-03-21:2026-09-30"), "a slash dates as a dash does");
+        assert_eq!(Range::parse("2024:2025/06"), Range::parse("2024:2025-06"));
         assert_eq!(slice("-2y:-1y"), (Some(day(2024, 10, 21)), Some(day(2025, 10, 20)), "-2y:-1y".into()));
         assert_eq!(Range::parse("-1y:").and_then(|r| r.start(today)), Range::Back(1, Span::Year).start(today));
         assert_eq!(Range::parse("2025:").map(|r| r.description()), Some("from 2025 to today".into()));
         assert_eq!(Range::parse("-2y:-1y").map(|r| r.description()), Some("2 years ago to a year ago".into()));
-        for bad in ["2025:x", "6m:", "2025-13:", "2025-02-30:", "1:2"] {
+        for bad in ["2025:x", "6m:", "2025-13:", "2025-02-30:", "2025/02/30:", "2025/03-21:", "1:2"] {
             assert_eq!(Range::parse(bad), None, "{bad}");
         }
     }
