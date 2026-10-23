@@ -35,16 +35,19 @@ const FEWEST_ROWS: i32 = 5;
 /// What the frame opens over.
 pub enum Over {
     /// One chart: it dims, the others stay lit, and the search row names it
-    /// by position, the way every command names a chart.
-    Chart { inside: gtk::Widget, shade: gtk::Widget, at: usize },
+    /// by position, the way every command names a chart. `symbol` and
+    /// `alone` are for a bare frame, which names the chart only when the
+    /// window holds more than one.
+    Chart { inside: gtk::Widget, shade: gtk::Widget, at: usize, symbol: Option<String>, alone: bool },
     /// The window, for a pick that changes no chart. `name` is what it does
     /// change.
     Window { inside: gtk::Widget, name: String },
 }
 
 impl Over {
-    pub fn chart(pane: &ChartPane, at: usize) -> Over {
-        Over::Chart { inside: window_content(&pane.root), shade: pane.shade.clone().upcast(), at }
+    pub fn chart(pane: &ChartPane, at: usize, alone: bool) -> Over {
+        let symbol = pane.instrument.borrow().as_ref().map(|i| i.display_symbol());
+        Over::Chart { inside: window_content(&pane.root), shade: pane.shade.clone().upcast(), at, symbol, alone }
     }
 
     /// Centred on the window `from` is in, naming `name`.
@@ -76,7 +79,8 @@ pub struct PickFrame {
     content: gtk::Box,
     /// The search row: the box and the chart it acts on.
     query: gtk::Box,
-    /// "→ pos:1": which chart a pick will change.
+    /// "→ pos:1": which chart a pick will change. On a bare frame, the
+    /// line under the title.
     target: gtk::Label,
     shade: RefCell<Option<gtk::Widget>>,
     /// Where the keyboard was before the frame opened, to hand it back to.
@@ -91,8 +95,10 @@ pub struct PickFrame {
     drop: RefCell<Option<gtk::Popover>>,
     /// What Enter does while the dropdown is folded away.
     on_enter: RefCell<Option<OnEnter>>,
-    /// A word at the end of a bare box, for the key that shows the list.
-    tip: RefCell<Option<gtk::Label>>,
+    /// What a bare box sits in, for things pinned inside its edge.
+    overlay: RefCell<Option<gtk::Overlay>>,
+    /// The ⓘ's help, a popover of the frame's own; see [`PickFrame::set_bare`].
+    help: RefCell<Option<gtk::Popover>>,
     /// The width a frame keeps whatever the window's, when it has one.
     width: Cell<Option<i32>>,
 }
@@ -151,7 +157,8 @@ impl PickFrame {
             on_pick: RefCell::new(None),
             drop: RefCell::new(None),
             on_enter: RefCell::new(None),
-            tip: RefCell::new(None),
+            overlay: RefCell::new(None),
+            help: RefCell::new(None),
             width: Cell::new(None),
         });
         frame.wire();
@@ -239,16 +246,17 @@ impl PickFrame {
         }
     }
 
-    /// A box for something typed rather than searched: no magnifier, the
-    /// text centred, and over it a header with `title` on the left and the
-    /// chart it acts on on the right. `tip` sits at the end of the box while
-    /// it is empty.
-    pub fn set_bare(&self, title: &str, tip: &str) {
+    /// A box for something typed rather than searched: no icons, the text
+    /// centred, and over it `title` centred with an ⓘ that shows `help`,
+    /// the syntax, while the pointer is on it or after a click. Under the title, the chart it acts on, when the
+    /// window has more than one.
+    pub fn set_bare(&self, title: &str, help: gtk::Widget) {
+        // The magnifier and the clear icon both: the corner is for what the
+        // card pins there.
         let mut child = self.entry.first_child();
         while let Some(widget) = child {
             if widget.is::<gtk::Image>() {
                 widget.set_visible(false);
-                break;
             }
             child = widget.next_sibling();
         }
@@ -257,34 +265,66 @@ impl PickFrame {
 
         let name = gtk::Label::new(Some(title));
         name.add_css_class("pick-title");
-        name.set_xalign(0.0);
-        name.set_hexpand(true);
-        self.query.remove(&self.target);
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let info = gtk::Image::from_icon_name("dialog-information-symbolic");
+        info.add_css_class("pick-info");
+        // A popover, not a tooltip: a tooltip waits for motion it may never
+        // see when the card opens under a still pointer, and wears the
+        // theme's tooltip ground rather than the card's.
+        let pop = gtk::Popover::new();
+        pop.add_css_class("pick-help-pop");
+        pop.set_has_arrow(false);
+        pop.set_autohide(false);
+        pop.set_can_target(false);
+        pop.set_position(gtk::PositionType::Bottom);
+        pop.set_child(Some(&help));
+        pop.set_parent(&info);
+        let hover = gtk::EventControllerMotion::new();
+        let shown = pop.clone();
+        hover.connect_enter(move |_, _, _| shown.popup());
+        // The card can open with the pointer already on the ⓘ, which is no
+        // enter; the first nudge shows it.
+        let shown = pop.clone();
+        hover.connect_motion(move |_, _, _| {
+            if !shown.is_visible() {
+                shown.popup();
+            }
+        });
+        let shown = pop.clone();
+        hover.connect_leave(move |_| shown.popdown());
+        info.add_controller(hover);
+        let click = gtk::GestureClick::new();
+        let shown = pop.clone();
+        click.connect_released(move |_, _, _, _| match shown.is_visible() {
+            true => shown.popdown(),
+            false => shown.popup(),
+        });
+        info.add_controller(click);
+        *self.help.borrow_mut() = Some(pop);
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 7);
         header.add_css_class("pick-header");
+        header.set_halign(gtk::Align::Center);
         header.append(&name);
-        header.append(&self.target);
+        header.append(&info);
+        self.query.remove(&self.target);
+        self.target.set_halign(gtk::Align::Center);
+        self.content.prepend(&self.target);
         self.content.prepend(&header);
 
-        // Over the box rather than beside it, so the text stays centred.
-        let label = gtk::Label::new(Some(tip));
-        label.add_css_class("pick-tip");
-        label.set_halign(gtk::Align::End);
-        label.set_valign(gtk::Align::Center);
-        label.set_can_target(false);
         self.query.remove(&self.entry);
         let overlay = gtk::Overlay::new();
         overlay.set_hexpand(true);
         overlay.set_child(Some(&self.entry));
-        overlay.add_overlay(&label);
         self.query.append(&overlay);
-        *self.tip.borrow_mut() = Some(label);
+        *self.overlay.borrow_mut() = Some(overlay);
     }
 
-    pub fn show_tip(&self, on: bool) {
-        if let Some(tip) = self.tip.borrow().as_ref() {
-            tip.set_visible(on);
-        }
+    /// Pin `widget` inside the bare box's bottom-right corner, over the
+    /// text rather than beside it, so the text stays centred.
+    pub fn pin_in_box(&self, widget: &impl IsA<gtk::Widget>) {
+        let Some(overlay) = self.overlay.borrow().clone() else { return };
+        widget.set_halign(gtk::Align::End);
+        widget.set_valign(gtk::Align::End);
+        overlay.add_overlay(widget);
     }
 
     /// Keep the list folded away until asked for, and drop it down over
@@ -344,8 +384,15 @@ impl PickFrame {
         *self.on_pick.borrow_mut() = Some(Rc::new(on_pick));
 
         let anchor = match over {
-            Over::Chart { inside, shade, at } => {
-                self.target.set_text(&format!("→ pos:{at}"));
+            Over::Chart { inside, shade, at, symbol, alone } => {
+                let bare = self.overlay.borrow().is_some();
+                let text = match (bare, symbol) {
+                    (false, _) => format!("→ pos:{at}"),
+                    (true, _) if *alone => String::new(),
+                    (true, Some(symbol)) => format!("{symbol} · pos:{at}"),
+                    (true, None) => format!("pos:{at}"),
+                };
+                self.target.set_text(&text);
                 shade.set_visible(true);
                 // The window's corners stand over the charts on a patch of
                 // their colour, which the shade does not reach: let the
@@ -452,6 +499,9 @@ impl PickFrame {
     /// Put everything back once the frame has closed, however it closed.
     fn finish(&self) {
         self.show_list(false);
+        if let Some(help) = self.help.borrow().as_ref() {
+            help.popdown();
+        }
         if let Some(shade) = self.shade.borrow_mut().take() {
             shade.set_visible(false);
             if let Some(root) = shade.root() {

@@ -1,16 +1,17 @@
 //! The two cards that change how much of the past a chart shows: Ctrl+G's
 //! range and the resolution a digit on the chart starts.
 //!
-//! Both are the picker's frame with the list folded away: a header naming
-//! what it does and the chart it acts on, a box, and under it what the
-//! answer comes to. Nothing under the box comes or goes with what is typed,
-//! so the card keeps one shape; the list drops down over it when asked for.
+//! Both are the picker's frame with the list folded away: a centred title
+//! whose ⓘ holds the syntax, a box, and under it what the answer comes to:
+//! `4 hours · 536 bars`, or just the bars for a range. Nothing under the
+//! box comes or goes with what is typed, so the card keeps one shape; the
+//! list drops down over it when asked for.
 //!
-//! The range card has two more things under the box. From and To are the
-//! first and last day the range lands on, and Tab goes into them to set
-//! either by hand, which writes the range back into the box as a slice,
-//! `2026-03-21:`. Under them, `1D · 131 bars`: the resolution it will show
-//! at, which Tab also reaches, and how many bars that is.
+//! The range card has two more things. The resolution it will show at sits
+//! in the box's corner, `1D auto`, and Tab reaches it. From and To, under
+//! the bars, are the first and last day the range lands on, and Tab goes
+//! into them to set either by hand, which writes the range back into the
+//! box as a slice, `2026/03/21:`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -19,6 +20,7 @@ use adw::prelude::*;
 use chrono::{Datelike, Days, Months, NaiveDate};
 use gtk::gdk;
 use gtk::glib;
+use omacharts_engine::bars::Unit;
 use omacharts_engine::range::End;
 use omacharts_engine::{grouped_decimals, Range, Timeframe};
 
@@ -52,6 +54,8 @@ pub struct Context {
     pub showing: (NaiveDate, NaiveDate),
     /// The first day the series holds, for a range that starts with it.
     pub first: NaiveDate,
+    /// The resolution the chart has now.
+    pub current: Timeframe,
     /// The resolutions the strip offers, which the arrows step through.
     pub ladder: Vec<Timeframe>,
     pub plan: PlanFn,
@@ -61,67 +65,191 @@ pub struct Context {
     pub resolution: Rc<dyn Fn(Timeframe)>,
 }
 
-/// `1D · 131 bars`: a resolution in a key-sized chip, and what it makes.
-struct ResRow {
-    row: gtk::Box,
+/// The resolution a range will show at, in a key-sized chip pinned in the
+/// box's corner: `1D`, or `1W auto` when it is the window's pick.
+struct Chip {
     chip: gtk::Box,
     key: gtk::Label,
     auto: gtk::Label,
-    dot: gtk::Label,
-    count: gtk::Label,
-    caret: gtk::Label,
 }
 
-impl ResRow {
-    fn new() -> ResRow {
+impl Chip {
+    fn new() -> Chip {
         let key = gtk::Label::new(None);
         let auto = gtk::Label::new(Some("auto"));
         auto.add_css_class("range-auto");
+        let caret = gtk::Label::new(Some("▾"));
+        caret.add_css_class("range-caret");
         let chip = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         chip.add_css_class("range-chip");
         chip.append(&key);
         chip.append(&auto);
-        let caret = gtk::Label::new(Some("▾"));
-        caret.add_css_class("range-caret");
         chip.append(&caret);
-        let dot = gtk::Label::new(Some("·"));
-        dot.add_css_class("range-dot");
-        let count = gtk::Label::new(None);
-        count.add_css_class("range-count");
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 7);
-        row.add_css_class("range-res");
-        row.set_halign(gtk::Align::Center);
-        row.append(&chip);
-        row.append(&dot);
-        row.append(&count);
-        caret.set_visible(false);
-        ResRow { row, chip, key, auto, dot, count, caret }
+        Chip { chip, key, auto }
     }
 
     fn show(&self, plan: &Plan) {
         self.key.set_text(&plan.timeframe.key());
         self.auto.set_visible(plan.auto);
         set_class(&self.chip, "bumped", plan.bumped);
-        let words = count_words(plan);
-        self.dot.set_visible(!words.is_empty());
-        self.count.set_text(&words);
-        set_class(&self.count, "short", plan.short_of.is_some());
-        set_class(&self.count, "many", plan.short_of.is_none() && plan.many);
-    }
-
-    /// Nothing that reads as a resolution yet: the chip keeps its place,
-    /// empty.
-    fn blank(&self) {
-        self.key.set_text("–");
-        self.auto.set_visible(false);
-        self.dot.set_visible(false);
-        self.count.set_text("");
-        set_class(&self.chip, "bumped", false);
     }
 }
 
-/// From or To: a day in three parts, day, month and year, that the arrows
-/// and the keys set one part at a time.
+/// The units Left and Right walk the chip through, finest first. A quarter
+/// is no unit of `Timeframe`'s, it is three months; the dial keeps it apart
+/// so `2Q` stays `2Q` while Up and Down count it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Dial {
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
+}
+
+const DIALS: [Dial; 7] = [Dial::Minute, Dial::Hour, Dial::Day, Dial::Week, Dial::Month, Dial::Quarter, Dial::Year];
+
+impl Dial {
+    fn of(timeframe: Timeframe) -> (u32, Dial) {
+        let dial = match timeframe.unit {
+            Unit::Minute => Dial::Minute,
+            Unit::Hour => Dial::Hour,
+            Unit::Day => Dial::Day,
+            Unit::Week => Dial::Week,
+            Unit::Month => Dial::Month,
+            Unit::Year => Dial::Year,
+        };
+        (timeframe.count, dial)
+    }
+
+    fn timeframe(self, count: u32) -> Timeframe {
+        let (count, unit) = match self {
+            Dial::Minute => (count, Unit::Minute),
+            Dial::Hour => (count, Unit::Hour),
+            Dial::Day => (count, Unit::Day),
+            Dial::Week => (count, Unit::Week),
+            Dial::Month => (count, Unit::Month),
+            Dial::Quarter => (count * 3, Unit::Month),
+            Dial::Year => (count, Unit::Year),
+        };
+        Timeframe { count, unit }.normalised()
+    }
+
+    fn key(self, count: u32) -> String {
+        let unit = match self {
+            Dial::Minute => "m",
+            Dial::Hour => "h",
+            Dial::Day => "D",
+            Dial::Week => "W",
+            Dial::Month => "M",
+            Dial::Quarter => "Q",
+            Dial::Year => "Y",
+        };
+        format!("{count}{unit}")
+    }
+}
+
+/// The line under the box: the bars a range makes, the resolution typed
+/// (`4 hours`), or why the text is not an answer.
+struct Hint {
+    row: gtk::Box,
+    words: gtk::Label,
+    dot: gtk::Label,
+    count: gtk::Label,
+}
+
+impl Hint {
+    fn new() -> Hint {
+        let words = gtk::Label::new(None);
+        let dot = gtk::Label::new(Some("·"));
+        dot.add_css_class("range-dot");
+        let count = gtk::Label::new(None);
+        count.add_css_class("range-count");
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.add_css_class("range-hint");
+        row.set_halign(gtk::Align::Center);
+        row.append(&words);
+        row.append(&dot);
+        row.append(&count);
+        Hint { row, words, dot, count }
+    }
+
+    /// The bars `plan` makes.
+    fn show(&self, plan: &Plan) {
+        set_class(&self.words, "error", false);
+        self.words.set_visible(false);
+        self.dot.set_visible(false);
+        self.count.set_text(&plan.bars.map(bars_words).unwrap_or_default());
+        self.count.set_visible(true);
+        set_class(&self.count, "many", plan.many);
+    }
+
+    /// What was typed comes to, in words, and nothing else.
+    fn name(&self, words: &str) {
+        self.words.set_text(words);
+        self.words.set_visible(true);
+        set_class(&self.words, "error", false);
+        self.dot.set_visible(false);
+        self.count.set_visible(false);
+    }
+
+    fn error(&self, what: &str) {
+        self.words.set_text(what);
+        self.words.set_visible(true);
+        set_class(&self.words, "error", true);
+        self.dot.set_visible(false);
+        self.count.set_visible(false);
+    }
+
+    /// Nothing typed yet: the line keeps its height, empty.
+    fn blank(&self) {
+        self.words.set_text("");
+        self.words.set_visible(true);
+        set_class(&self.words, "error", false);
+        self.dot.set_visible(false);
+        self.count.set_visible(false);
+    }
+}
+
+/// The ⓘ's tooltip: what to type beside what it means, in titled sections.
+fn help(sections: &[(&str, &[(&str, &str)])], foot: &str) -> gtk::Widget {
+    let grid = gtk::Grid::new();
+    grid.add_css_class("pick-help");
+    grid.set_column_spacing(14);
+    let mut row = 0;
+    for (at, (name, lines)) in sections.iter().enumerate() {
+        if !name.is_empty() {
+            let head = gtk::Label::new(Some(&name.to_uppercase()));
+            head.add_css_class("pick-help-section");
+            set_class(&head, "later", at > 0);
+            head.set_xalign(0.0);
+            grid.attach(&head, 0, row, 2, 1);
+            row += 1;
+        }
+        for (key, what) in lines.iter() {
+            let key = gtk::Label::new(Some(key));
+            key.add_css_class("pick-help-key");
+            key.set_xalign(1.0);
+            let what = gtk::Label::new(Some(what));
+            what.add_css_class("pick-help-what");
+            what.set_xalign(0.0);
+            grid.attach(&key, 0, row, 1, 1);
+            grid.attach(&what, 1, row, 1, 1);
+            row += 1;
+        }
+    }
+    if !foot.is_empty() {
+        let foot = gtk::Label::new(Some(foot));
+        foot.add_css_class("pick-help-foot");
+        grid.attach(&foot, 0, row, 2, 1);
+    }
+    grid.upcast()
+}
+
+/// From or To: a day in three parts, year, month and day, `2026/03/21`,
+/// that the arrows and the keys set one part at a time.
 struct DateCell {
     root: gtk::Box,
     field: gtk::Box,
@@ -148,11 +276,16 @@ impl DateCell {
         head.append(&today);
 
         let parts = [gtk::Label::new(None), gtk::Label::new(None), gtk::Label::new(None)];
-        let field = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let field = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         field.add_css_class("range-date");
         field.set_focusable(true);
         field.set_focus_on_click(true);
-        for part in &parts {
+        for (at, part) in parts.iter().enumerate() {
+            if at > 0 {
+                let slash = gtk::Label::new(Some("/"));
+                slash.add_css_class("range-slash");
+                field.append(&slash);
+            }
             part.add_css_class("range-part");
             field.append(part);
         }
@@ -214,9 +347,9 @@ impl DateCell {
 
     fn set(&self, date: NaiveDate, today: NaiveDate) {
         self.date.set(date);
-        self.parts[0].set_text(&format!("{:02}", date.day()));
-        self.parts[1].set_text(&date.format("%b").to_string());
-        self.parts[2].set_text(&date.year().to_string());
+        self.parts[0].set_text(&date.year().to_string());
+        self.parts[1].set_text(&format!("{:02}", date.month()));
+        self.parts[2].set_text(&format!("{:02}", date.day()));
         self.today.set_visible(date == today);
     }
 
@@ -249,8 +382,8 @@ impl DateCell {
                 self.typed.borrow_mut().clear();
                 let up = key == gdk::Key::Up;
                 let moved = match self.part.get() {
-                    0 if up => date.checked_add_days(Days::new(step)),
-                    0 => date.checked_sub_days(Days::new(step)),
+                    2 if up => date.checked_add_days(Days::new(step)),
+                    2 => date.checked_sub_days(Days::new(step)),
                     at => {
                         let months = Months::new(step as u32 * if at == 1 { 1 } else { 12 });
                         if up { date.checked_add_months(months) } else { date.checked_sub_months(months) }
@@ -273,9 +406,9 @@ impl DateCell {
         }
     }
 
-    /// What has been typed into the part with the keyboard so far: two
-    /// digits of a day, a month's number or the start of its name, four
-    /// digits of a year. A part filled moves on to the next.
+    /// What has been typed into the part with the keyboard so far: four
+    /// digits of a year, a month's number or the start of its name, two
+    /// digits of a day. A part filled moves on to the next.
     fn type_part(&self) {
         let date = self.date.get();
         let typed = self.typed.borrow().clone();
@@ -286,7 +419,7 @@ impl DateCell {
             cell.mark();
         };
         match self.part.get() {
-            0 if digits => {
+            2 if digits => {
                 let day: u32 = typed[typed.len().saturating_sub(2)..].parse().unwrap_or(1);
                 let day = day.clamp(1, days_in(date.year(), date.month()));
                 if typed.len() >= 2 || day > 3 {
@@ -318,10 +451,10 @@ impl DateCell {
                     self.change(NaiveDate::from_ymd_opt(date.year(), month, day));
                 }
             }
-            2 if digits => {
+            0 if digits => {
                 if typed.len() >= 4 {
                     let year: i32 = typed[typed.len() - 4..].parse().unwrap_or(date.year());
-                    self.typed.borrow_mut().clear();
+                    next(self);
                     let day = date.day().min(days_in(year, date.month()));
                     self.change(NaiveDate::from_ymd_opt(year, date.month(), day));
                 }
@@ -338,12 +471,16 @@ pub struct RangeCard {
     shown: RefCell<Vec<Range>>,
     from: Rc<DateCell>,
     to: Rc<DateCell>,
-    res: ResRow,
+    chip: Chip,
+    hint: Hint,
     context: RefCell<Option<Context>>,
     /// The resolution set by hand on the chip, if it has been.
     forced: Cell<Option<Timeframe>>,
-    /// The resolution the chip shows, for the arrows to step from.
+    /// The resolution the chip shows, for the wheel to step from.
     showing_tf: Cell<Option<Timeframe>>,
+    /// The count and unit the arrows last set, while they are what
+    /// `forced` holds; see [`Dial`].
+    dial: Cell<Option<(u32, Dial)>>,
     /// The range the chip counts bars over.
     counting: Cell<Option<Range>>,
     typed_tf: RefCell<String>,
@@ -355,12 +492,47 @@ pub struct RangeCard {
 impl RangeCard {
     pub fn new() -> Rc<RangeCard> {
         let frame = PickFrame::new("");
-        frame.set_bare("Go to range", "Space list");
+        frame.set_bare(
+            "Go to",
+            help(
+                &[
+                    (
+                        "Up to today",
+                        &[
+                            ("6m 3y", "back from today"),
+                            ("ytd qtd mtd", "this year, quarter, month"),
+                            ("2ytd", "this year and last"),
+                            ("2026/03/12:", "from a day on"),
+                            ("all", "whole series"),
+                        ],
+                    ),
+                    (
+                        "A set period",
+                        &[
+                            ("2025", "a year"),
+                            ("2025/03", "a month"),
+                            ("2025/03:2025/06", "March to June"),
+                            ("-6m:-1m", "6 to 1 months ago"),
+                        ],
+                    ),
+                ],
+                "Space list · Tab resolution, dates",
+            ),
+        );
+        frame.popover.add_css_class("range-goto");
         frame.drop_list();
         frame.set_width(WIDTH);
 
-        let from = DateCell::new("FROM");
-        let to = DateCell::new("TO");
+        let chip = Chip::new();
+        chip.chip.set_focusable(true);
+        chip.chip.set_focus_on_click(true);
+        chip.chip.set_cursor_from_name(Some("pointer"));
+        frame.pin_in_box(&chip.chip);
+        let hint = Hint::new();
+        frame.append(&hint.row);
+
+        let from = DateCell::new("From");
+        let to = DateCell::new("To");
         let arrow = gtk::Label::new(Some("→"));
         arrow.add_css_class("range-arrow");
         arrow.set_valign(gtk::Align::End);
@@ -371,22 +543,17 @@ impl RangeCard {
         dates.append(&to.root);
         frame.append(&dates);
 
-        let res = ResRow::new();
-        res.chip.set_focusable(true);
-        res.chip.set_focus_on_click(true);
-        res.chip.set_cursor_from_name(Some("pointer"));
-        res.caret.set_visible(true);
-        frame.append(&res.row);
-
         let card = Rc::new(RangeCard {
             frame,
             shown: RefCell::new(Vec::new()),
             from,
             to,
-            res,
+            chip,
+            hint,
             context: RefCell::new(None),
             forced: Cell::new(None),
             showing_tf: Cell::new(None),
+            dial: Cell::new(None),
             counting: Cell::new(None),
             typed_tf: RefCell::new(String::new()),
             touched: Cell::new(false),
@@ -417,12 +584,10 @@ impl RangeCard {
             match key {
                 gdk::Key::space | gdk::Key::question if empty => {
                     card.frame.show_list(!shown);
-                    card.frame.show_tip(shown);
                     glib::Propagation::Stop
                 }
                 gdk::Key::Down if !shown => {
                     card.frame.show_list(true);
-                    card.frame.show_tip(false);
                     glib::Propagation::Stop
                 }
                 _ => glib::Propagation::Proceed,
@@ -430,17 +595,23 @@ impl RangeCard {
         });
         self.frame.entry.add_controller(keys);
 
-        // Tab walks box → From → To → resolution and round again. Said here
+        // Tab walks box → resolution → From → To and round again. Said here
         // because the window's own keys see Tab before GTK's focus chain does.
-        // The same for Enter from a date or the chip.
+        // The same for Enter from a date or the chip, which shows the range;
+        // in the chip's list it is the row's.
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(self);
         keys.connect_key_pressed(move |_, key, _, state| {
             let Some(card) = weak.upgrade() else { return glib::Propagation::Proceed };
-            // Enter goes from a date or the chip too; the box has its own.
-            if crate::ui::dialogs::is_enter(key) && !card.frame.entry.has_focus() && !card.in_box() {
-                card.commit();
+            let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+            if crate::ui::dialogs::is_enter(key) && !ctrl && !card.frame.entry.has_focus() && !card.in_box() {
+                let focus = card.chip.chip.root().and_then(|root| root.focus());
+                let chip: &gtk::Widget = card.chip.chip.upcast_ref();
+                match focus {
+                    Some(focus) if &focus != chip && focus.is_ancestor(chip) => return glib::Propagation::Proceed,
+                    _ => card.commit(),
+                }
                 return glib::Propagation::Stop;
             }
             let back = match key {
@@ -485,7 +656,7 @@ impl RangeCard {
             Some(card) => card.chip_key(key, state),
             None => glib::Propagation::Proceed,
         });
-        self.res.chip.add_controller(keys);
+        self.chip.chip.add_controller(keys);
         let focus = gtk::EventControllerFocus::new();
         let weak = Rc::downgrade(self);
         focus.connect_enter(move |_| {
@@ -494,18 +665,18 @@ impl RangeCard {
                 card.frame.show_list(false);
             }
         });
-        self.res.chip.add_controller(focus);
+        self.chip.chip.add_controller(focus);
         // A click drops the strip's resolutions down, each with what it
         // makes; the wheel steps along them.
         let click = gtk::GestureClick::new();
         let weak = Rc::downgrade(self);
         click.connect_released(move |_, _, _, _| {
             if let Some(card) = weak.upgrade() {
-                card.res.chip.grab_focus();
+                card.chip.chip.grab_focus();
                 card.open_resolutions();
             }
         });
-        self.res.chip.add_controller(click);
+        self.chip.chip.add_controller(click);
         let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::DISCRETE);
         let weak = Rc::downgrade(self);
         scroll.connect_scroll(move |_, _, dy| {
@@ -514,17 +685,19 @@ impl RangeCard {
             }
             glib::Propagation::Stop
         });
-        self.res.chip.add_controller(scroll);
+        self.chip.chip.add_controller(scroll);
     }
 
     /// The resolutions on the strip, and auto, under the chip.
     fn open_resolutions(self: &Rc<Self>) {
         let Some(range) = self.counting.get() else { return };
-        let (plan, ladder) = match self.context.borrow().as_ref() {
-            Some(context) => (context.plan.clone(), context.ladder.clone()),
+        let (plan, ladder, current) = match self.context.borrow().as_ref() {
+            Some(context) => (context.plan.clone(), context.ladder.clone(), context.current),
             None => return,
         };
-        let picks: Vec<Option<Timeframe>> = std::iter::once(None).chain(ladder.into_iter().map(Some)).collect();
+        // Auto, then the chart's own resolution, then the rest of the strip.
+        let rest = ladder.into_iter().filter(|tf| *tf != current).map(Some);
+        let picks: Vec<Option<Timeframe>> = [None, Some(current)].into_iter().chain(rest).collect();
         let list = gtk::ListBox::new();
         list.set_selection_mode(gtk::SelectionMode::Browse);
         list.add_css_class("navigation-sidebar");
@@ -551,7 +724,12 @@ impl RangeCard {
             row.set_child(Some(&row_box));
             list.append(&row);
         }
-        let at = picks.iter().position(|pick| *pick == self.forced.get()).unwrap_or(0);
+        // The row the chip names: auto only when the chip says auto.
+        let named = match self.chip.auto.is_visible() {
+            true => self.forced.get(),
+            false => self.forced.get().or(Some(current)),
+        };
+        let at = picks.iter().position(|pick| *pick == named).unwrap_or(0);
         if let Some(row) = list.row_at_index(at as i32) {
             list.select_row(Some(&row));
         }
@@ -561,7 +739,7 @@ impl RangeCard {
         popover.set_has_arrow(false);
         popover.set_position(gtk::PositionType::Bottom);
         popover.set_child(Some(&list));
-        popover.set_parent(&self.res.chip);
+        popover.set_parent(&self.chip.chip);
         let weak = Rc::downgrade(self);
         let closing = popover.downgrade();
         list.connect_row_activated(move |_, row| {
@@ -576,7 +754,7 @@ impl RangeCard {
         });
         // One per click, so each lets go of the chip once it has closed,
         // and hands the keyboard back to it.
-        let chip = self.res.chip.downgrade();
+        let chip = self.chip.chip.downgrade();
         popover.connect_closed(move |popover| {
             let (popover, chip) = (popover.clone(), chip.clone());
             glib::idle_add_local_once(move || {
@@ -626,7 +804,6 @@ impl RangeCard {
                 apply(range, card.forced.get());
             }
         });
-        self.frame.show_tip(true);
     }
 
     /// Whether the keyboard is in the box.
@@ -638,9 +815,9 @@ impl RangeCard {
     fn tab(&self, back: bool) {
         let ring: [gtk::Widget; 4] = [
             self.frame.entry.clone().upcast(),
+            self.chip.chip.clone().upcast(),
             self.from.field.clone().upcast(),
             self.to.field.clone().upcast(),
-            self.res.chip.clone().upcast(),
         ];
         let focus = self.frame.entry.root().and_then(|root| root.focus());
         let at = ring
@@ -668,7 +845,6 @@ impl RangeCard {
     fn refresh(&self) {
         let text = self.frame.entry.text().to_string();
         crate::ui::range_card::fill(&self.frame.list, &self.shown, &text);
-        self.frame.show_tip(text.is_empty() && !self.frame.list_shown());
 
         let context = self.context.borrow();
         let Some(context) = context.as_ref() else { return };
@@ -676,7 +852,8 @@ impl RangeCard {
         let parsed = Range::parse(&text).filter(|_| !text.trim().is_empty());
         let touched = self.touched.get();
 
-        set_class(&self.frame.entry, "error", !text.trim().is_empty() && parsed.is_none() && !could_become(&text));
+        let wrong = !text.trim().is_empty() && parsed.is_none() && !could_become(&text);
+        set_class(&self.frame.entry, "error", wrong);
 
         let (from, to) = match parsed {
             Some(range) => Self::days(range, context),
@@ -692,11 +869,21 @@ impl RangeCard {
         set_class(&self.to.field, "error", from > to);
 
         // What the chip counts: what is typed, or else the days on show.
+        // Nothing asked yet: the chart as it is, at the resolution it has,
+        // not the one the window would pick for those days.
         let range = parsed.unwrap_or_else(|| slice(from, to, today));
-        let plan = (context.plan)(range, self.forced.get());
+        let forced = self.forced.get().or(idle.then_some(context.current));
+        let plan = (context.plan)(range, forced);
         self.counting.set(Some(range));
         self.showing_tf.set(Some(plan.timeframe));
-        self.res.show(&plan);
+        self.chip.show(&plan);
+        if let Some((count, dial)) = self.dialed() {
+            self.chip.key.set_text(&dial.key(count));
+        }
+        match wrong {
+            true => self.hint.error("not a range"),
+            false => self.hint.show(&plan),
+        }
     }
 
     /// A day set by hand in From or To: the box says the slice it makes.
@@ -713,23 +900,33 @@ impl RangeCard {
         self.touched.set(true);
         // Keep the text and the cells in step without the cells losing the
         // part they are on: the refresh below reads the new slice back.
-        self.frame.entry.set_text(&slice(from, to, today).key());
+        self.frame.entry.set_text(&slashed(slice(from, to, today)));
         self.refresh();
     }
 
     fn chip_key(self: &Rc<Self>, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
         match key {
-            gdk::Key::Up | gdk::Key::Down | gdk::Key::Left | gdk::Key::Right => {
-                self.step_resolution(matches!(key, gdk::Key::Up | gdk::Key::Right));
+            gdk::Key::Up | gdk::Key::Down => {
+                self.turn(if key == gdk::Key::Up { 1 } else { -1 }, 0);
+                glib::Propagation::Stop
+            }
+            gdk::Key::Left | gdk::Key::Right => {
+                self.turn(0, if key == gdk::Key::Right { 1 } else { -1 });
                 glib::Propagation::Stop
             }
             gdk::Key::space => {
                 self.open_resolutions();
                 glib::Propagation::Stop
             }
+            // The chart's own resolution, and from there back to auto.
             gdk::Key::BackSpace | gdk::Key::Delete => {
                 self.typed_tf.borrow_mut().clear();
-                self.forced.set(None);
+                let current = self.context.borrow().as_ref().map(|context| context.current);
+                let next = match self.forced.get() {
+                    Some(forced) if Some(forced) == current => None,
+                    _ => current,
+                };
+                self.forced.set(next);
                 self.refresh();
                 glib::Propagation::Stop
             }
@@ -755,6 +952,25 @@ impl RangeCard {
                 None => glib::Propagation::Proceed,
             },
         }
+    }
+
+    /// The dial, while the resolution set by hand is still the one it made.
+    fn dialed(&self) -> Option<(u32, Dial)> {
+        self.dial.get().filter(|(count, dial)| self.forced.get() == Some(dial.timeframe(*count)))
+    }
+
+    /// Up and Down count the chip's resolution up or down; Left and Right
+    /// move it along [`DIALS`], keeping the count. Anything, on the strip or
+    /// not.
+    fn turn(&self, count_by: i32, unit_by: i32) {
+        let Some((count, dial)) = self.dialed().or_else(|| self.showing_tf.get().map(Dial::of)) else { return };
+        let at = DIALS.iter().position(|d| *d == dial).unwrap_or(0) as i32;
+        let dial = DIALS[(at + unit_by).clamp(0, DIALS.len() as i32 - 1) as usize];
+        let count = (count as i32 + count_by).clamp(1, 999) as u32;
+        self.typed_tf.borrow_mut().clear();
+        self.dial.set(Some((count, dial)));
+        self.forced.set(Some(dial.timeframe(count)));
+        self.refresh();
     }
 
     /// Enter with the list folded away.
@@ -783,20 +999,25 @@ impl RangeCard {
 /// box and what the resolution comes to over what is on screen.
 pub struct ResolutionCard {
     frame: Rc<PickFrame>,
-    res: ResRow,
+    hint: Hint,
     context: RefCell<Option<Context>>,
 }
 
 impl ResolutionCard {
     pub fn new() -> Rc<ResolutionCard> {
         let frame = PickFrame::new("");
-        frame.set_bare("Resolution", "");
-        frame.show_tip(false);
+        frame.set_bare(
+            "Change resolution",
+            help(
+                &[("", &[("15", "minutes"), ("4h", "hours"), ("1d 1w", "days, weeks"), ("1mo 1y", "months, years")])],
+                "",
+            ),
+        );
         frame.drop_list();
         frame.set_width(WIDTH);
-        let res = ResRow::new();
-        frame.append(&res.row);
-        let card = Rc::new(ResolutionCard { frame, res, context: RefCell::new(None) });
+        let hint = Hint::new();
+        frame.append(&hint.row);
+        let card = Rc::new(ResolutionCard { frame, hint, context: RefCell::new(None) });
 
         let weak = Rc::downgrade(&card);
         card.frame.entry.connect_search_changed(move |_| {
@@ -821,22 +1042,28 @@ impl ResolutionCard {
         self.frame.entry.set_text(start);
         self.refresh();
         self.frame.open(over, |_| {});
-        self.frame.show_tip(false);
     }
 
     fn refresh(&self) {
         let text = self.frame.entry.text().to_string();
         let parsed = Timeframe::parse(&text);
-        set_class(&self.frame.entry, "error", !text.trim().is_empty() && parsed.is_none());
-        let context = self.context.borrow();
-        match (context.as_ref(), parsed) {
-            (Some(context), Some(timeframe)) => {
-                let (from, to) = context.showing;
-                let plan = (context.plan)(slice(from, to, context.today), Some(timeframe));
-                self.res.show(&Plan { auto: false, bumped: false, ..plan });
-            }
-            _ => self.res.blank(),
+        let wrong = !text.trim().is_empty() && parsed.is_none();
+        set_class(&self.frame.entry, "error", wrong);
+        // The resolution in words and no count: counted over the days on
+        // screen, `1q` read "1 bar", which looked like the whole history.
+        match parsed {
+            Some(timeframe) => self.hint.name(&timeframe.description()),
+            None if wrong => self.hint.error("not a resolution"),
+            None => self.hint.blank(),
         }
+    }
+}
+
+/// "1,310 bars".
+fn bars_words(bars: f64) -> String {
+    match bars.round() {
+        1.0 => "1 bar".to_string(),
+        bars => format!("{} bars", grouped_decimals(bars, 0)),
     }
 }
 
@@ -844,7 +1071,7 @@ impl ResolutionCard {
 fn count_words(plan: &Plan) -> String {
     match (plan.short_of, plan.bars) {
         (Some(days), _) => format!("only {days} days of {}", plan.timeframe.key()),
-        (None, Some(bars)) => format!("{} bars", grouped_decimals(bars.round(), 0)),
+        (None, Some(bars)) => bars_words(bars),
         (None, None) => String::new(),
     }
 }
@@ -855,12 +1082,18 @@ fn slice(from: NaiveDate, to: NaiveDate, today: NaiveDate) -> Range {
     Range::Slice(Some(End::Day(from)), (to < today).then_some(End::Day(to)))
 }
 
+/// A slice of days as the card writes it, `2026/03/21:`: the dates the way
+/// From and To show them. Only days, so no dash in it means "ago".
+fn slashed(range: Range) -> String {
+    range.key().replace('-', "/")
+}
+
 /// Text that is not a range yet but could be with more keys: `20` on the
 /// way to `2025`, `2026-` to a month, `y` to `ytd`. Only text no key can
 /// save turns the box red.
 fn could_become(text: &str) -> bool {
     let text = text.trim();
-    if text.chars().all(|c| c.is_ascii_digit() || c == '-' || c == ':') {
+    if text.chars().all(|c| c.is_ascii_digit() || matches!(c, '-' | '/' | ':')) {
         return true;
     }
     let unit = text.trim_start_matches(['-', ':']).trim_start_matches(|c: char| c.is_ascii_digit()).to_lowercase();
@@ -953,7 +1186,7 @@ mod tests {
 
     #[test]
     fn half_typed_text_is_not_an_error() {
-        for text in ["2", "20", "2026-", "2026-0", "2025:", "-2", "y", "2yt", "a", "m"] {
+        for text in ["2", "20", "2026-", "2026-0", "2026/0", "2026/03/1", "2025:", "-2", "y", "2yt", "a", "m"] {
             assert!(could_become(text), "{text}");
         }
         for text in ["6x", "2025q4", "zz"] {
@@ -970,8 +1203,18 @@ mod tests {
         assert_eq!(words(470.0), "470 bars");
         assert_eq!(words(8300.4), "8,300 bars");
         assert_eq!(words(2.5), "3 bars");
+        assert_eq!(words(1.2), "1 bar");
         assert_eq!(words(999.5), "1,000 bars");
         assert_eq!(words(1234567.0), "1,234,567 bars");
+    }
+
+    #[test]
+    fn the_dial_counts_quarters_as_three_months() {
+        assert_eq!(Dial::Quarter.timeframe(2), Timeframe::months(6));
+        assert_eq!(Dial::Quarter.key(2), "2Q");
+        assert_eq!(Dial::Minute.timeframe(60), Timeframe::hours(1), "normalised for the chart");
+        assert_eq!(Dial::Minute.key(60), "60m", "but shown as dialled");
+        assert_eq!(Dial::of(Timeframe::days(3)), (3, Dial::Day));
     }
 
     #[test]
@@ -981,5 +1224,7 @@ mod tests {
         assert_eq!(slice(from, today, today).key(), "2026-03-21:");
         let to = NaiveDate::from_ymd_opt(2026, 9, 30).unwrap_or_default();
         assert_eq!(slice(from, to, today).key(), "2026-03-21:2026-09-30");
+        assert_eq!(slashed(slice(from, to, today)), "2026/03/21:2026/09/30");
+        assert_eq!(Range::parse(&slashed(slice(from, to, today))), Some(slice(from, to, today)));
     }
 }

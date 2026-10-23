@@ -5498,8 +5498,9 @@ impl Window {
     /// changes, named by its position.
     fn over_focused(&self) -> Over {
         let pane = self.focused_pane();
-        let at = self.layout.borrow().leaves().iter().position(|leaf| *leaf == pane.id).unwrap_or(0);
-        Over::chart(&pane, at)
+        let leaves = self.layout.borrow().leaves();
+        let at = leaves.iter().position(|leaf| *leaf == pane.id).unwrap_or(0);
+        Over::chart(&pane, at, leaves.len() < 2)
     }
 
     /// The resolution box: type "3", "15", "4h", "1D".
@@ -5556,6 +5557,7 @@ impl Window {
             today,
             showing,
             first,
+            current: pane.timeframe.get(),
             ladder,
             plan: Rc::new(plan),
             apply: Rc::new(apply),

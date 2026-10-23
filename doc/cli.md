@@ -1002,21 +1002,28 @@ showing from 2025 to today on pos:0 AAPL 1W in "Macro"
 ```
 
 In the window, Ctrl+G opens a card over the chart, where the symbol picker
-opens: a box, the first and last day the range lands on, and the resolution
-with the bars it makes, `1D · 131 bars`. The card keeps that shape whatever is
-typed, and the box turns red only for text no further key could make a range.
+opens: a box with the resolution in its corner, `1D auto`, the bars that makes
+under it, and the first and last day the range lands on, `2026/03/21`. The ⓘ
+beside the title lists what can be typed. The card keeps that shape whatever
+is typed, and the box turns red only for text no further key could make a
+range.
 Space or `?` on an empty box, or Down, drops a list over it: the common ranges
 with nothing typed, what the text could mean once something is, each with the
-day it starts. Tab goes into From and To, where Left and Right pick the day,
-month or year, and Up and Down, digits or a month's first letters set it; the
-box then says the slice that makes, `2026-03-21:`. Tab once more reaches the
-resolution, which Up and Down or the wheel step along the strip, a key such as
-`4h` or `W` sets, and Backspace hands back to the window's pick. A click on it,
-or Space, lists the strip's resolutions with the bars each makes, and which
-reach back far enough. Enter from anywhere in the
-card shows it. A digit typed on a chart opens the same card for the
-resolution alone. A range is of the chart on screen, so with nothing running
-the command exits `6`.
+day it starts. Tab goes first to the resolution in the box's corner: Up and
+Down count it up or down, and Left and Right move it along minutes, hours,
+days, weeks, months, quarters and years keeping the count, so `3D` becomes
+`3W`, whether or not the strip offers it. The wheel steps along the strip, a
+key such as `4h` or `W` sets it, and Backspace or Delete sets the chart's own
+resolution, then pressed again hands back to the window's pick. A click on it
+or Space lists auto, the chart's own resolution, then the rest of the strip,
+with the bars each makes and which reach back far enough; Enter shows the
+range. Tab again goes into From
+and To, where Left and Right pick the year, month or day, and Up and Down,
+digits or a month's first letters set it; the box then says the slice that
+makes, `2026/03/21:`. Enter from the box or a date shows it, and Ctrl+Enter
+from anywhere in the card. A digit typed on a chart opens the same card for the
+resolution alone, which says what it read, `4 hours · 166 bars`. A range is
+of the chart on screen, so with nothing running the command exits `6`.
 
 ## Signing in to a feed that charts your own account
 

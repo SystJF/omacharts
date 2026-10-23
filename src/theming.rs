@@ -462,48 +462,73 @@ popover.pick-frame > contents { padding: 0; }
 .pick-shade { background-color: alpha(black, 0.4); }
 
 /* A picker that takes something typed — Ctrl+G's range, a digit's resolution:
-   a header, a framed box with the text centred, and under it what the answer
-   comes to. Nothing under the box comes or goes with typing; the list drops
-   down over it in a popover of its own. */
-popover.pick-bare > contents { padding: 0 0 4px 0; }
-popover.pick-bare .pick-header { padding: 10px 14px 2px 14px; }
-popover.pick-bare .pick-title { font-weight: 600; font-size: 0.9em; }
-popover.pick-bare .pick-query { padding: 6px 12px 4px 12px; border-bottom: none; }
+   a centred title with an ⓘ for the syntax, the chart it acts on under it
+   when there are several, a framed box with the text centred, and under it
+   what the answer comes to. Nothing under the box comes or goes with typing;
+   the list drops down over it in a popover of its own. */
+popover.pick-bare > contents { padding: 0; }
+popover.pick-bare > contents > box { padding-bottom: 22px; }
+popover.pick-bare .pick-header { padding: 14px 20px 0 20px; }
+popover.pick-bare .pick-title { font-weight: 700; font-size: 1.2em; }
+popover.pick-bare .pick-info { opacity: 0.35; -gtk-icon-size: 14px; }
+popover.pick-bare .pick-info:hover { opacity: 0.8; }
+popover.pick-bare .pick-target { margin-top: 2px; }
+popover.pick-bare .pick-query { padding: 14px 20px 0 20px; border-bottom: none; }
 popover.pick-bare .pick-query entry {
-  min-height: 34px;
-  border-radius: 6px;
+  min-height: 42px;
+  border-radius: 7px;
   font-family: monospace;
+  font-size: 1.1em;
   background: alpha(@window_fg_color, 0.05);
   box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.14);
 }
 popover.pick-bare .pick-query entry:focus-within { box-shadow: inset 0 0 0 2px @accent_color; }
 popover.pick-bare .pick-query entry.error { box-shadow: inset 0 0 0 2px @error_color; }
-.pick-tip { font-size: 0.78em; opacity: 0.45; margin-right: 10px; }
+popover.range-goto .pick-query entry { min-height: 48px; }
 popover.pick-drop > contents { padding: 0; }
 
-.range-dates { padding: 6px 12px 0 12px; }
-.range-cell-name { font-size: 0.72em; letter-spacing: 0.08em; opacity: 0.5; }
-.range-today { font-size: 0.72em; color: @success_color; }
-.range-arrow { opacity: 0.4; margin-bottom: 6px; }
+/* The ⓘ's help: a popover on the card's own ground, keys in the accent,
+   right-aligned onto what they mean. */
+popover.background.pick-help-pop > contents { padding: 10px 14px; }
+/* Dimmed by colour, not opacity: opacity would fade the rules too. */
+.pick-help-section { font-size: 0.78em; letter-spacing: 0.06em; color: alpha(currentColor, 0.5); margin-bottom: 2px; }
+.pick-help-section.later,
+.pick-help-foot { border-top: 1px solid alpha(currentColor, 0.3); }
+.pick-help-section.later { margin-top: 6px; padding-top: 7px; }
+.pick-help-key { font-family: monospace; font-weight: 700; color: @accent_color; }
+.pick-help-what { color: alpha(currentColor, 0.75); }
+.pick-help-foot { margin-top: 6px; padding-top: 6px; font-size: 0.85em; color: alpha(currentColor, 0.5); }
+
+.range-hint { padding: 8px 20px 0 20px; font-size: 0.9em; font-feature-settings: 'tnum'; }
+.range-hint > label { opacity: 0.6; }
+.range-hint > label.error { color: @error_color; opacity: 1; }
+.range-dates { padding: 12px 20px 0 20px; }
+.range-cell-name { font-size: 0.78em; opacity: 0.45; }
+.range-today { font-size: 0.78em; color: @success_color; }
+.range-arrow { opacity: 0.4; margin-bottom: 8px; }
 .range-date {
   font-family: monospace;
-  font-size: 0.9em;
+  font-size: 0.88em;
   font-feature-settings: 'tnum';
-  padding: 5px 8px;
-  border-radius: 6px;
+  padding: 7px 9px;
+  border-radius: 7px;
   background: alpha(@window_fg_color, 0.05);
-  box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.10);
+  box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.14);
 }
 .range-date:focus { box-shadow: inset 0 0 0 2px @accent_color; outline: none; }
-.range-date.idle { color: alpha(@window_fg_color, 0.6); }
+.range-date.idle { color: alpha(@window_fg_color, 0.7); }
 .range-date.error { box-shadow: inset 0 0 0 2px @error_color; }
-.range-part { padding: 0 1px; border-radius: 3px; }
+.range-slash { opacity: 0.4; }
+.range-part { border-radius: 3px; }
 .range-date:focus .range-part.on { background: @accent_color; color: @accent_fg_color; }
 
-.range-res { padding: 8px 12px 8px 12px; font-family: monospace; font-size: 0.85em; }
+/* The resolution, pinned in the range box's bottom-right corner. */
 .range-chip {
-  padding: 1px 7px;
+  margin: 0 6px 6px 0;
+  padding: 1px 6px;
   border-radius: 5px;
+  font-family: monospace;
+  font-size: 0.78em;
   font-weight: 700;
   background: alpha(@window_fg_color, 0.05);
   box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.18);
@@ -511,11 +536,11 @@ popover.pick-drop > contents { padding: 0; }
 .range-chip:focus { box-shadow: inset 0 0 0 2px @accent_color; outline: none; }
 .range-chip.bumped { color: @warning_color; }
 .range-chip:hover { box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.35); }
-.range-caret { font-size: 0.8em; opacity: 0.5; margin-left: 1px; }
-.range-auto { font-family: sans-serif; font-weight: 400; font-size: 0.85em; opacity: 0.55; }
+.range-caret { font-size: 0.8em; opacity: 0.5; }
+.range-auto { font-family: sans-serif; font-weight: 400; font-size: 0.9em; opacity: 0.55; }
 .range-dot { opacity: 0.4; }
-.range-count { opacity: 0.75; }
-.range-count.many { color: @warning_color; opacity: 1; }
+.range-hint > label.range-count { opacity: 0.85; }
+.range-count.many, .range-hint > label.range-count.many { color: @warning_color; opacity: 1; }
 .range-count.short { color: @error_color; opacity: 1; }
 
 /* The link toggle is a glyph, not a button: no frame, no fill, not even when
