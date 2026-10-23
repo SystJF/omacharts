@@ -32,7 +32,7 @@ use crate::store::{Store, DEFAULT_WATCHLIST};
 use crate::chart_defaults::ChartDefaults;
 use crate::theming::Theming;
 use crate::ui::chart::{Drawn, Echo};
-use crate::ui::pane::{self, ChartPane, Node};
+use crate::ui::pane::{self, ChartPane, Hideable, Node};
 use crate::ui::drop_line;
 use crate::ui::screenshot;
 use omacharts_engine::link;
@@ -206,9 +206,9 @@ const SHORTCUT_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("End", "Jump to the latest bar"),
             ("Ctrl+Esc", "Reset the view"),
             ("Ctrl+Shift+G", "Show or hide the gridlines"),
-            ("Ctrl+Shift+B", "Hide the bars, or show them as they were"),
             ("Ctrl+H", "Show or hide the drawings"),
             ("Ctrl+Shift+H", "Show or hide the indicators"),
+            ("Ctrl+Alt+Shift+H", "Hide the bars, or show them as they were"),
             ("Ctrl+Alt+Shift+1 … 9", "Chart template N, in the order they are listed"),
             ("Ctrl+Alt+Shift+0", "No chart template"),
             ("Ctrl+Alt+Shift+PgUp PgDn", "Previous or next chart template"),
@@ -2309,6 +2309,20 @@ impl Window {
             opener.focus(id);
             opener.open_chart_settings();
         });
+
+        // A hidden thing's glyph means that chart's: the focus moves there
+        // first, the way the gear's does, and then it is shown.
+        for (what, button) in &pane.hidden_glyphs {
+            let (shower, what) = (self.clone(), *what);
+            button.connect_clicked(move |_| {
+                shower.focus(id);
+                match what {
+                    Hideable::Drawings => shower.set_drawings_shown(true),
+                    Hideable::Indicators => shower.set_show_indicators(true),
+                    Hideable::Bars => shower.set_bars_hidden(false),
+                }
+            });
+        }
 
         // Clicking another chart's corner means that chart: the focus moves
         // there first, and then it grows.
@@ -8648,7 +8662,7 @@ impl Window {
         });
         actions.add_action(&settings);
 
-        // What Ctrl+Shift+B flips: None and the style the bars had, which
+        // What Ctrl+Alt+Shift+H flips: None and the style the bars had, which
         // hiding them never forgets.
         let bars = gio::SimpleAction::new_stateful("bars", None, &(!self.bars_hidden()).to_variant());
         let this = self.clone();

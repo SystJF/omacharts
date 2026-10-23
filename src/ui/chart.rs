@@ -1595,6 +1595,15 @@ impl State {
 /// because the chart is constructed before there is a window to tell.
 type Handler<F> = Rc<RefCell<Option<Box<F>>>>;
 
+/// What a chart is hiding all of at once, each by its own key, for the
+/// legend to name while it is hidden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hidden {
+    pub drawings: bool,
+    pub indicators: bool,
+    pub bars: bool,
+}
+
 /// How far a pasted copy lands from what it was copied from, in pixels.
 ///
 /// Enough to see that there are two of them and to take hold of the one on
@@ -1703,6 +1712,9 @@ pub struct ChartView {
     /// chart, and these are the only ways it changes that nothing outside
     /// the chart can see.
     on_price_auto: Handler<dyn Fn(bool)>,
+    /// Told when the drawings, the indicators or the bars are hidden or
+    /// shown, whatever did it, for the legend's glyphs.
+    on_hidden: Handler<dyn Fn(Hidden)>,
 }
 
 impl ChartView {
@@ -1749,6 +1761,7 @@ impl ChartView {
             on_typing: Rc::new(RefCell::new(None)),
             on_tool: Rc::new(RefCell::new(None)),
             on_price_auto: Rc::new(RefCell::new(None)),
+            on_hidden: Rc::new(RefCell::new(None)),
         });
         view.wire_drawing();
         view.wire_pointer();
@@ -1966,6 +1979,7 @@ impl ChartView {
                 state.show_drawings = true;
             }
         }
+        self.hidden_changed();
         // A tool in hand is about to make a drawing, which is selected once
         // it is down: whatever indicator was selected stops being.
         if kind.is_some() {
@@ -3266,6 +3280,7 @@ impl ChartView {
     /// they were.
     pub fn set_show_indicators(&self, show: bool) {
         self.state.borrow_mut().show_indicators = show;
+        self.hidden_changed();
         self.redraw();
     }
 
@@ -3291,7 +3306,28 @@ impl ChartView {
     /// still fits them, and what is drawn from them stays where it was.
     pub fn set_bars_hidden(&self, hidden: bool) {
         self.state.borrow_mut().bars_hidden = hidden;
+        self.hidden_changed();
         self.redraw();
+    }
+
+    /// What the chart is hiding all of.
+    pub fn hidden(&self) -> Hidden {
+        let state = self.state.borrow();
+        Hidden { drawings: !state.show_drawings, indicators: !state.show_indicators, bars: state.bars_hidden }
+    }
+
+    /// What to tell when something is hidden or shown. Called once at once,
+    /// so whatever listens starts out right.
+    pub fn set_hidden_handler(&self, handler: impl Fn(Hidden) + 'static) {
+        handler(self.hidden());
+        *self.on_hidden.borrow_mut() = Some(Box::new(handler));
+    }
+
+    fn hidden_changed(&self) {
+        let hidden = self.hidden();
+        if let Some(handler) = self.on_hidden.borrow().as_ref() {
+            handler(hidden);
+        }
     }
 
     /// What to do when the chart itself is right-clicked. The axis keeps its
@@ -3394,6 +3430,7 @@ impl ChartView {
                 state.selected.clear();
             }
         }
+        self.hidden_changed();
         self.redraw();
     }
 

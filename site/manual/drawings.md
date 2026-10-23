@@ -257,6 +257,8 @@ crop: 1780,40,560,400
 
 <kbd>Ctrl</kbd> + <kbd>H</kbd> hides every drawing on the focused chart, its own and those other charts send it, and pressing it again brings them back. **Drawings** in the chart menu does the same. Nothing is removed: while they are hidden, none can be selected or deleted, and **Remove all drawings** and <kbd>Ctrl</kbd> + <kbd>Z</kbd> leave them alone. Picking up a drawing tool shows them again. Hidden drawings are kept with the chart.
 
+While they are hidden, a struck-through pencil after the chart's resolution says so. Click it to show them again.
+
 ## Sharing drawings between charts
 
 Each chart has two switches, in the **Drawings** group of [Chart settings](/manual/chart-settings/) (<kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd>). Both are on by default.
