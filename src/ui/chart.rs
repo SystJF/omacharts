@@ -1232,7 +1232,9 @@ impl State {
         {
             match placing.kind.is_path() {
                 true => placing.move_last_corner(anchor),
-                false => placing.move_grip(Grip::To, anchor),
+                false => {
+                    placing.move_grip(Grip::To, anchor);
+                }
             }
         }
     }
@@ -3815,7 +3817,9 @@ impl ChartView {
                             placing.move_last_corner(anchor);
                             placing.add_corner(anchor);
                         }
-                        false => placing.move_grip(Grip::To, anchor),
+                        false => {
+                            placing.move_grip(Grip::To, anchor);
+                        }
                     }
                 }
                 s.drag = None;
@@ -4009,7 +4013,9 @@ impl ChartView {
                     {
                         match placing.kind.is_path() {
                             true => placing.move_last_corner(anchor),
-                            false => placing.move_grip(Grip::To, anchor),
+                            false => {
+                                placing.move_grip(Grip::To, anchor);
+                            }
                         }
                     }
                     if !moved && offset_x.hypot(offset_y) > drag_threshold() {
@@ -4090,13 +4096,15 @@ impl ChartView {
                         }
                         grip => {
                             // A corner is one drawing's own.
-                            match s.drawings.get_mut(index) {
-                                Some(drawing) => {
-                                    drawing.move_grip(grip, now);
-                                    vec![drawing.clone()]
-                                }
-                                None => Vec::new(),
-                            }
+                            let Some(drawing) = s.drawings.get_mut(index) else {
+                                return;
+                            };
+                            // An edge pulled past its opposite is that side
+                            // from here on.
+                            let held = drawing.move_grip(grip, now);
+                            let moved = vec![drawing.clone()];
+                            s.drag = Some(Drag::Grip { index, grip: held, origin });
+                            moved
                         }
                     };
                     drop(s);

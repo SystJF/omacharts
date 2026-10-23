@@ -1600,8 +1600,31 @@ impl Drawing {
         }
     }
 
-    /// Put the grip where the hand is.
-    pub fn move_grip(&mut self, grip: Grip, at: Anchor) {
+    /// Put the grip where the hand is, and say which grip the hand holds
+    /// now.
+    ///
+    /// An edge pulled past the one facing it becomes that side: hold a box's
+    /// left edge, drag it right past the right edge, and the hand now holds
+    /// the right edge, so the box grows rightward under it. Without the swap
+    /// the next motion asked afresh which anchor was on the left, got the
+    /// one that had stood still, and the two edges leapfrogged: the box slid
+    /// along instead of growing. A box one column wide could not be widened
+    /// rightward at all, since both its side grips sit on one spot and the
+    /// left one is found first.
+    pub fn move_grip(&mut self, grip: Grip, at: Anchor) -> Grip {
+        self.put_grip(grip, at);
+        let (earlier, later) = (self.from.ts.min(self.to.ts), self.from.ts.max(self.to.ts));
+        let (lower, higher) = (self.from.price.min(self.to.price), self.from.price.max(self.to.price));
+        match grip {
+            Grip::Left if at.ts > earlier => Grip::Right,
+            Grip::Right if at.ts < later => Grip::Left,
+            Grip::Top if at.price < higher => Grip::Bottom,
+            Grip::Bottom if at.price > lower => Grip::Top,
+            grip => grip,
+        }
+    }
+
+    fn put_grip(&mut self, grip: Grip, at: Anchor) {
         // A text drawing is one point wearing two anchors, so whichever is
         // moved both go: nothing reads the second, and letting them drift
         // apart would leave a drawing whose box depends on which grip was
@@ -3198,5 +3221,32 @@ mod edge_grip_tests {
         assert_eq!(backwards.from, Anchor::new(10, 80.0));
         backwards.move_grip(Grip::Left, Anchor::new(-5, 999.0));
         assert_eq!(backwards.to, Anchor::new(-5, 120.0), "the earlier anchor is the left edge");
+    }
+
+    /// An edge dragged past the opposite one becomes that side, so the box
+    /// grows the way the hand goes instead of sliding along under it.
+    #[test]
+    fn an_edge_dragged_past_the_other_becomes_that_side() {
+        // One column wide: both side grips on one spot, and Left is found
+        // first.
+        let mut thin = Drawing::new(Kind::Rect, Anchor::new(10, 100.0), Anchor::new(10, 80.0));
+        let mut grip = Grip::Left;
+        for ts in [12, 15, 20] {
+            grip = thin.move_grip(grip, Anchor::new(ts, 999.0));
+        }
+        assert_eq!(grip, Grip::Right);
+        let (left, right) = (thin.from.ts.min(thin.to.ts), thin.from.ts.max(thin.to.ts));
+        assert_eq!((left, right), (10, 20), "the far side stayed put and the box grew rightward");
+
+        // And back over again, the same in price.
+        let mut drawing = boxed();
+        let mut grip = Grip::Top;
+        for price in [90.0, 70.0, 50.0] {
+            grip = drawing.move_grip(grip, Anchor::new(999, price));
+        }
+        assert_eq!(grip, Grip::Bottom);
+        let mut prices = [drawing.from.price, drawing.to.price];
+        prices.sort_by(f64::total_cmp);
+        assert_eq!(prices, [50.0, 80.0]);
     }
 }
