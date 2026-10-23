@@ -46,8 +46,6 @@ So Omacharts starts with strong opinions but doesn't force you to live with them
 
 Colors, styles, layouts, shortcuts, behaviors, and workflows should be yours to shape. You should be able to make the software feel like your own, without fighting it.
 
-The defaults are a carefully curated starting point, not a cage.
-
 ### Agents-ready
 
 Software is entering a new era, and I want Omacharts to embrace it from the beginning.
@@ -59,8 +57,6 @@ AI agents change that relationship.
 I want Omacharts to be a tool that agents can operate as naturally as humans do. Not by awkwardly clicking through menus, but through well-defined capabilities that let them interact with the application directly.
 
 Imagine asking an agent to prepare a workspace for studying a particular market, configure a set of charts, apply your preferred indicators, or help you investigate a trading idea.
-
-Instead of teaching you which buttons to press, the agent can do the work.
 
 This doesn't make a good human interface any less important. Quite the opposite. I want Omacharts to be delightful to operate yourself, while also being ready for a world where you can delegate work to an intelligent assistant.
 
