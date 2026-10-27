@@ -970,8 +970,9 @@ the unit says which sort:
   to the end of June 2025, `:2020` from the first bar to the end of 2020, and
   `2026-03-21:2026-09-30` between two days, which `2026/03/21:2026/09/30`
   also says. An end can be an offset back from today, `-2y:-1y` being the
-  year before last. A slice open at the end stays live, so new bars still
-  arrive in it;
+  year before last. Two dots, the way Ruby writes a range, slice the same:
+  `2025..`, `2024..2025-06`. A slice open at the end stays live, so new bars
+  still arrive in it;
 - `all`, or `:` alone, is the whole series.
 
 Today is the day of the last bar, so a series that stopped trading still has a

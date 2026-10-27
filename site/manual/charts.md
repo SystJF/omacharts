@@ -267,7 +267,7 @@ crop: 898,193,763,532   (the whole card, 24px layout margin)
 | `2025` | All of 2025 |
 | `2025/03` or `2025-03` | All of March 2025 |
 | `2025:` | From 1 January 2025 to today |
-| `2025/03:2025/06` | From the start of March to the end of June 2025. A colon joins two ends, and both are included |
+| `2025/03:2025/06` | From the start of March to the end of June 2025. A colon joins two ends, and both are included. Two dots do the same: `2025/03..2025/06`, `2025..` |
 | `:2020` | From the first bar to the end of 2020 |
 | `2026/03/12:` | From 12 March 2026 to today |
 | `-6m:-1m` | From six months ago to one month ago |

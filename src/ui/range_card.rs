@@ -1115,8 +1115,9 @@ fn slashed(range: Range) -> String {
 /// way to `2025`, `2026-` to a month, `y` to `ytd`. Only text no key can
 /// save turns the box red.
 fn could_become(text: &str) -> bool {
-    let text = text.trim();
-    if text.chars().all(|c| c.is_ascii_digit() || matches!(c, '-' | '/' | ':')) {
+    // The first dot of `2025..` is on its way to being a slice.
+    let text = text.trim().trim_end_matches('.');
+    if text.chars().all(|c| c.is_ascii_digit() || matches!(c, '-' | '/' | ':' | '.')) {
         return true;
     }
     let unit = text.trim_start_matches(['-', ':']).trim_start_matches(|c: char| c.is_ascii_digit()).to_lowercase();
@@ -1209,7 +1210,7 @@ mod tests {
 
     #[test]
     fn half_typed_text_is_not_an_error() {
-        for text in ["2", "20", "2026-", "2026-0", "2026/0", "2026/03/1", "2025:", "-2", "y", "2yt", "a", "m"] {
+        for text in ["2", "20", "2026-", "2026-0", "2026/0", "2026/03/1", "2025:", "2025.", "2025..20", "-6m.", "-2", "y", "2yt", "a", "m"] {
             assert!(could_become(text), "{text}");
         }
         for text in ["6x", "2025q4", "zz"] {

@@ -247,8 +247,11 @@ impl Range {
     /// `2026-09` — the two that end before today.
     ///
     /// A colon slices, as pandas slices dates: `2025:`, `2024:2025-06`,
-    /// `:2020`, `-2y:-1y`, and `:` alone is everything. See [`Range::Slice`].
+    /// `:2020`, `-2y:-1y`, and `:` alone is everything. Two dots do the same,
+    /// the way Ruby writes a range: `2025..`, `2024..2025-06`. Both ends are
+    /// in either way. See [`Range::Slice`].
     pub fn parse(text: &str) -> Option<Range> {
+        let text = &dots_to_colon(text);
         let text = text.trim();
         let lower = text.to_ascii_lowercase();
         if matches!(lower.as_str(), "all" | "max") {
@@ -394,7 +397,7 @@ impl Range {
             }
         };
         // A slice is what it says; `-6m` on its own is the start of one.
-        if text.contains(':') {
+        if text.contains(':') || text.contains("..") {
             return Range::parse(text).into_iter().collect();
         }
         if text.starts_with('-') {
@@ -480,6 +483,14 @@ impl Range {
         }
         out.truncate(8);
         out
+    }
+}
+
+/// `..` read as `:`, once: `2025..2026` is `2025:2026`.
+fn dots_to_colon(text: &str) -> std::borrow::Cow<'_, str> {
+    match text.contains("..") {
+        true => text.replacen("..", ":", 1).into(),
+        false => text.into(),
     }
 }
 
@@ -826,6 +837,12 @@ mod tests {
         assert_eq!(slice("-2y:-1y"), (Some(day(2024, 10, 21)), Some(day(2025, 10, 20)), "-2y:-1y".into()));
         assert_eq!(Range::parse("-1y:").and_then(|r| r.start(today)), Range::Back(1, Span::Year).start(today));
         assert_eq!(Range::parse("2025:").map(|r| r.description()), Some("from 2025 to today".into()));
+        // Ruby's two dots are the same slice.
+        for (dots, colon) in [("2025..", "2025:"), ("..2020", ":2020"), ("2025/03..2025/06", "2025/03:2025/06"), ("-6m..-1m", "-6m:-1m"), ("..", ":")] {
+            assert_eq!(Range::parse(dots), Range::parse(colon), "{dots}");
+            assert!(Range::parse(dots).is_some(), "{dots}");
+        }
+        assert_eq!(Range::parse("2025...2026"), None, "three dots are not a range");
         assert_eq!(Range::parse("-2y:-1y").map(|r| r.description()), Some("2 years ago to a year ago".into()));
         for bad in ["2025:x", "6m:", "2025-13:", "2025-02-30:", "2025/02/30:", "2025/03-21:", "1:2"] {
             assert_eq!(Range::parse(bad), None, "{bad}");
