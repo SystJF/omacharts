@@ -465,6 +465,35 @@ impl Schedule<'_> {
         Some(TradingDay { date, start, end, segments })
     }
 
+    /// Where the trading day named for `date` begins, as a unix second,
+    /// whether or not this market keeps it.
+    pub fn day_start(&self, date: NaiveDate) -> i64 {
+        instant(self.zone(), self.base(date), self.hours.day_starts)
+    }
+
+    /// Where the bars of the trading day named for `date` start, as a unix
+    /// second, whether or not this market keeps it: the regular open when
+    /// `regular` and there is one, and otherwise the first part of the day
+    /// that trades — 04:00 for a US listing, 17:00 for Globex.
+    ///
+    /// A pre-market of under an hour is an opening auction, Taipei's, Hong
+    /// Kong's or Mumbai's, which matches orders and prints no bars of its
+    /// own, so the day's bars start at the open after it.
+    pub fn bars_start(&self, date: NaiveDate, regular: bool) -> i64 {
+        let segments = &self.hours.segments;
+        let open = segments.iter().filter(|s| s.part == Part::Regular).map(|s| s.start).min();
+        let trading = segments
+            .iter()
+            .filter(|s| !(s.part == Part::Pre && s.end - s.start < 60))
+            .map(|s| s.start)
+            .min();
+        let minutes = match regular {
+            true => open.or(trading),
+            false => trading,
+        };
+        instant(self.zone(), self.base(date), minutes.unwrap_or(self.hours.day_starts))
+    }
+
     /// Every trading day that overlaps `from..=to`, oldest first.
     pub fn days(&self, from: i64, to: i64) -> Vec<TradingDay> {
         let (Some(first), Some(last)) = (self.trading_date(from), self.trading_date(to)) else {

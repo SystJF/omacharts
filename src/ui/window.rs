@@ -20,7 +20,7 @@ use gtk::glib;
 use omacharts_engine::providers;
 use omacharts_engine::refresh;
 use omacharts_engine::{
-    resample, BarColouring, BarStyle, Delivery, FetchFailure, Indicator, Instrument, Provider, SearchIndex,
+    resample, BarColouring, BarStyle, Delivery, FetchFailure, Grid, Indicator, Instrument, Provider, SearchIndex,
     Session,
     Timeframe,
 };
@@ -6395,7 +6395,7 @@ impl Window {
             timeframe.is_intraday(),
         );
         let bars = if timeframe.is_derived() {
-            resample(&bars, timeframe, instrument.session_origin)
+            resample(&bars, timeframe, &Grid::new(instrument, pane.session.get()))
         } else {
             bars
         };
@@ -6744,12 +6744,8 @@ impl Window {
                     let timeframe = pane.timeframe.get();
                     let tail = live
                         .with_bars(&series, |native| {
-                            let start = omacharts_engine::stream::tail_start(
-                                native,
-                                from,
-                                timeframe,
-                                instrument.session_origin,
-                            );
+                            let grid = Grid::new(&instrument, pane.session.get());
+                            let start = omacharts_engine::stream::tail_start(native, from, timeframe, &grid);
                             // Left out and cut back as `paint` did, or a tick
                             // refolding this week, month or year would put back
                             // what the chart had left out of it.
@@ -6762,7 +6758,7 @@ impl Window {
                                 timeframe.is_intraday(),
                             );
                             if timeframe.is_derived() {
-                                resample(&tail, timeframe, instrument.session_origin)
+                                resample(&tail, timeframe, &grid)
                             } else {
                                 tail
                             }
