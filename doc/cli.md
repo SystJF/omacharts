@@ -1022,7 +1022,7 @@ and To, where Left and Right pick the year, month or day, and Up and Down,
 digits or a month's first letters set it; the box then says the slice that
 makes, `2026/03/21:`. Enter from the box or a date shows it, and Ctrl+Enter
 from anywhere in the card. A digit typed on a chart opens the same card for the
-resolution alone, which says what it read, `4 hours · 166 bars`. A range is
+resolution alone, which says what it read, `4 hours`. A range is
 of the chart on screen, so with nothing running the command exits `6`.
 
 ## Signing in to a feed that charts your own account
