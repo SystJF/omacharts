@@ -487,17 +487,27 @@ popover.pick-bare .pick-query entry.error { box-shadow: inset 0 0 0 2px @error_c
 popover.range-goto .pick-query entry { min-height: 48px; }
 popover.pick-drop > contents { padding: 0; }
 
-/* The ⓘ's help: a popover on the card's own ground, keys in the accent,
-   right-aligned onto what they mean. */
-popover.background.pick-help-pop > contents { padding: 10px 14px; }
-/* Dimmed by colour, not opacity: opacity would fade the rules too. */
-.pick-help-section { font-size: 0.78em; letter-spacing: 0.06em; color: alpha(currentColor, 0.5); margin-bottom: 2px; }
-.pick-help-section.later,
-.pick-help-foot { border-top: 1px solid alpha(currentColor, 0.3); }
-.pick-help-section.later { margin-top: 6px; padding-top: 7px; }
-.pick-help-key { font-family: monospace; font-weight: 700; color: @accent_color; }
-.pick-help-what { color: alpha(currentColor, 0.75); }
-.pick-help-foot { margin-top: 6px; padding-top: 6px; font-size: 0.85em; color: alpha(currentColor, 0.5); }
+/* The ⓘ's help, beside the card on its own ground: examples as key caps in
+   the accent, what they mean right-aligned. */
+popover.background.pick-help-pop > contents { padding: 14px 16px; }
+.pick-help { min-width: 268px; }
+.pick-help-section { font-size: 0.78em; letter-spacing: 0.06em; color: alpha(currentColor, 0.5); }
+.pick-help-group.later,
+.pick-help-foot { margin-top: 9px; padding-top: 9px; border-top: 1px solid alpha(currentColor, 0.13); }
+.pick-help-key,
+.pick-help-cap {
+  font-family: monospace;
+  font-weight: 700;
+  font-size: 0.85em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: alpha(@window_fg_color, 0.07);
+  box-shadow: inset 0 -1px 0 alpha(@window_fg_color, 0.18), inset 0 0 0 1px alpha(@window_fg_color, 0.12);
+}
+.pick-help-key { color: @accent_color; }
+.pick-help-what { color: alpha(currentColor, 0.75); font-size: 0.9em; }
+.pick-help-foot { font-size: 0.85em; color: alpha(currentColor, 0.5); }
+.pick-help-cap { color: @window_fg_color; }
 
 .range-hint { padding: 8px 20px 0 20px; font-size: 0.9em; font-feature-settings: 'tnum'; }
 .range-hint > label { opacity: 0.6; }

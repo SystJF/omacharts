@@ -275,9 +275,15 @@ impl PickFrame {
         pop.set_has_arrow(false);
         pop.set_autohide(false);
         pop.set_can_target(false);
-        pop.set_position(gtk::PositionType::Bottom);
+        // Beside the card, top edges level, so it covers neither the box
+        // nor the dates.
+        pop.set_position(gtk::PositionType::Right);
+        pop.set_valign(gtk::Align::Start);
+        // Less the popover's own shadow margin, so the gap is 8px and the
+        // tops meet.
+        pop.set_offset(14, -8);
         pop.set_child(Some(&help));
-        pop.set_parent(&info);
+        pop.set_parent(&self.content);
         let hover = gtk::EventControllerMotion::new();
         let shown = pop.clone();
         hover.connect_enter(move |_, _, _| shown.popup());

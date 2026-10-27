@@ -213,39 +213,54 @@ impl Hint {
     }
 }
 
-/// The ⓘ's tooltip: what to type beside what it means, in titled sections.
-fn help(sections: &[(&str, &[(&str, &str)])], foot: &str) -> gtk::Widget {
-    let grid = gtk::Grid::new();
-    grid.add_css_class("pick-help");
-    grid.set_column_spacing(14);
-    let mut row = 0;
+/// The ⓘ's help: each example as a key cap, what it means on the right,
+/// in titled sections, and under them the keys the card answers to.
+fn help(sections: &[(&str, &[(&str, &str)])], keys: &[(&str, &str)]) -> gtk::Widget {
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    column.add_css_class("pick-help");
     for (at, (name, lines)) in sections.iter().enumerate() {
+        let group = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        group.add_css_class("pick-help-group");
+        set_class(&group, "later", at > 0);
         if !name.is_empty() {
             let head = gtk::Label::new(Some(&name.to_uppercase()));
             head.add_css_class("pick-help-section");
-            set_class(&head, "later", at > 0);
             head.set_xalign(0.0);
-            grid.attach(&head, 0, row, 2, 1);
-            row += 1;
+            group.append(&head);
         }
-        for (key, what) in lines.iter() {
-            let key = gtk::Label::new(Some(key));
-            key.add_css_class("pick-help-key");
-            key.set_xalign(1.0);
+        for (examples, what) in lines.iter() {
+            let caps = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            for example in examples.split_whitespace() {
+                let cap = gtk::Label::new(Some(example));
+                cap.add_css_class("pick-help-key");
+                caps.append(&cap);
+            }
             let what = gtk::Label::new(Some(what));
             what.add_css_class("pick-help-what");
-            what.set_xalign(0.0);
-            grid.attach(&key, 0, row, 1, 1);
-            grid.attach(&what, 1, row, 1, 1);
-            row += 1;
+            what.set_xalign(1.0);
+            what.set_hexpand(true);
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+            row.append(&caps);
+            row.append(&what);
+            group.append(&row);
         }
+        column.append(&group);
     }
-    if !foot.is_empty() {
-        let foot = gtk::Label::new(Some(foot));
+    if !keys.is_empty() {
+        let foot = gtk::Box::new(gtk::Orientation::Horizontal, 14);
         foot.add_css_class("pick-help-foot");
-        grid.attach(&foot, 0, row, 2, 1);
+        for (key, does) in keys.iter() {
+            let cap = gtk::Label::new(Some(key));
+            cap.add_css_class("pick-help-cap");
+            let does = gtk::Label::new(Some(does));
+            let pair = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+            pair.append(&cap);
+            pair.append(&does);
+            foot.append(&pair);
+        }
+        column.append(&foot);
     }
-    grid.upcast()
+    column.upcast()
 }
 
 /// From or To: a day in three parts, year, month and day, `2026/03/21`,
@@ -499,24 +514,24 @@ impl RangeCard {
                     (
                         "Up to today",
                         &[
-                            ("6m 3y", "back from today"),
+                            ("6m 3y", "the last 6 months, 3 years"),
                             ("ytd qtd mtd", "this year, quarter, month"),
                             ("2ytd", "this year and last"),
-                            ("2026/03/12:", "from a day on"),
-                            ("all", "whole series"),
+                            ("2026/03/12:", "since 12 Mar 2026"),
+                            ("all", "the whole history"),
                         ],
                     ),
                     (
                         "A set period",
                         &[
-                            ("2025", "a year"),
-                            ("2025/03", "a month"),
-                            ("2025/03:2025/06", "March to June"),
-                            ("-6m:-1m", "6 to 1 months ago"),
+                            ("2025", "all of 2025"),
+                            ("2025/03", "March 2025"),
+                            ("2025/03:2025/06", "March to June 2025"),
+                            ("-6m:-1m", "6 months to 1 month ago"),
                         ],
                     ),
                 ],
-                "Space list · Tab resolution, dates",
+                &[("Space", "common ranges")],
             ),
         );
         frame.popover.add_css_class("range-goto");
@@ -1009,8 +1024,16 @@ impl ResolutionCard {
         frame.set_bare(
             "Change resolution",
             help(
-                &[("", &[("15", "minutes"), ("4h", "hours"), ("1d 1w", "days, weeks"), ("1mo 1q 1y", "months, quarters, years")])],
-                "",
+                &[(
+                    "",
+                    &[
+                        ("15 90", "minutes"),
+                        ("1h 4h", "hours"),
+                        ("1D 1W", "days, weeks"),
+                        ("1M 1Q 1Y", "months, quarters, years"),
+                    ],
+                )],
+                &[],
             ),
         );
         frame.drop_list();
