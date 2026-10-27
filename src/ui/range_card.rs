@@ -1009,7 +1009,7 @@ impl ResolutionCard {
         frame.set_bare(
             "Change resolution",
             help(
-                &[("", &[("15", "minutes"), ("4h", "hours"), ("1d 1w", "days, weeks"), ("1mo 1y", "months, years")])],
+                &[("", &[("15", "minutes"), ("4h", "hours"), ("1d 1w", "days, weeks"), ("1mo 1q 1y", "months, quarters, years")])],
                 "",
             ),
         );

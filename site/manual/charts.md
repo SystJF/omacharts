@@ -33,9 +33,10 @@ A resolution is the length of one bar, typed as a number and a unit.
 | `1D`, `D` | Days. A unit alone means one of it |
 | `1W` | Weeks |
 | `1M`, `3M`, `1mo` | Months. `1M` is a month and `1m` a minute; `mo` is a month in either case |
+| `1Q`, `Q` | Quarters, the same as `3M` |
 | `1Y` | Years |
 
-Longer spellings (`min`, `hr`, `day`, `wk`, `month`, `year`) work too. A resolution is shown in its largest exact unit, so `60m` becomes `1h` and `7D` becomes `1W`. Monthly and yearly bars follow calendar months and years, so `3M` is calendar quarters.
+Longer spellings (`min`, `hr`, `day`, `wk`, `month`, `quarter`, `year`) work too. A resolution is shown in its largest exact unit, so `60m` becomes `1h` and `7D` becomes `1W`. Monthly and yearly bars follow calendar months and years, so `3M` is calendar quarters.
 
 Intraday bars start with the trading day, in the exchange's own clock. On a chart of [regular hours](#sessions) they count from the open, so SPY's 4h bars start at 09:30 and 13:30 New York time, and the second one ends early at the 16:00 close. On extended hours they count from the start of the day's trading: 04:00, 08:00, 12:00 and 16:00 for SPY, and 17:00 Chicago time for ES. The times stay put when the clocks change for summer. FX and crypto count from midnight UTC.
 
