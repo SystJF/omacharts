@@ -857,11 +857,6 @@ button.rail-add {
 .chart-pane:hover .pane-expand:hover,
 button.rail-switcher:hover,
 button.rail-add:hover { background: alpha(currentColor, 0.12); }
-/* The + is 11px of ink in its 16px box, a pixel above the box's middle,
-   and the toggle beside it is 15px, a pixel below: so the + reads high
-   against it. A pixel more padding on top, one less below, keeps its box
-   level with the toggle's and moves only the glyph. */
-button.rail-add { padding: 3px 2px 1px; }
 .window-corner button:checked,
 button.rail-switcher.open { background: alpha(currentColor, 0.15); }
 .window-corner button:checked:hover,
