@@ -240,8 +240,15 @@ pub fn session_times(
                 let regular = matches!(range.hours, Hours::Rth);
                 // Outside the regular session is extended, a bar between
                 // sessions included: a print while the exchange is shut is
-                // still not regular hours.
-                runs(bars, |bar| (schedule.part_at(bar.ts) == Some(Part::Regular)) == regular)
+                // still not regular hours. A bar is regular when any of it
+                // is: a 4h bar from 08:00 holds the 09:30 open, and taken by
+                // its start alone every other 4h bar was shaded.
+                let step = timeframe.seconds().max(1);
+                let sessions = regular_sessions(&schedule, bars, step);
+                runs(bars, |bar| {
+                    let at = sessions.partition_point(|(_, to)| *to <= bar.ts);
+                    sessions.get(at).is_some_and(|(from, _)| *from < bar.ts + step) == regular
+                })
             }
             Hours::Clock { from, to, zone: own } => {
                 let zone = own.as_deref().and_then(|z| z.parse::<Tz>().ok()).unwrap_or(zone);
@@ -261,6 +268,21 @@ pub fn session_times(
         }));
     }
     time
+}
+
+/// The regular sessions across these bars, as instants, oldest first.
+///
+/// Laid out once for the series rather than once a bar, which made a
+/// minute chart lay out the same day hundreds of times.
+fn regular_sessions(schedule: &Schedule, bars: &[Bar], step: i64) -> Vec<(i64, i64)> {
+    let (Some(first), Some(last)) = (bars.first(), bars.last()) else { return Vec::new() };
+    schedule
+        .days(first.ts, last.ts + step - 1)
+        .into_iter()
+        .flat_map(|day| day.segments)
+        .filter(|(part, ..)| *part == Part::Regular)
+        .map(|(_, from, to)| (from, to))
+        .collect()
 }
 
 /// The runs of consecutive bars that pass `test`.
@@ -448,6 +470,24 @@ mod tests {
         assert!(session_times(&bars, Timeframe::days(1), &ranges, New_York, es()).spans.is_empty());
         let without = session_times(&bars, half_hour(), &ranges, New_York, None);
         assert_eq!(without.spans.len(), 3, "London still shades; ETH has nothing to go on");
+    }
+
+    #[test]
+    fn a_bar_that_holds_the_open_is_regular_hours() {
+        // SPY on regular hours only, folded to 4h on the clock: 08:00 holds
+        // 09:30 to 12:00 and 12:00 the rest of the session. Neither is
+        // extended, though the first starts before the open.
+        let spy = schedule_for(Some(&instrument(InstrumentKind::Equity, "SPY")));
+        let bars: Vec<Bar> = (18..=20)
+            .flat_map(|day| [8, 12].map(|hour| New_York.with_ymd_and_hms(2024, 3, day, hour, 0, 0).unwrap().timestamp()))
+            .map(|ts| Bar { ts, open: 1.0, high: 1.0, low: 1.0, close: 1.0, volume: 1.0 })
+            .collect();
+        let time = session_times(&bars, Timeframe::hours(4), &[Preset::Eth.range()], New_York, spy);
+        assert_eq!(shaded(&time), 0);
+        // Taken by its start, a bar wholly before the open is still extended.
+        let early = [Bar { ts: New_York.with_ymd_and_hms(2024, 3, 18, 4, 0, 0).unwrap().timestamp(), ..bars[0] }];
+        let time = session_times(&early, Timeframe::hours(4), &[Preset::Eth.range()], New_York, spy);
+        assert_eq!(shaded(&time), 1);
     }
 
     #[test]

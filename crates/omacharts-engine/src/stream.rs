@@ -19,7 +19,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-use crate::bars::{bucket_of, Bar, Timeframe};
+use crate::bars::{bucket_of, Bar, Grid, Timeframe};
 use crate::provider::{FetchFailure, Update};
 
 /// What a stream has delivered and nobody has drawn yet.
@@ -158,13 +158,13 @@ pub fn upsert(series: &mut Vec<Bar>, bar: Bar) -> usize {
 /// covers — the three earlier hours of a four-hour bar are not in the tick
 /// that moved its close. That is at most a bucket's worth of native bars,
 /// which is a handful.
-pub fn tail_start(native: &[Bar], from: usize, shown: Timeframe, origin: i64) -> usize {
+pub fn tail_start(native: &[Bar], from: usize, shown: Timeframe, grid: &Grid) -> usize {
     if !shown.is_derived() || from >= native.len() {
         return from;
     }
-    let bucket = bucket_of(native[from].ts, shown, origin);
+    let bucket = bucket_of(native[from].ts, shown, grid);
     let mut start = from;
-    while start > 0 && bucket_of(native[start - 1].ts, shown, origin) == bucket {
+    while start > 0 && bucket_of(native[start - 1].ts, shown, grid) == bucket {
         start -= 1;
     }
     start
@@ -334,9 +334,9 @@ mod tests {
     #[test]
     fn a_derived_tail_starts_at_the_bucket_the_changed_bar_is_in() {
         let native: Vec<Bar> = (9..=12).map(|h| bar(h * 3_600, 1.0)).collect();
-        assert_eq!(tail_start(&native, 2, Timeframe::hours(4), 0), 0);
+        assert_eq!(tail_start(&native, 2, Timeframe::hours(4), &Grid::fixed(0)), 0);
         // 12:00 is the first hour of the next bucket.
-        assert_eq!(tail_start(&native, 3, Timeframe::hours(4), 0), 3);
+        assert_eq!(tail_start(&native, 3, Timeframe::hours(4), &Grid::fixed(0)), 3);
     }
 
     /// A resolution served as itself has nothing to refold: the tail is the
@@ -344,24 +344,24 @@ mod tests {
     #[test]
     fn a_native_tail_starts_where_the_change_did() {
         let native: Vec<Bar> = (9..=12).map(|h| bar(h * 3_600, 1.0)).collect();
-        assert_eq!(tail_start(&native, 2, Timeframe::hours(1), 0), 2);
+        assert_eq!(tail_start(&native, 2, Timeframe::hours(1), &Grid::fixed(0)), 2);
     }
 
     /// The bucket is the same one the whole-series fold would use, origin
-    /// included: futures count four-hour bars from 18:00, and a tail that
+    /// included: a grid counting four-hour bars from 18:00 and a tail that
     /// counted from midnight would refold the wrong three hours.
     #[test]
     fn the_tail_honours_the_session_origin() {
         let native: Vec<Bar> = (17..=21).map(|h| bar(h * 3_600, 1.0)).collect();
-        let origin = 18 * 3_600;
+        let grid = Grid::fixed(18 * 3_600);
         // 21:00 is in the bucket that began at 18:00 — index 1, not 17:00.
-        assert_eq!(tail_start(&native, 4, Timeframe::hours(4), origin), 1);
-        assert_eq!(bucket_of(21 * 3_600, Timeframe::hours(4), origin), 18 * 3_600);
+        assert_eq!(tail_start(&native, 4, Timeframe::hours(4), &grid), 1);
+        assert_eq!(bucket_of(21 * 3_600, Timeframe::hours(4), &grid), 18 * 3_600);
     }
 
     #[test]
     fn a_tail_past_the_end_is_left_alone() {
         let native: Vec<Bar> = (9..=12).map(|h| bar(h * 3_600, 1.0)).collect();
-        assert_eq!(tail_start(&native, 7, Timeframe::hours(4), 0), 7);
+        assert_eq!(tail_start(&native, 7, Timeframe::hours(4), &Grid::fixed(0)), 7);
     }
 }

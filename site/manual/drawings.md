@@ -36,7 +36,7 @@ crop: none
 | Line | <kbd>Alt</kbd> + <kbd>L</kbd> | Press where it starts, then where it ends |
 | Horizontal line | <kbd>Alt</kbd> + <kbd>H</kbd> | A level. It stays flat however you drag it and spans the time between its two ends |
 | Arrow | <kbd>Alt</kbd> + <kbd>A</kbd> | A line with a head at the end |
-| Zig-zag | <kbd>Alt</kbd> + <kbd>Z</kbd> | Press at each corner. A double-click or <kbd>Enter</kbd> ends it on the last corner; <kbd>Esc</kbd> drops it |
+| Zig-zag | <kbd>Alt</kbd> + <kbd>Z</kbd> | Press at each corner. A second press on the last corner, a double-click or <kbd>Enter</kbd> ends it there; <kbd>Esc</kbd> drops it |
 | Rectangle | <kbd>Alt</kbd> + <kbd>R</kbd> | Press at one corner, release at the other |
 | Circle | <kbd>Alt</kbd> + <kbd>C</kbd> | Placed like a rectangle; the ellipse fills it |
 | Text | <kbd>Alt</kbd> + <kbd>T</kbd> | Click where the text goes, then type |
@@ -75,7 +75,7 @@ A finished drawing is left selected.
 | <kbd>Shift</kbd> + drag on empty chart | Adds every drawing the box touches to the selection |
 | <kbd>Ctrl</kbd> + <kbd>A</kbd> | Selects every drawing on the chart |
 | Click empty chart, <kbd>Esc</kbd> | Clears the selection |
-| Drag an end or a corner | Moves that point. With <kbd>Ctrl</kbd> held it snaps to the candle, as when placing |
+| Drag an end or a corner | Moves that point. With <kbd>Ctrl</kbd> held it snaps to the candle, as when placing. While you drag, the axes show the point's price and time in the drawing's colour |
 | Drag the body | Moves the whole drawing, and every other selected drawing with it |
 | <kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd> | Nudges the selection a pixel; ten with <kbd>Shift</kbd> |
 | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>↑</kbd> / <kbd>↓</kbd> | Brings it to the front or sends it to the back among the drawings. Every drawing sits over the candles |
@@ -252,6 +252,12 @@ capture: bin/headless-window shot /tmp/typing.png
 crop: 1780,40,560,400
 -->
 {% include figure.html src="/assets/manual/drawings/typing-a-label.png" alt="A red circle selected, with new high being typed inside it, the word high in bold and the caret after it" caption="Typing a label on a circle. The word under the caret is bold." %}
+
+## Hiding the drawings
+
+<kbd>Ctrl</kbd> + <kbd>H</kbd> hides every drawing on the focused chart, its own and those other charts send it, and pressing it again brings them back. **Drawings** in the chart menu does the same. Nothing is removed: while they are hidden, none can be selected or deleted, and **Remove all drawings** and <kbd>Ctrl</kbd> + <kbd>Z</kbd> leave them alone. Picking up a drawing tool shows them again. Hidden drawings are kept with the chart.
+
+While they are hidden, a struck-through pencil after the chart's resolution says so. Click it to show them again.
 
 ## Sharing drawings between charts
 

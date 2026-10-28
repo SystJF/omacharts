@@ -253,6 +253,11 @@ fn legacy_bar_colours(id: &str) -> Option<BarScheme> {
 /// change together.
 pub(crate) const CORNER_PAD_START: i32 = 8;
 
+/// How far down the window's corner stands its buttons: the `margin-top`
+/// and `padding-top` of `.window-corner` below, 2 + 8. The rail's + stands
+/// at the same height, beside the toggle. The two change together.
+pub(crate) const CORNER_BUTTON_TOP: i32 = 10;
+
 /// The app's CSS: libadwaita's named colours, redefined from the theme, plus
 /// the few classes we add ourselves.
 pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
@@ -437,6 +442,10 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 .legend-link.quiet.open { opacity: 0.45; }
 .chart-pane:hover .legend-gear:hover,
 .chart-pane:hover .legend-link.quiet:hover { opacity: 1; }
+/* A hidden layer's glyph, on every chart and in every state: a bare chart
+   with nothing saying why reads as one whose data never came. */
+.legend-hidden { opacity: 0.75; }
+.legend-hidden:hover { opacity: 1; }
 
 /* The maximize corner is the bargain the gear strikes: it is not there at
    all until the pointer is on the chart, which is also the only moment it
@@ -478,7 +487,8 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
    rule; see `CORNER_WIDTH`. Inside it, the two buttons touch and stand
    centred on the axis's column, more padding at the start than at the end
    because the end has the box's margin beyond it; the start is
-   `CORNER_PAD_START`, which the rail's + is placed by.
+   `CORNER_PAD_START`, which the rail's + is placed by, and its top edge is
+   `CORNER_BUTTON_TOP`.
 
    It stands a focus ring's width in from the window's edges: in a split the
    chart under it wears that ring, and a ground laid over the ring cut a
