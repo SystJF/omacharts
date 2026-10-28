@@ -1232,9 +1232,7 @@ impl State {
         {
             match placing.kind.is_path() {
                 true => placing.move_last_corner(anchor),
-                false => {
-                    placing.move_grip(Grip::To, anchor);
-                }
+                false => placing.move_grip(Grip::To, anchor)
             }
         }
     }
@@ -1456,15 +1454,45 @@ impl State {
         projected.corners.get(pinned - 1).is_some_and(|at| (at.0 - x).hypot(at.1 - y) <= omacharts_engine::drawings::GRIP_REACH)
     }
 
-    /// The pointer over grip `grip` of drawing `index`, or holding it.
-    fn grip_cursor(&self, width: f64, height: f64, index: usize, grip: Grip, held: bool) -> &'static str {
-        let (first, visible) = self.slice();
-        let Some(drawing) = self.drawings.get(index).filter(|_| visible > 0) else { return "default" };
-        let plan = layout(self, width, height);
-        let Some(scale) = price_range(self, &self.bars[first..first + visible], &plan) else {
-            return "default";
-        };
-        grip_cursor(&self.project(&plan, &scale, drawing), grip, held)
+    /// The cursor for grip `grip` of drawing `index`: which way it moves
+    /// what it is on.
+    ///
+    /// The same over a grip and while it is held, so the pointer does not
+    /// turn into an arrow halfway through resizing a box.
+    fn grip_cursor(&self, index: usize, grip: Grip, held: bool) -> &'static str {
+        let Some(drawing) = self.drawings.get(index) else { return "default" };
+        let (from, to) = (drawing.from, drawing.to);
+        match grip {
+            Grip::Top | Grip::Bottom => "ns-resize",
+            Grip::Left | Grip::Right => "ew-resize",
+            Grip::Body => match held {
+                true => "grabbing",
+                false => "grab",
+            },
+            // A box's corner, by the diagonal it sits on as drawn rather than
+            // by which anchor it is: a box drawn from the bottom up has `from`
+            // at its bottom left, and its anchors named the wrong diagonal.
+            // Later is always further right and higher always further up, so
+            // the anchors say where it sits without projecting anything.
+            Grip::From | Grip::To | Grip::FromTo | Grip::ToFrom if drawing.kind.is_bounded() => {
+                let (ts, price) = match grip {
+                    Grip::From => (from.ts, from.price),
+                    Grip::To => (to.ts, to.price),
+                    Grip::FromTo => (from.ts, to.price),
+                    _ => (to.ts, from.price),
+                };
+                let left = ts == from.ts.min(to.ts);
+                let top = price == from.price.max(to.price);
+                match left == top {
+                    true => "nwse-resize",
+                    false => "nesw-resize",
+                }
+            }
+            // A point: the ring round it says it is under the hand, and the
+            // arrow's tip shows exactly where it will land, which a hand or a
+            // cross of arrows would cover.
+            _ => "default",
+        }
     }
 
     /// The drawing under a pixel, topmost first, and which part of it.
@@ -1655,36 +1683,6 @@ type Handler<F> = Rc<RefCell<Option<Box<F>>>>;
 /// top; little enough that it is plainly the same drawing moved rather than
 /// one somewhere else.
 const PASTE_OFFSET: f64 = 16.0;
-
-/// The cursor for a grip: which way it moves what it is on.
-///
-/// The same over a grip and while it is held, so the pointer does not turn
-/// into an arrow halfway through resizing a box.
-fn grip_cursor(projected: &Projected, grip: Grip, held: bool) -> &'static str {
-    match grip {
-        Grip::Top | Grip::Bottom => "ns-resize",
-        Grip::Left | Grip::Right => "ew-resize",
-        Grip::Body => match held {
-            true => "grabbing",
-            false => "grab",
-        },
-        // A box's corner, by the diagonal it sits on as drawn rather than by
-        // which anchor it is: a box drawn from the bottom up has `from` at
-        // its bottom left, and its anchors named the wrong diagonal.
-        Grip::From | Grip::To | Grip::FromTo | Grip::ToFrom if projected.kind.is_bounded() => {
-            let Some((x, y)) = projected.grip(grip) else { return "default" };
-            let (left, top, w, h) = projected.bounds();
-            match (x < left + w / 2.0) == (y < top + h / 2.0) {
-                true => "nwse-resize",
-                false => "nesw-resize",
-            }
-        }
-        // A point: the ring round it says it is under the hand, and the
-        // arrow's tip shows exactly where it will land, which a hand or a
-        // cross of arrows would cover.
-        _ => "default",
-    }
-}
 
 /// How far the hand has to travel before a press counts as a drag.
 ///
@@ -3601,12 +3599,12 @@ impl ChartView {
                     && !over_control
                     && s.indicator_at(w, h, x, y).is_some();
                 let holding = match s.drag {
-                    Some(Drag::Grip { index, grip, .. }) => Some(s.grip_cursor(w, h, index, grip, true)),
+                    Some(Drag::Grip { index, grip, .. }) => Some(s.grip_cursor(index, grip, true)),
                     _ => None,
                 };
                 (
                     s.tool.is_some(),
-                    over.map(|(index, grip)| s.grip_cursor(w, h, index, grip, false)),
+                    over.map(|(index, grip)| s.grip_cursor(index, grip, false)),
                     indicator,
                     holding,
                 )
@@ -3817,9 +3815,7 @@ impl ChartView {
                             placing.move_last_corner(anchor);
                             placing.add_corner(anchor);
                         }
-                        false => {
-                            placing.move_grip(Grip::To, anchor);
-                        }
+                        false => placing.move_grip(Grip::To, anchor)
                     }
                 }
                 s.drag = None;
@@ -3938,7 +3934,7 @@ impl ChartView {
                         // moves is forgotten at the end.
                         s.remember();
                         s.drag = Some(Drag::Grip { index, grip, origin });
-                        area.set_cursor_from_name(Some(s.grip_cursor(width, height, index, grip, true)));
+                        area.set_cursor_from_name(Some(s.grip_cursor(index, grip, true)));
                     }
                     drop(s);
                     area.queue_draw();
@@ -4013,9 +4009,7 @@ impl ChartView {
                     {
                         match placing.kind.is_path() {
                             true => placing.move_last_corner(anchor),
-                            false => {
-                                placing.move_grip(Grip::To, anchor);
-                            }
+                            false => placing.move_grip(Grip::To, anchor)
                         }
                     }
                     if !moved && offset_x.hypot(offset_y) > drag_threshold() {
@@ -4101,7 +4095,7 @@ impl ChartView {
                             };
                             // An edge pulled past its opposite is that side
                             // from here on.
-                            let held = drawing.move_grip(grip, now);
+                            let held = drawing.drag_grip(grip, now);
                             let moved = vec![drawing.clone()];
                             s.drag = Some(Drag::Grip { index, grip: held, origin });
                             moved
@@ -4206,8 +4200,7 @@ impl ChartView {
                         // no longer as held.
                         s.hover_grip = (grip != Grip::Body).then_some((index, grip));
                         if let Some(view) = view.upgrade() {
-                            let (w, h) = (view.area.width() as f64, view.area.height() as f64);
-                            view.area.set_cursor_from_name(Some(s.grip_cursor(w, h, index, grip, false)));
+                            view.area.set_cursor_from_name(Some(s.grip_cursor(index, grip, false)));
                         }
                         let before = s.undo.last().cloned().unwrap_or_default();
                         let moved: Vec<Drawing> = s

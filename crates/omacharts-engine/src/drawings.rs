@@ -1600,8 +1600,7 @@ impl Drawing {
         }
     }
 
-    /// Put the grip where the hand is, and say which grip the hand holds
-    /// now.
+    /// Move the grip in hand, and say which grip the hand holds now.
     ///
     /// An edge pulled past the one facing it becomes that side: hold a box's
     /// left edge, drag it right past the right edge, and the hand now holds
@@ -1611,8 +1610,8 @@ impl Drawing {
     /// along instead of growing. A box one column wide could not be widened
     /// rightward at all, since both its side grips sit on one spot and the
     /// left one is found first.
-    pub fn move_grip(&mut self, grip: Grip, at: Anchor) -> Grip {
-        self.put_grip(grip, at);
+    pub fn drag_grip(&mut self, grip: Grip, at: Anchor) -> Grip {
+        self.move_grip(grip, at);
         let (earlier, later) = (self.from.ts.min(self.to.ts), self.from.ts.max(self.to.ts));
         let (lower, higher) = (self.from.price.min(self.to.price), self.from.price.max(self.to.price));
         match grip {
@@ -1624,7 +1623,8 @@ impl Drawing {
         }
     }
 
-    fn put_grip(&mut self, grip: Grip, at: Anchor) {
+    /// Put the grip where the hand is.
+    pub fn move_grip(&mut self, grip: Grip, at: Anchor) {
         // A text drawing is one point wearing two anchors, so whichever is
         // moved both go: nothing reads the second, and letting them drift
         // apart would leave a drawing whose box depends on which grip was
@@ -3232,7 +3232,7 @@ mod edge_grip_tests {
         let mut thin = Drawing::new(Kind::Rect, Anchor::new(10, 100.0), Anchor::new(10, 80.0));
         let mut grip = Grip::Left;
         for ts in [12, 15, 20] {
-            grip = thin.move_grip(grip, Anchor::new(ts, 999.0));
+            grip = thin.drag_grip(grip, Anchor::new(ts, 999.0));
         }
         assert_eq!(grip, Grip::Right);
         let (left, right) = (thin.from.ts.min(thin.to.ts), thin.from.ts.max(thin.to.ts));
@@ -3242,7 +3242,7 @@ mod edge_grip_tests {
         let mut drawing = boxed();
         let mut grip = Grip::Top;
         for price in [90.0, 70.0, 50.0] {
-            grip = drawing.move_grip(grip, Anchor::new(999, price));
+            grip = drawing.drag_grip(grip, Anchor::new(999, price));
         }
         assert_eq!(grip, Grip::Bottom);
         let mut prices = [drawing.from.price, drawing.to.price];
