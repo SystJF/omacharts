@@ -1,9 +1,13 @@
 //! Bars, timeframes, and turning one timeframe into another.
 
+use std::cell::Cell;
+
 use chrono::{Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::symbols::InstrumentKind;
+use crate::exchanges::{registry, Schedule};
+use crate::session::Session;
+use crate::symbols::{Instrument, InstrumentKind};
 
 /// One candle. `ts` is the unix second the bar opens at.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -591,19 +595,84 @@ pub fn drawable_from(native: &[Bar], start: usize, timeframe: Timeframe, kind: I
     bars
 }
 
-/// Fold `src` into `target`.
+/// The lines a chart's bars are cut along when they are folded to a coarser
+/// resolution within the day: where a 4h or a 45m bar begins.
 ///
-/// `origin` shifts the bucket boundaries, in seconds. Futures sessions open at
-/// 18:00 ET, so 4h bars bucketed from midnight disagree with every other tool
-/// on the planet; passing the session offset here is what makes them line up.
+/// A market whose hours are known counts each trading day afresh, from where
+/// its bars start on the exchange's own clock: the regular open on a chart of
+/// regular hours, so SPY's 4h bars are 09:30 and 13:30 in New York, and the
+/// start of the trading day otherwise, 04:00 there and 17:00 in Chicago for
+/// Globex. That is where every other charting tool puts them, and it follows
+/// the exchange through daylight saving, which no fixed offset from UTC can.
+/// A day's last bar runs short when the session ends inside it.
+///
+/// Anything else, a market that never shuts or a venue nothing here knows,
+/// counts from midnight UTC, moved by the instrument's `session_origin`.
+#[derive(Clone, Debug)]
+pub struct Grid {
+    origin: i64,
+    hours: Option<(Schedule<'static>, bool)>,
+    /// The last trading day asked about: where it starts, where the next one
+    /// does, and where its bars start. Bars are folded in order, so a bar is
+    /// usually a comparison against this and the time zone is only read when
+    /// the day changes; read for every bar, it made a fold six times slower.
+    day: Cell<Option<(i64, i64, i64)>>,
+}
+
+impl Grid {
+    /// The grid `instrument`'s bars fold along on a chart keeping `session`.
+    pub fn new(instrument: &Instrument, session: Session) -> Grid {
+        // FX and crypto trade all day: midnight is as good a line as any,
+        // and the one they have always been cut along.
+        let hours = match instrument.kind {
+            InstrumentKind::Fx | InstrumentKind::Crypto => None,
+            _ => registry().for_instrument(instrument),
+        };
+        Grid {
+            origin: instrument.session_origin,
+            hours: hours.map(|schedule| (schedule, session == Session::Regular && schedule.has_regular())),
+            day: Cell::new(None),
+        }
+    }
+
+    /// Midnight UTC moved by `origin` seconds, every day alike.
+    #[cfg(test)]
+    pub fn fixed(origin: i64) -> Grid {
+        Grid { origin, hours: None, day: Cell::new(None) }
+    }
+
+    /// Where the steps of the day `ts` falls in count from.
+    ///
+    /// A bar before its day's bars start, which a filtered chart should never
+    /// hold, is counted from the start of the trading day instead: it keeps a
+    /// step of its own ahead of the day's first, and can never land behind
+    /// the day before.
+    fn counts_from(&self, ts: i64) -> i64 {
+        let Some((schedule, regular)) = self.hours else { return self.origin };
+        let (start, _, bars) = match self.day.get() {
+            Some(day @ (start, end, _)) if (start..end).contains(&ts) => day,
+            _ => {
+                let Some(date) = schedule.trading_date(ts) else { return self.origin };
+                let end = date.succ_opt().map_or(i64::MAX, |next| schedule.day_start(next));
+                let day = (schedule.day_start(date), end, schedule.bars_start(date, regular));
+                self.day.set(Some(day));
+                day
+            }
+        };
+        if ts >= bars { bars } else { start }
+    }
+}
+
+/// Fold `src` into `target`, cutting intraday bars along `grid`.
 ///
 /// Weekly folds to ISO weeks (Monday), monthly and yearly to calendar months
-/// and years in UTC, and all three ignore `origin`.
-pub fn resample(src: &[Bar], target: Timeframe, origin: i64) -> Vec<Bar> {
+/// and years in UTC, and all three ignore the grid. Days count from the
+/// grid's fixed origin.
+pub fn resample(src: &[Bar], target: Timeframe, grid: &Grid) -> Vec<Bar> {
     if src.is_empty() {
         return Vec::new();
     }
-    fold(src, move |ts| bucket_of(*ts, target, origin))
+    fold(src, move |ts| bucket_of(*ts, target, grid))
 }
 
 /// The bucket a bar at `ts` folds into when the chart shows `target`: the
@@ -613,7 +682,7 @@ pub fn resample(src: &[Bar], target: Timeframe, origin: i64) -> Vec<Bar> {
 /// native bar belongs to, and asking the same function the whole-series fold
 /// asks is the only way the two can agree about where a four-hour bar
 /// begins.
-pub fn bucket_of(ts: i64, target: Timeframe, origin: i64) -> i64 {
+pub fn bucket_of(ts: i64, target: Timeframe, grid: &Grid) -> i64 {
     if matches!(target.unit, Unit::Month | Unit::Year) {
         return calendar_start(ts, target);
     }
@@ -627,6 +696,10 @@ pub fn bucket_of(ts: i64, target: Timeframe, origin: i64) -> i64 {
             + FIRST_MONDAY;
     }
     let step = target.seconds();
+    let origin = match target.is_intraday() {
+        true => grid.counts_from(ts),
+        false => grid.origin,
+    };
     (ts - origin).div_euclid(step) * step + origin
 }
 
@@ -894,7 +967,7 @@ mod tests {
         let src: Vec<Bar> = (0..8)
             .map(|i| bar(i * 3600, 10.0 + i as f64, 12.0 + i as f64, 9.0 + i as f64, 11.0 + i as f64, 1.0))
             .collect();
-        let out = resample(&src, Timeframe::hours(4), 0);
+        let out = resample(&src, Timeframe::hours(4), &Grid::fixed(0));
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].open, 10.0);
         assert_eq!(out[0].close, 14.0);
@@ -908,8 +981,8 @@ mod tests {
         // Two hourly bars either side of a boundary that only exists when the
         // session origin is applied.
         let src = vec![bar(0, 1.0, 1.0, 1.0, 1.0, 1.0), bar(3600, 2.0, 2.0, 2.0, 2.0, 1.0)];
-        assert_eq!(resample(&src, Timeframe::hours(4), 0).len(), 1);
-        assert_eq!(resample(&src, Timeframe::hours(4), 3600).len(), 2);
+        assert_eq!(resample(&src, Timeframe::hours(4), &Grid::fixed(0)).len(), 1);
+        assert_eq!(resample(&src, Timeframe::hours(4), &Grid::fixed(3600)).len(), 2);
     }
 
     #[test]
@@ -962,15 +1035,15 @@ mod tests {
         let february = 1_706_745_600; // 2024-02-01
         let march = 1_709_251_200; // 2024-03-01
         let january = 1_704_067_200; // 2024-01-01
-        assert_eq!(bucket_of(leap_day, Timeframe::months(1), 0), february);
-        assert_eq!(bucket_of(march, Timeframe::months(1), 0), march);
-        assert_eq!(bucket_of(march - 1, Timeframe::months(1), 0), february);
+        assert_eq!(bucket_of(leap_day, Timeframe::months(1), &Grid::fixed(0)), february);
+        assert_eq!(bucket_of(march, Timeframe::months(1), &Grid::fixed(0)), march);
+        assert_eq!(bucket_of(march - 1, Timeframe::months(1), &Grid::fixed(0)), february);
         // Quarters and years count from January, whatever the origin.
-        assert_eq!(bucket_of(leap_day, Timeframe::months(3), 3_600), january);
-        assert_eq!(bucket_of(leap_day, Timeframe::years(1), 0), january);
-        assert_eq!(bucket_of(leap_day, Timeframe::years(5), 0), 1_577_836_800); // 2020-01-01
+        assert_eq!(bucket_of(leap_day, Timeframe::months(3), &Grid::fixed(3_600)), january);
+        assert_eq!(bucket_of(leap_day, Timeframe::years(1), &Grid::fixed(0)), january);
+        assert_eq!(bucket_of(leap_day, Timeframe::years(5), &Grid::fixed(0)), 1_577_836_800); // 2020-01-01
         // Before the epoch too.
-        assert_eq!(bucket_of(-1, Timeframe::years(1), 0), -31_536_000); // 1969-01-01
+        assert_eq!(bucket_of(-1, Timeframe::years(1), &Grid::fixed(0)), -31_536_000); // 1969-01-01
     }
 
     /// Past the last bar, the columns of a monthly chart are the firsts of
@@ -993,7 +1066,7 @@ mod tests {
         let src: Vec<Bar> = (0..60)
             .map(|i| bar(january + i * day, i as f64, i as f64 + 1.0, i as f64 - 1.0, i as f64, 1.0))
             .collect();
-        let out = resample(&src, Timeframe::months(1), 0);
+        let out = resample(&src, Timeframe::months(1), &Grid::fixed(0));
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].ts, january);
         assert_eq!(out[0].open, 0.0);
@@ -1221,6 +1294,225 @@ mod tests {
 
     #[test]
     fn empty_in_empty_out() {
-        assert!(resample(&[], Timeframe::hours(4), 0).is_empty());
+        assert!(resample(&[], Timeframe::hours(4), &Grid::fixed(0)).is_empty());
+    }
+
+    /// A listing of `kind`, from JSON, so a field added to an instrument
+    /// needs nothing here.
+    fn listing(kind: &str, symbol: &str, suffix: Option<&str>, session_origin: i64) -> Instrument {
+        serde_json::from_value(serde_json::json!({
+            "symbol": symbol, "name": symbol, "kind": kind, "suffix": suffix, "tier": 0,
+            "session_origin": session_origin, "overrides": [], "popularity": 0, "formula": null,
+        }))
+        .expect("an instrument")
+    }
+
+    fn spy() -> Instrument {
+        listing("etf", "SPY", None, 0)
+    }
+
+    fn es() -> Instrument {
+        // The fixed origin it carried before it had hours: 18:00 New York in
+        // summer, which a fold that still read it would show in winter.
+        listing("future_root", "ES", None, 79_200)
+    }
+
+    fn at(zone: chrono_tz::Tz, (y, m, d): (i32, u32, u32), (h, min): (u32, u32)) -> i64 {
+        zone.with_ymd_and_hms(y, m, d, h, min, 0).single().expect("a moment").timestamp()
+    }
+
+    /// Where each bar of `bars` opens, as a wall clock in `zone`.
+    fn clocks(bars: &[Bar], zone: chrono_tz::Tz) -> Vec<String> {
+        bars.iter()
+            .map(|bar| zone.timestamp_opt(bar.ts, 0).single().expect("a moment").format("%m-%d %H:%M").to_string())
+            .collect()
+    }
+
+    fn flat(ts: i64) -> Bar {
+        bar(ts, 1.0, 1.0, 1.0, 1.0, 1.0)
+    }
+
+    /// Yahoo's hourly bars for a US listing on regular hours: 09:30 to 15:30.
+    fn regular_hours(days: &[(i32, u32, u32)]) -> Vec<Bar> {
+        let ny = chrono_tz::America::New_York;
+        days.iter().flat_map(|day| (9..=15).map(move |h| flat(at(ny, *day, (h, 30))))).collect()
+    }
+
+    /// SPY's 4h bars on regular hours open at 09:30 and 13:30 in New York,
+    /// summer and winter alike, and the day's second one runs short: three
+    /// hours to the close.
+    #[test]
+    fn regular_hours_fold_from_the_open() {
+        let ny = chrono_tz::America::New_York;
+        let grid = Grid::new(&spy(), Session::Regular);
+        for (summer, winter) in [((2024, 7, 15), (2024, 1, 16)), ((2024, 7, 16), (2024, 1, 17))] {
+            for day in [summer, winter] {
+                let out = resample(&regular_hours(&[day]), Timeframe::hours(4), &grid);
+                assert_eq!(out.iter().map(|b| b.ts).collect::<Vec<_>>(), [at(ny, day, (9, 30)), at(ny, day, (13, 30))]);
+                assert_eq!(out.iter().map(|b| b.volume).collect::<Vec<_>>(), [4.0, 3.0]);
+            }
+        }
+        // A week in one fold: each day starts again at its own open.
+        let week: Vec<(i32, u32, u32)> = (15..=19).map(|d| (2024, 7, d)).collect();
+        let out = resample(&regular_hours(&week), Timeframe::hours(4), &grid);
+        assert_eq!(out.len(), 10);
+        assert!(clocks(&out, ny).iter().all(|c| c.ends_with("09:30") || c.ends_with("13:30")), "{:?}", clocks(&out, ny));
+    }
+
+    /// On extended hours the day counts from the start of the pre-market:
+    /// 04:00, 08:00, 12:00 and 16:00, on both sides of daylight saving.
+    #[test]
+    fn extended_hours_fold_from_the_pre_market() {
+        let ny = chrono_tz::America::New_York;
+        let grid = Grid::new(&spy(), Session::Extended);
+        for day in [(2024, 7, 15), (2024, 1, 16)] {
+            let src: Vec<Bar> = (8..40).map(|half| flat(at(ny, day, (half / 2, half % 2 * 30)))).collect();
+            let out = resample(&src, Timeframe::hours(4), &grid);
+            let hours: Vec<i64> = [4, 8, 12, 16].map(|h| at(ny, day, (h, 0))).to_vec();
+            assert_eq!(out.iter().map(|b| b.ts).collect::<Vec<_>>(), hours);
+        }
+    }
+
+    /// Globex's day starts at 17:00 in Chicago, and so does its first 4h
+    /// bar, either side of the change to summer time on 2024-03-10. The
+    /// fixed 22:00 UTC the inventory carried for it was 16:00 in Chicago in
+    /// winter.
+    #[test]
+    fn futures_fold_from_the_globex_day_across_daylight_saving() {
+        let chicago = chrono_tz::America::Chicago;
+        let schedule = registry().for_instrument(&es()).expect("CME hours");
+        let first = at(chicago, (2024, 3, 6), (17, 0));
+        let src: Vec<Bar> = (0..24 * 7)
+            .map(|h| first + h * 3_600)
+            .filter(|ts| schedule.is_open(*ts))
+            .map(flat)
+            .collect();
+        let out = resample(&src, Timeframe::hours(4), &Grid::new(&es(), Session::Extended));
+        let clocks = clocks(&out, chicago);
+        assert!(
+            clocks.iter().all(|c| ["17:00", "21:00", "01:00", "05:00", "09:00", "13:00"].iter().any(|h| c.ends_with(h))),
+            "{clocks:?}"
+        );
+        assert!(clocks.contains(&"03-06 17:00".to_string()), "winter: {clocks:?}");
+        assert!(clocks.contains(&"03-10 17:00".to_string()), "summer: {clocks:?}");
+        // On regular hours, from the cash open at 08:30.
+        let regular: Vec<Bar> = src.iter().copied().filter(|b| schedule.is_regular(b.ts)).collect();
+        let out = resample(&regular, Timeframe::hours(4), &Grid::new(&es(), Session::Regular));
+        let clocks = self::clocks(&out, chicago);
+        assert!(clocks.iter().all(|c| c.ends_with("08:30") || c.ends_with("12:30")), "{clocks:?}");
+    }
+
+    /// Taipei's half hour before the open is an auction that prints no
+    /// bars, so extended hours count from the 09:00 open as regular hours
+    /// do, where the inventory's fixed origin already had them.
+    #[test]
+    fn an_opening_auction_is_not_where_the_day_starts() {
+        let taipei = chrono_tz::Asia::Taipei;
+        let tsmc = listing("equity", "2330", Some("TW"), 3_600);
+        let src: Vec<Bar> = (9..=13).map(|h| flat(at(taipei, (2024, 7, 15), (h, 0)))).collect();
+        for session in [Session::Extended, Session::Regular] {
+            let out = resample(&src, Timeframe::hours(4), &Grid::new(&tsmc, session));
+            assert_eq!(clocks(&out, taipei), ["07-15 09:00", "07-15 13:00"]);
+            assert_eq!(out, resample(&src, Timeframe::hours(4), &Grid::fixed(3_600)));
+        }
+    }
+
+    /// A market that never shuts, and a venue nothing here knows, fold the
+    /// way they always have: from midnight UTC, moved by the session origin.
+    #[test]
+    fn markets_without_hours_keep_the_fixed_origin() {
+        let anywhere = listing("equity", "XYZ", Some("ZZ"), 3_600);
+        assert!(registry().for_instrument(&anywhere).is_none());
+        let cases = [
+            (listing("crypto", "BTC", None, 0), 0),
+            (listing("fx", "EURUSD", None, 0), 0),
+            (anywhere, 3_600),
+        ];
+        let src: Vec<Bar> = (0..200).map(|i| flat(1_720_000_000 + i * 1_800)).collect();
+        for (instrument, origin) in cases {
+            for session in [Session::Extended, Session::Regular] {
+                for target in [Timeframe::hours(4), Timeframe::hours(3), Timeframe::minutes(45)] {
+                    let grid = Grid::new(&instrument, session);
+                    assert_eq!(resample(&src, target, &grid), resample(&src, target, &Grid::fixed(origin)));
+                    let step = target.seconds();
+                    for bar in &src {
+                        let before = (bar.ts - origin).div_euclid(step) * step + origin;
+                        assert_eq!(bucket_of(bar.ts, target, &grid), before, "{}", instrument.symbol);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Weeks, months, years and days are not cut by the hour, so a market's
+    /// hours change nothing about them.
+    #[test]
+    fn longer_resolutions_ignore_the_hours() {
+        let grid = Grid::new(&spy(), Session::Regular);
+        for ts in [1_720_000_000, 1_705_400_000, 1_709_208_000] {
+            for target in [Timeframe::days(2), Timeframe::weeks(1), Timeframe::months(1), Timeframe::years(1)] {
+                assert_eq!(bucket_of(ts, target, &grid), bucket_of(ts, target, &Grid::fixed(0)));
+            }
+        }
+    }
+
+    /// Steps under an hour count from the open too. Those that divide the
+    /// half hour land where they always did; those that do not now start
+    /// with the session, as 45m bars at 09:30 and 10:15.
+    #[test]
+    fn steps_within_the_hour_count_from_the_open() {
+        let ny = chrono_tz::America::New_York;
+        let day = (2024, 1, 16);
+        let src: Vec<Bar> = (0..26).map(|q| flat(at(ny, day, (9, 30)) + q * 900)).collect();
+        let grid = Grid::new(&spy(), Session::Regular);
+        for minutes in [30, 10, 5] {
+            let target = Timeframe::minutes(minutes);
+            assert_eq!(resample(&src, target, &grid), resample(&src, target, &Grid::fixed(0)), "{minutes}m");
+        }
+        let out = resample(&src, Timeframe::minutes(45), &grid);
+        assert_eq!(clocks(&out[..3], ny), ["01-16 09:30", "01-16 10:15", "01-16 11:00"]);
+        let out = resample(&regular_hours(&[day]), Timeframe::hours(2), &grid);
+        assert_eq!(clocks(&out, ny), ["01-16 09:30", "01-16 11:30", "01-16 13:30", "01-16 15:30"]);
+    }
+
+    /// A bar before its day's bars start, which a chart of regular hours
+    /// should never hold, is counted from the start of the trading day: a
+    /// bucket of its own, after the day before and ahead of the open.
+    #[test]
+    fn a_bar_before_the_open_keeps_its_place() {
+        let ny = chrono_tz::America::New_York;
+        let src = vec![
+            flat(at(ny, (2024, 7, 15), (15, 30))),
+            flat(at(ny, (2024, 7, 16), (8, 0))),
+            flat(at(ny, (2024, 7, 16), (9, 0))),
+            flat(at(ny, (2024, 7, 16), (9, 30))),
+        ];
+        let out = resample(&src, Timeframe::hours(4), &Grid::new(&spy(), Session::Regular));
+        assert_eq!(clocks(&out, ny), ["07-15 13:30", "07-16 08:00", "07-16 09:30"]);
+        assert_eq!(out[1].volume, 2.0);
+    }
+
+    /// A live tick refolds from the bucket it landed in, and what that gives
+    /// has to be the tail of folding the whole series again, wherever the
+    /// tick lands: on regular hours across days, and on Globex across the
+    /// change to summer time.
+    #[test]
+    fn a_live_tail_folds_as_the_whole_series_does() {
+        let days: Vec<(i32, u32, u32)> = (11..=15).map(|d| (2024, 3, d)).collect();
+        let cme = registry().for_instrument(&es()).expect("CME hours");
+        let first = at(chrono_tz::America::Chicago, (2024, 3, 7), (17, 0));
+        let globex: Vec<Bar> = (0..24 * 6).map(|h| first + h * 3_600).filter(|ts| cme.is_open(*ts)).map(flat).collect();
+        let cases = [(spy(), Session::Regular, regular_hours(&days)), (es(), Session::Extended, globex)];
+        for (instrument, session, native) in cases {
+            for target in [Timeframe::hours(4), Timeframe::hours(3), Timeframe::hours(2)] {
+                let whole = resample(&native, target, &Grid::new(&instrument, session));
+                for from in 0..native.len() {
+                    let grid = Grid::new(&instrument, session);
+                    let start = crate::stream::tail_start(&native, from, target, &grid);
+                    let tail = resample(&native[start..], target, &grid);
+                    assert_eq!(tail[..], whole[whole.len() - tail.len()..], "{} {target:?} from {from}", instrument.symbol);
+                }
+            }
+        }
     }
 }

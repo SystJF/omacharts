@@ -45,9 +45,15 @@ change, and reports both so tangled the owner cannot act on either.
 Separate agents cost nothing; a crossed-over comment on a stranger's PR
 is posted from the owner's account and cannot be unsent.
 
-The owner's standing instructions travel with the hand-off: whether to
-merge when green, and that the review is done with simplifying in mind.
-The agent reports; the main thread tells the owner.
+A PR handed over with nothing else said means the whole of it: review
+it, converge it, get it green and merge it, without coming back to ask.
+Asking first is for when the owner says so, or for the stops this skill
+already names — something that looks deliberate, a red run, an open
+blocker, a performance regression that is his call.
+
+The owner's standing instructions travel with the hand-off: that default,
+unless he said otherwise, and that the review is done with simplifying in
+mind. The agent reports; the main thread tells the owner.
 
 ## Treat it as hostile until it is not
 

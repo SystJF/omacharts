@@ -34,7 +34,7 @@ impl State {
     /// cheap is asked first: whether there is anything to pick, and whether
     /// the pointer is on the plot at all, before the frame is worked out.
     pub(super) fn indicator_at(&self, width: f64, height: f64, x: f64, y: f64) -> Option<u32> {
-        if !self.indicators.iter().any(|d| d.indicator.visible && d.indicator.kind.selectable()) {
+        if !self.shown_indicators().any(|d| d.indicator.kind.selectable()) {
             return None;
         }
         let plan = layout(self, width, height);
@@ -49,12 +49,7 @@ impl State {
         if x < frame.plan.plot_x || x > frame.plan.plot_x + frame.plan.plot_w {
             return None;
         }
-        let pickable = || {
-            self.indicators
-                .iter()
-                .rev()
-                .filter(|d| d.indicator.visible && d.indicator.kind.selectable())
-        };
+        let pickable = || self.shown_indicators().rev().filter(|d| d.indicator.kind.selectable());
         match row.pane {
             None => {
                 let to_y = |price: f64| frame.scale.to_y(price, frame.plan.price_y, frame.plan.price_h);

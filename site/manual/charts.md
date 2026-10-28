@@ -37,6 +37,8 @@ A resolution is the length of one bar, typed as a number and a unit.
 
 Longer spellings (`min`, `hr`, `day`, `wk`, `month`, `year`) work too. A resolution is shown in its largest exact unit, so `60m` becomes `1h` and `7D` becomes `1W`. Monthly and yearly bars follow calendar months and years, so `3M` is calendar quarters.
 
+Intraday bars start with the trading day, in the exchange's own clock. On a chart of [regular hours](#sessions) they count from the open, so SPY's 4h bars start at 09:30 and 13:30 New York time, and the second one ends early at the 16:00 close. On extended hours they count from the start of the day's trading: 04:00, 08:00, 12:00 and 16:00 for SPY, and 17:00 Chicago time for ES. The times stay put when the clocks change for summer. FX and crypto count from midnight UTC.
+
 ### Choosing a resolution
 
 The resolution strip is the row of resolution buttons across the top of the focused chart.
@@ -150,9 +152,11 @@ crop: none (resized to 2000 wide)
 
 ### Hiding the bars
 
-<kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>B</kbd> hides the focused chart's bars, and pressing it again shows them in the style they had. Choosing **None** does the same. Hiding the bars leaves their style as it was, so they come back as candles or OHLC bars, whichever the chart had. Choosing a style shows them again.
+<kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>H</kbd> hides the focused chart's bars, and pressing it again shows them in the style they had. Choosing **None** does the same. Hiding the bars leaves their style as it was, so they come back as candles or OHLC bars, whichever the chart had. Choosing a style shows them again.
 
 Only the bars go. The price scale still fits them, and the indicators, drawings, last price and crosshair stay. Hidden bars are kept with the chart, and a chart made by splitting it starts with its bars hidden too.
+
+While they are hidden, a struck-through candle after the chart's resolution says so. Click it to show them again.
 
 Set them per chart from the chart menu's **Bar style** submenu or the **Style** and **Colouring** rows of Chart settings. To change every chart at once, use **Apply to all charts now** in Preferences ([Chart settings](/manual/chart-settings/#defaults-for-new-charts)).
 
@@ -331,6 +335,8 @@ crop: 70,290,1580,900
 | **Template** › **None**, then each chart template | Puts the chart on a template, with its key | [Chart templates](/manual/chart-templates/) |
 | **Template** › **Create new template from chart…** | Saves the chart's indicators as a new template and puts the chart on it. Greyed out on a chart with no indicators | [Chart templates](/manual/chart-templates/#creating-a-template) |
 | **Gridlines** | Ticked while the chart has them | [Gridlines](#gridlines) |
+| **Indicators** | Ticked while the chart shows its indicators, with its key | [Hiding every indicator](/manual/indicators/#hiding-every-indicator) |
+| **Drawings** | Ticked while the chart shows its drawings, with its key | [Hiding the drawings](/manual/drawings/#hiding-the-drawings) |
 | **Split horizontally**, **Split vertically** | Divides the chart in two | [Splitting and arranging charts](/manual/layouts/) |
 | **Maximize** / **Restore** | Gives the chart the window, or puts it back. Only with two charts or more | [Splitting and arranging charts](/manual/layouts/#maximising-a-chart) |
 | **Close chart** | Closes it. Only with two charts or more | [Splitting and arranging charts](/manual/layouts/#closing-a-chart) |

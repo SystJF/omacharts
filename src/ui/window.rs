@@ -20,7 +20,7 @@ use gtk::glib;
 use omacharts_engine::providers;
 use omacharts_engine::refresh;
 use omacharts_engine::{
-    resample, BarColouring, BarStyle, Delivery, FetchFailure, Indicator, Instrument, Provider, SearchIndex,
+    resample, BarColouring, BarStyle, Delivery, FetchFailure, Grid, Indicator, Instrument, Provider, SearchIndex,
     Session,
     Timeframe,
 };
@@ -32,7 +32,7 @@ use crate::store::{Store, DEFAULT_WATCHLIST};
 use crate::chart_defaults::ChartDefaults;
 use crate::theming::Theming;
 use crate::ui::chart::{Drawn, Echo};
-use crate::ui::pane::{self, ChartPane, Node};
+use crate::ui::pane::{self, ChartPane, Hideable, Node};
 use crate::ui::drop_line;
 use crate::ui::screenshot;
 use omacharts_engine::link;
@@ -206,7 +206,9 @@ const SHORTCUT_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("End", "Jump to the latest bar"),
             ("Ctrl+Esc", "Reset the view"),
             ("Ctrl+Shift+G", "Show or hide the gridlines"),
-            ("Ctrl+Shift+B", "Hide the bars, or show them as they were"),
+            ("Ctrl+H", "Show or hide the drawings"),
+            ("Ctrl+Shift+H", "Show or hide the indicators"),
+            ("Ctrl+Alt+Shift+H", "Hide the bars, or show them as they were"),
             ("Ctrl+Alt+Shift+1 … 9", "Chart template N, in the order they are listed"),
             ("Ctrl+Alt+Shift+0", "No chart template"),
             ("Ctrl+Alt+Shift+PgUp PgDn", "Previous or next chart template"),
@@ -605,6 +607,8 @@ mod tests {
                 drawings: Vec::new(),
                 auto_scale: false,
                 log_scale: true,
+                indicators_shown: true,
+                drawings_shown: true,
             }],
             watchlist: Some(4),
             sidebar_shown: Some(false),
@@ -679,6 +683,8 @@ mod tests {
             drawings: Vec::new(),
             auto_scale: true,
             log_scale: false,
+            indicators_shown: true,
+            drawings_shown: true,
         }
     }
 
@@ -1469,6 +1475,16 @@ struct StoredPane {
     /// before it could be, and every one of those was linear.
     #[serde(default)]
     log_scale: bool,
+    /// Whether the chart draws its indicators, or hides them all for a look
+    /// at the bars. Missing from a chart written before they could all be
+    /// hidden at once, and every one of those drew them.
+    #[serde(default = "yes")]
+    indicators_shown: bool,
+    /// Whether the chart draws its drawings, its own and the shared, or
+    /// hides them all. Missing from a chart written before they could be
+    /// hidden, and every one of those drew them.
+    #[serde(default = "yes")]
+    drawings_shown: bool,
     /// Whether the chart shows what other charts of its symbol draw, and
     /// whether it sends them what is drawn here. Both on by default, which
     /// is what a book written before either existed gets — and what the
@@ -1859,6 +1875,8 @@ pub struct Window {
     bars_action: RefCell<Option<gio::SimpleAction>>,
     /// The indicator the open indicator menu is about.
     menu_indicator: RefCell<Option<u32>>,
+    indicators_action: RefCell<Option<gio::SimpleAction>>,
+    drawings_action: RefCell<Option<gio::SimpleAction>>,
     auto_scale_action: RefCell<Option<gio::SimpleAction>>,
     log_scale_action: RefCell<Option<gio::SimpleAction>>,
     drawing_config_action: RefCell<Option<gio::SimpleAction>>,
@@ -2037,6 +2055,8 @@ impl Window {
             grid_action: RefCell::new(None),
             bars_action: RefCell::new(None),
             menu_indicator: RefCell::new(None),
+            indicators_action: RefCell::new(None),
+            drawings_action: RefCell::new(None),
             auto_scale_action: RefCell::new(None),
             log_scale_action: RefCell::new(None),
             drawing_config_action: RefCell::new(None),
@@ -2295,6 +2315,20 @@ impl Window {
             opener.open_chart_settings();
         });
 
+        // A hidden thing's glyph means that chart's: the focus moves there
+        // first, the way the gear's does, and then it is shown.
+        for (what, button) in &pane.hidden_glyphs {
+            let (shower, what) = (self.clone(), *what);
+            button.connect_clicked(move |_| {
+                shower.focus(id);
+                match what {
+                    Hideable::Drawings => shower.set_drawings_shown(true),
+                    Hideable::Indicators => shower.set_show_indicators(true),
+                    Hideable::Bars => shower.set_bars_hidden(false),
+                }
+            });
+        }
+
         // Clicking another chart's corner means that chart: the focus moves
         // there first, and then it grows.
         let expander = self.clone();
@@ -2399,6 +2433,16 @@ impl Window {
         pane.view.set_tool_handler(move || {
             if shower.focused.get() == id {
                 shower.sync_drawing_bar();
+                // A tool picked up on a chart with its drawings hidden shows
+                // them again, and that is stored like the key would store it.
+                // The menu's tick still says hidden until it is told.
+                let ticked = shower.drawings_action.borrow().as_ref().and_then(|a| a.state());
+                let was_hidden = ticked.and_then(|v| v.get::<bool>()) == Some(false);
+                if was_hidden && shower.drawings_shown() {
+                    let pane = shower.focused_pane();
+                    shower.sync_chart_actions(&pane);
+                    shower.save_soon();
+                }
             }
         });
 
@@ -2588,6 +2632,12 @@ impl Window {
         if let Some(action) = self.grid_action.borrow().as_ref() {
             action.set_state(&pane.show_grid.get().to_variant());
         }
+        if let Some(action) = self.indicators_action.borrow().as_ref() {
+            action.set_state(&pane.view.show_indicators().to_variant());
+        }
+        if let Some(action) = self.drawings_action.borrow().as_ref() {
+            action.set_state(&pane.view.show_drawings().to_variant());
+        }
         if let Some(action) = self.auto_scale_action.borrow().as_ref() {
             action.set_state(&pane.view.price_auto().to_variant());
         }
@@ -2648,6 +2698,8 @@ impl Window {
         added.view.set_price_log(from.view.price_log());
         added.bars_hidden.set(from.bars_hidden.get());
         added.view.set_bars_hidden(from.bars_hidden.get());
+        added.view.set_show_indicators(from.view.show_indicators());
+        added.view.set_show_drawings(from.view.show_drawings());
         let next = self.layout.borrow().split(from.id, added.id, horizontal);
         *self.layout.borrow_mut() = next;
         self.rebuild_layout();
@@ -3285,6 +3337,8 @@ impl Window {
                     drawings: pane.local_drawings.borrow().clone(),
                     auto_scale: pane.view.price_auto(),
                     log_scale: pane.view.price_log(),
+                    indicators_shown: pane.view.show_indicators(),
+                    drawings_shown: pane.view.show_drawings(),
                 }
             })
             .collect();
@@ -3484,6 +3538,8 @@ impl Window {
             pane.view.set_price_log(stored.log_scale);
             pane.bars_hidden.set(stored.bars_hidden);
             pane.view.set_bars_hidden(stored.bars_hidden);
+            pane.view.set_show_indicators(stored.indicators_shown);
+            pane.view.set_show_drawings(stored.drawings_shown);
             restored.push((pane, stored));
         }
 
@@ -6418,7 +6474,7 @@ impl Window {
             timeframe.is_intraday(),
         );
         let bars = if timeframe.is_derived() {
-            resample(&bars, timeframe, instrument.session_origin)
+            resample(&bars, timeframe, &Grid::new(instrument, pane.session.get()))
         } else {
             bars
         };
@@ -6767,12 +6823,8 @@ impl Window {
                     let timeframe = pane.timeframe.get();
                     let tail = live
                         .with_bars(&series, |native| {
-                            let start = omacharts_engine::stream::tail_start(
-                                native,
-                                from,
-                                timeframe,
-                                instrument.session_origin,
-                            );
+                            let grid = Grid::new(&instrument, pane.session.get());
+                            let start = omacharts_engine::stream::tail_start(native, from, timeframe, &grid);
                             // Left out and cut back as `paint` did, or a tick
                             // refolding this week, month or year would put back
                             // what the chart had left out of it.
@@ -6785,7 +6837,7 @@ impl Window {
                                 timeframe.is_intraday(),
                             );
                             if timeframe.is_derived() {
-                                resample(&tail, timeframe, instrument.session_origin)
+                                resample(&tail, timeframe, &grid)
                             } else {
                                 tail
                             }
@@ -7277,7 +7329,7 @@ impl Window {
             let label = gtk::Label::new(Some(&indicator.label_for(timeframe)));
             label.add_css_class("legend-indicator");
             label.set_xalign(0.0);
-            if !indicator.visible {
+            if !indicator.visible || !pane.view.show_indicators() {
                 label.add_css_class("legend-indicator-hidden");
             }
 
@@ -7481,6 +7533,40 @@ impl Window {
         self.sync_chart_actions(&pane);
         // Written down with the rest of the arrangement, or the chart comes
         // back tomorrow with the gridlines it had yesterday.
+        self.save_workspace();
+    }
+
+    /// Whether the focused chart draws its indicators.
+    pub fn indicators_shown(&self) -> bool {
+        self.focused_pane().view.show_indicators()
+    }
+
+    /// Hide every indicator on the focused chart, or bring them back. This
+    /// chart only, and not what the next one opens with: a chart that came
+    /// up bare would read as one that lost its indicators.
+    pub fn set_show_indicators(self: &Rc<Self>, show: bool) {
+        let pane = self.focused_pane();
+        pane.view.set_show_indicators(show);
+        // The legend keeps their names, faded, so the chart still says what
+        // it would draw.
+        self.rebuild_legend_of(&pane);
+        self.sync_chart_actions(&pane);
+        self.save_workspace();
+    }
+
+    /// Whether the focused chart draws its drawings.
+    pub fn drawings_shown(&self) -> bool {
+        self.focused_pane().view.show_drawings()
+    }
+
+    /// Hide every drawing on the focused chart, or bring them back: this
+    /// chart only, like its indicators. Nothing is removed, here or on the
+    /// other charts of the symbol.
+    pub fn set_drawings_shown(self: &Rc<Self>, show: bool) {
+        let pane = self.focused_pane();
+        pane.view.set_show_drawings(show);
+        self.sync_chart_actions(&pane);
+        self.sync_drawing_bar();
         self.save_workspace();
     }
 
@@ -8450,6 +8536,8 @@ impl Window {
         // as a tick: "Gridlines" as a plain row could not say whether this
         // chart has any.
         shortcuts::append(&menu, "Gridlines", "chart.grid");
+        shortcuts::append(&menu, "Indicators", "chart.show-indicators");
+        shortcuts::append(&menu, "Drawings", "chart.show-drawings");
 
         // The layout, in its own section: splitting and closing are about the
         // arrangement rather than about what this chart draws.
@@ -8595,7 +8683,7 @@ impl Window {
         });
         actions.add_action(&settings);
 
-        // What Ctrl+Shift+B flips: None and the style the bars had, which
+        // What Ctrl+Alt+Shift+H flips: None and the style the bars had, which
         // hiding them never forgets.
         let bars = gio::SimpleAction::new_stateful("bars", None, &(!self.bars_hidden()).to_variant());
         let this = self.clone();
@@ -8643,6 +8731,18 @@ impl Window {
         grid.connect_activate(move |_, _| this.set_show_grid(!this.show_grid()));
         actions.add_action(&grid);
         *self.grid_action.borrow_mut() = Some(grid);
+
+        let shown = gio::SimpleAction::new_stateful("show-indicators", None, &self.indicators_shown().to_variant());
+        let this = self.clone();
+        shown.connect_activate(move |_, _| this.set_show_indicators(!this.indicators_shown()));
+        actions.add_action(&shown);
+        *self.indicators_action.borrow_mut() = Some(shown);
+
+        let shown = gio::SimpleAction::new_stateful("show-drawings", None, &self.drawings_shown().to_variant());
+        let this = self.clone();
+        shown.connect_activate(move |_, _| this.set_drawings_shown(!this.drawings_shown()));
+        actions.add_action(&shown);
+        *self.drawings_action.borrow_mut() = Some(shown);
 
         let split_h = gio::SimpleAction::new("split-h", None);
         let this = self.clone();

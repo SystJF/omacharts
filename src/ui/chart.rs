@@ -157,7 +157,19 @@ struct State {
     /// has dragged past the start of the series. Zero at rest.
     lead: usize,
     drag: Option<Drag>,
+    /// The grip of a selected drawing the pointer rests on, lit so the hand
+    /// can see what a press would take hold of. Not while anything is being
+    /// dragged: then the grip in hand is the one lit, from `drag`.
+    hover_grip: Option<(usize, Grip)>,
+    /// The press just made ended a zig-zag on its last corner. Read by the
+    /// double-click handler, so the second press of a quick double-click
+    /// that already ended the drawing does not go on to open its text.
+    closed_by_press: bool,
     indicators: Vec<Drawn>,
+    /// Whether the indicators are drawn at all. Off hides every one of them,
+    /// strips and all, without touching each one's own `visible`, so turning
+    /// it back on brings back what was on screen and no more.
+    show_indicators: bool,
     /// How far down the price axis something stands over its top, in
     /// pixels: the window's corner, on the chart under it. The labels there
     /// fade out under its edge, and the last price and the crosshair's
@@ -192,6 +204,10 @@ struct State {
     /// What has been drawn on this symbol, in the order it was drawn. The
     /// chart draws what it is handed; the store is where they live.
     drawings: Vec<Drawing>,
+    /// Whether the drawings are drawn. Off hides every one of them, the
+    /// chart's own and the shared, and none answers the pointer or a key;
+    /// they are still held, so turning it back on finds them as they were.
+    show_drawings: bool,
     /// Which of them has the grips, by position in `drawings`.
     /// The drawings that wear grips, in the order they were taken: the last
     /// is the one most recently picked, and what a single-drawing question
@@ -1011,9 +1027,8 @@ fn layout(state: &State, width: f64, height: f64) -> Layout {
 
     let wanted = |above: bool| -> Vec<(u32, f64)> {
         state
-            .indicators
-            .iter()
-            .filter(|drawn| drawn.indicator.visible && drawn.indicator.above_price == above)
+            .shown_indicators()
+            .filter(|drawn| drawn.indicator.above_price == above)
             .filter_map(|drawn| drawn.output.pane_height().map(|share| (drawn.indicator.id, share)))
             .collect()
     };
@@ -1112,10 +1127,13 @@ impl State {
             visible: 160,
             pointer: None,
             magnet: false,
+            hover_grip: None,
+            closed_by_press: false,
             anchored: true,
             overhang: RIGHT_MARGIN,
             lead: 0,
             indicators: Vec::new(),
+            show_indicators: true,
             covered_axis_top: 0.0,
             bar_style: BarStyle::default(),
             bars_hidden: false,
@@ -1129,6 +1147,7 @@ impl State {
             price_auto: true,
             price_log: false,
             drawings: Vec::new(),
+            show_drawings: true,
             sticky: false,
             editing: None,
             editing_at: None,
@@ -1146,8 +1165,11 @@ impl State {
         }
     }
 
-    /// Remember the drawings as they are, for undo, before they change. A
-    /// new change is a new future, so what was redoable is not any more.
+    /// The indicators on screen: the ones shown, while the chart shows any.
+    fn shown_indicators(&self) -> impl DoubleEndedIterator<Item = &Drawn> {
+        self.indicators.iter().filter(|drawn| self.show_indicators && drawn.indicator.visible)
+    }
+
     /// Drop the step most recently remembered, for a change that turned out
     /// not to be one: the step is still the top of the stack, because
     /// nothing else can have been remembered in between.
@@ -1155,6 +1177,8 @@ impl State {
         self.undo.pop();
     }
 
+    /// Remember the drawings as they are, for undo, before they change. A
+    /// new change is a new future, so what was redoable is not any more.
     fn remember(&mut self) {
         self.undo.push(self.drawings.clone());
         if self.undo.len() > HISTORY {
@@ -1228,7 +1252,7 @@ impl State {
         {
             match placing.kind.is_path() {
                 true => placing.move_last_corner(anchor),
-                false => placing.move_grip(Grip::To, anchor),
+                false => placing.move_grip(Grip::To, anchor)
             }
         }
     }
@@ -1393,7 +1417,7 @@ impl State {
     /// Every drawing a box in pixels touches, in list order.
     fn drawings_in(&self, width: f64, height: f64, rect: (f64, f64, f64, f64)) -> Vec<usize> {
         let (first, visible) = self.slice();
-        if visible == 0 {
+        if visible == 0 || !self.show_drawings {
             return Vec::new();
         }
         let plan = layout(self, width, height);
@@ -1405,10 +1429,96 @@ impl State {
             .collect()
     }
 
+    /// The grip on drawing `index` that the hand is on, if any, and whether
+    /// it is holding it. A body is never lit: the whole drawing is not a
+    /// point to aim at.
+    fn lit_grip(&self, index: usize) -> Option<(Grip, Lit)> {
+        match self.drag {
+            Some(Drag::Grip { index: held, grip, .. }) => {
+                (held == index && grip != Grip::Body).then_some((grip, Lit::Held))
+            }
+            Some(_) => None,
+            None => self
+                .hover_grip
+                .filter(|(at, grip)| *at == index && *grip != Grip::Body)
+                .map(|(_, grip)| (grip, Lit::Hover)),
+        }
+    }
+
+    /// Whether a press at (`x`, `y`) lands on the last corner a zig-zag
+    /// being laid down has pinned, which ends it there.
+    ///
+    /// A double-click ended one, but only a quick one: two presses further
+    /// apart than the desktop's double-click time are two presses, and each
+    /// pinned another corner on the same spot — a leg nobody can see, and an
+    /// end that comes apart when dragged. A press on the last corner is what
+    /// a slow double-click meant, and something to aim at besides.
+    ///
+    /// Only once two corners are pinned: ending on the first would leave a
+    /// single point, which is no drawing.
+    fn closes_path(&self, width: f64, height: f64, x: f64, y: f64) -> bool {
+        let Some(placing) = &self.placing else { return false };
+        let pinned = placing.points.len().saturating_sub(1);
+        if !placing.kind.is_path() || pinned < 2 {
+            return false;
+        }
+        let (first, visible) = self.slice();
+        if visible == 0 {
+            return false;
+        }
+        let plan = layout(self, width, height);
+        let Some(scale) = price_range(self, &self.bars[first..first + visible], &plan) else {
+            return false;
+        };
+        let projected = self.project(&plan, &scale, placing);
+        projected.corners.get(pinned - 1).is_some_and(|at| (at.0 - x).hypot(at.1 - y) <= omacharts_engine::drawings::GRIP_REACH)
+    }
+
+    /// The cursor for grip `grip` of drawing `index`: which way it moves
+    /// what it is on.
+    ///
+    /// The same over a grip and while it is held, so the pointer does not
+    /// turn into an arrow halfway through resizing a box.
+    fn grip_cursor(&self, index: usize, grip: Grip, held: bool) -> &'static str {
+        let Some(drawing) = self.drawings.get(index) else { return "default" };
+        let (from, to) = (drawing.from, drawing.to);
+        match grip {
+            Grip::Top | Grip::Bottom => "ns-resize",
+            Grip::Left | Grip::Right => "ew-resize",
+            Grip::Body => match held {
+                true => "grabbing",
+                false => "grab",
+            },
+            // A box's corner, by the diagonal it sits on as drawn rather than
+            // by which anchor it is: a box drawn from the bottom up has `from`
+            // at its bottom left, and its anchors named the wrong diagonal.
+            // Later is always further right and higher always further up, so
+            // the anchors say where it sits without projecting anything.
+            Grip::From | Grip::To | Grip::FromTo | Grip::ToFrom if drawing.kind.is_bounded() => {
+                let (ts, price) = match grip {
+                    Grip::From => (from.ts, from.price),
+                    Grip::To => (to.ts, to.price),
+                    Grip::FromTo => (from.ts, to.price),
+                    _ => (to.ts, from.price),
+                };
+                let left = ts == from.ts.min(to.ts);
+                let top = price == from.price.max(to.price);
+                match left == top {
+                    true => "nwse-resize",
+                    false => "nesw-resize",
+                }
+            }
+            // A point: the ring round it says it is under the hand, and the
+            // arrow's tip shows exactly where it will land, which a hand or a
+            // cross of arrows would cover.
+            _ => "default",
+        }
+    }
+
     /// The drawing under a pixel, topmost first, and which part of it.
     fn drawing_at(&self, width: f64, height: f64, x: f64, y: f64) -> Option<(usize, Grip)> {
         let (first, visible) = self.slice();
-        if visible == 0 {
+        if visible == 0 || !self.show_drawings {
             return None;
         }
         let plan = layout(self, width, height);
@@ -1587,25 +1697,21 @@ impl State {
 /// because the chart is constructed before there is a window to tell.
 type Handler<F> = Rc<RefCell<Option<Box<F>>>>;
 
+/// What a chart is hiding all of at once, each by its own key, for the
+/// legend to name while it is hidden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hidden {
+    pub drawings: bool,
+    pub indicators: bool,
+    pub bars: bool,
+}
+
 /// How far a pasted copy lands from what it was copied from, in pixels.
 ///
 /// Enough to see that there are two of them and to take hold of the one on
 /// top; little enough that it is plainly the same drawing moved rather than
 /// one somewhere else.
 const PASTE_OFFSET: f64 = 16.0;
-
-/// The cursor for a grip: which way it moves what it is on.
-fn grip_cursor(grip: Grip) -> &'static str {
-    match grip {
-        Grip::Top | Grip::Bottom => "ns-resize",
-        Grip::Left | Grip::Right => "ew-resize",
-        // The two diagonals, each naming the corners it runs between.
-        Grip::From | Grip::To => "nwse-resize",
-        Grip::FromTo | Grip::ToFrom => "nesw-resize",
-        Grip::Corner(_) => "move",
-        Grip::Body => "pointer",
-    }
-}
 
 /// How far the hand has to travel before a press counts as a drag.
 ///
@@ -1695,6 +1801,9 @@ pub struct ChartView {
     /// chart, and these are the only ways it changes that nothing outside
     /// the chart can see.
     on_price_auto: Handler<dyn Fn(bool)>,
+    /// Told when the drawings, the indicators or the bars are hidden or
+    /// shown, whatever did it, for the legend's glyphs.
+    on_hidden: Handler<dyn Fn(Hidden)>,
 }
 
 impl ChartView {
@@ -1741,6 +1850,7 @@ impl ChartView {
             on_typing: Rc::new(RefCell::new(None)),
             on_tool: Rc::new(RefCell::new(None)),
             on_price_auto: Rc::new(RefCell::new(None)),
+            on_hidden: Rc::new(RefCell::new(None)),
         });
         view.wire_drawing();
         view.wire_pointer();
@@ -1786,9 +1896,7 @@ impl ChartView {
     /// one thing is selected at a time, and the keys act on that one.
     pub fn pick(&self, id: Option<u32>) {
         let id = id.filter(|id| {
-            self.state.borrow().indicators.iter().any(|d| {
-                d.indicator.id == *id && d.indicator.visible && d.indicator.kind.selectable()
-            })
+            self.state.borrow().shown_indicators().any(|d| d.indicator.id == *id && d.indicator.kind.selectable())
         });
         let changed = {
             let mut s = self.state.borrow_mut();
@@ -1955,8 +2063,12 @@ impl ChartView {
             state.placing = None;
             if kind.is_some() {
                 state.selected.clear();
+                // A tool picked up is a drawing about to be made, and one
+                // made out of sight would read as one that never was.
+                state.show_drawings = true;
             }
         }
+        self.hidden_changed();
         // A tool in hand is about to make a drawing, which is selected once
         // it is down: whatever indicator was selected stops being.
         if kind.is_some() {
@@ -2167,7 +2279,9 @@ impl ChartView {
     pub fn delete_all(&self) {
         let removed = {
             let mut state = self.state.borrow_mut();
-            if state.drawings.is_empty() {
+            // Hidden, there is nothing on screen to delete: the drawings
+            // are kept for when they come back.
+            if state.drawings.is_empty() || !state.show_drawings {
                 return;
             }
             state.selected.clear();
@@ -2203,6 +2317,10 @@ impl ChartView {
     fn step(&self, back: bool) -> bool {
         let restored = {
             let mut state = self.state.borrow_mut();
+            // A step nobody could see taken is not one to take.
+            if !state.show_drawings {
+                return false;
+            }
             let Some(list) = (if back { state.undo.pop() } else { state.redo.pop() }) else {
                 return false;
             };
@@ -3256,6 +3374,19 @@ impl ChartView {
         self.redraw();
     }
 
+    pub fn show_indicators(&self) -> bool {
+        self.state.borrow().show_indicators
+    }
+
+    /// Show or hide every indicator at once, strips included, for a look at
+    /// the bars alone. Each keeps its own `visible`, so they come back as
+    /// they were.
+    pub fn set_show_indicators(&self, show: bool) {
+        self.state.borrow_mut().show_indicators = show;
+        self.hidden_changed();
+        self.redraw();
+    }
+
     pub fn bar_style(&self) -> BarStyle {
         self.state.borrow().bar_style
     }
@@ -3278,7 +3409,28 @@ impl ChartView {
     /// still fits them, and what is drawn from them stays where it was.
     pub fn set_bars_hidden(&self, hidden: bool) {
         self.state.borrow_mut().bars_hidden = hidden;
+        self.hidden_changed();
         self.redraw();
+    }
+
+    /// What the chart is hiding all of.
+    pub fn hidden(&self) -> Hidden {
+        let state = self.state.borrow();
+        Hidden { drawings: !state.show_drawings, indicators: !state.show_indicators, bars: state.bars_hidden }
+    }
+
+    /// What to tell when something is hidden or shown. Called once at once,
+    /// so whatever listens starts out right.
+    pub fn set_hidden_handler(&self, handler: impl Fn(Hidden) + 'static) {
+        handler(self.hidden());
+        *self.on_hidden.borrow_mut() = Some(Box::new(handler));
+    }
+
+    fn hidden_changed(&self) {
+        let hidden = self.hidden();
+        if let Some(handler) = self.on_hidden.borrow().as_ref() {
+            handler(hidden);
+        }
     }
 
     /// What to do when the chart itself is right-clicked. The axis keeps its
@@ -3357,6 +3509,32 @@ impl ChartView {
 
     pub fn set_context_menu_handler(&self, handler: impl Fn(f64, f64) + 'static) {
         *self.on_context_menu.borrow_mut() = Some(Box::new(handler));
+    }
+
+    pub fn show_drawings(&self) -> bool {
+        self.state.borrow().show_drawings
+    }
+
+    /// Show or hide every drawing at once, the chart's own and the shared,
+    /// for a look at the bars. They are kept, not removed: hidden, nothing
+    /// of them is selected or edited, and they come back as they were.
+    pub fn set_show_drawings(&self, show: bool) {
+        if !show {
+            // What was being typed is kept, the way clicking away keeps it.
+            self.end_text_edit(text_editor::Ended::Commit);
+            if self.armed().is_some() {
+                self.arm(None);
+            }
+        }
+        {
+            let mut state = self.state.borrow_mut();
+            state.show_drawings = show;
+            if !show {
+                state.selected.clear();
+            }
+        }
+        self.hidden_changed();
+        self.redraw();
     }
 
     pub fn set_indicators(&self, indicators: Vec<Drawn>) {
@@ -3513,11 +3691,21 @@ impl ChartView {
                 let s = state.borrow();
                 layout(&s, area.width() as f64, area.height() as f64).control_at(x, y).is_some()
             };
-            let (armed, over_drawing, over_indicator) = {
-                let s = state.borrow();
+            let (armed, over_drawing, over_indicator, holding) = {
+                let mut s = state.borrow_mut();
                 let (w, h) = (area.width() as f64, area.height() as f64);
                 let free = s.drag.is_none() && s.tool.is_none();
                 let over = free.then(|| s.drawing_at(w, h, x, y)).flatten();
+                // The grip under the hand is lit, which is a redraw of the
+                // chart — but only on the motion that reaches a grip or leaves
+                // one, not on every pixel of travel.
+                if s.drag.is_none() {
+                    let hover = over.filter(|(_, grip)| *grip != Grip::Body);
+                    if s.hover_grip != hover {
+                        s.hover_grip = hover;
+                        area.queue_draw();
+                    }
+                }
                 // Only when nothing drawn is under the pointer, which is
                 // also when a click would select the indicator.
                 let indicator = free
@@ -3525,16 +3713,28 @@ impl ChartView {
                     && !over_edge
                     && !over_control
                     && s.indicator_at(w, h, x, y).is_some();
-                (s.tool.is_some(), over.map(|(_, grip)| grip), indicator)
+                let holding = match s.drag {
+                    Some(Drag::Grip { index, grip, .. }) => Some(s.grip_cursor(index, grip, true)),
+                    _ => None,
+                };
+                (
+                    s.tool.is_some(),
+                    over.map(|(index, grip)| s.grip_cursor(index, grip, false)),
+                    indicator,
+                    holding,
+                )
             };
-            area.set_cursor_from_name(Some(match (over_edge, over_control, armed, over_drawing) {
-                (true, _, _, _) => "ns-resize",
-                (_, true, _, _) => "pointer",
-                (_, _, true, _) => "crosshair",
+            area.set_cursor_from_name(Some(match (holding, over_edge, over_control, armed, over_drawing) {
+                // A grip in hand keeps its cursor wherever the hand takes it,
+                // over a pane's edge or a control included.
+                (Some(cursor), ..) => cursor,
+                (_, true, ..) => "ns-resize",
+                (_, _, true, ..) => "pointer",
+                (_, _, _, true, _) => "crosshair",
                 // What the grip under the pointer will do, said by the
                 // pointer itself. A handle in the middle of an edge that
                 // looks like every other handle is a handle nobody tries.
-                (_, _, _, Some(grip)) => grip_cursor(grip),
+                (.., Some(cursor)) => cursor,
                 // A hand over an indicator: a click there selects it. No
                 // highlight on hover, which across a dense chart would
                 // flicker on every line the pointer crossed.
@@ -3551,8 +3751,14 @@ impl ChartView {
         let state = self.state.clone();
         let pointer = self.pointer.clone();
         let on_hover = self.on_hover.clone();
+        let area = self.area.clone();
         motion.connect_leave(move |_| {
-            state.borrow_mut().pointer = None;
+            let mut s = state.borrow_mut();
+            s.pointer = None;
+            if s.hover_grip.take().is_some() {
+                area.queue_draw();
+            }
+            drop(s);
             if let Some(handler) = on_hover.borrow().as_ref() {
                 handler(None);
             }
@@ -3703,8 +3909,13 @@ impl ChartView {
         }
         let press = {
             let mut s = state.borrow_mut();
+            s.closed_by_press = false;
             if s.placing.is_none() {
                 Press::Elsewhere
+            } else if s.closes_path(width, height, x, y) {
+                s.drag = None;
+                s.closed_by_press = true;
+                Press::Finish
             } else {
                 let anchor = s.locate_with(width, height, x, y, ctrl);
                 let path = s.placing.as_ref().is_some_and(|d| d.kind.is_path());
@@ -3719,7 +3930,7 @@ impl ChartView {
                             placing.move_last_corner(anchor);
                             placing.add_corner(anchor);
                         }
-                        false => placing.move_grip(Grip::To, anchor),
+                        false => placing.move_grip(Grip::To, anchor)
                     }
                 }
                 s.drag = None;
@@ -3838,6 +4049,7 @@ impl ChartView {
                         // moves is forgotten at the end.
                         s.remember();
                         s.drag = Some(Drag::Grip { index, grip, origin });
+                        area.set_cursor_from_name(Some(s.grip_cursor(index, grip, true)));
                     }
                     drop(s);
                     area.queue_draw();
@@ -3912,7 +4124,7 @@ impl ChartView {
                     {
                         match placing.kind.is_path() {
                             true => placing.move_last_corner(anchor),
-                            false => placing.move_grip(Grip::To, anchor),
+                            false => placing.move_grip(Grip::To, anchor)
                         }
                     }
                     if !moved && offset_x.hypot(offset_y) > drag_threshold() {
@@ -3993,13 +4205,15 @@ impl ChartView {
                         }
                         grip => {
                             // A corner is one drawing's own.
-                            match s.drawings.get_mut(index) {
-                                Some(drawing) => {
-                                    drawing.move_grip(grip, now);
-                                    vec![drawing.clone()]
-                                }
-                                None => Vec::new(),
-                            }
+                            let Some(drawing) = s.drawings.get_mut(index) else {
+                                return;
+                            };
+                            // An edge pulled past its opposite is that side
+                            // from here on.
+                            let held = drawing.drag_grip(grip, now);
+                            let moved = vec![drawing.clone()];
+                            s.drag = Some(Drag::Grip { index, grip: held, origin });
+                            moved
                         }
                     };
                     drop(s);
@@ -4094,9 +4308,15 @@ impl ChartView {
                     }
                     return;
                 }
-                Some(Drag::Grip { .. }) => {
+                Some(Drag::Grip { index, grip, .. }) => {
                     let moved: Vec<Drawing> = {
                         let mut s = state.borrow_mut();
+                        // Let go of where the hand still is: lit as under it,
+                        // no longer as held.
+                        s.hover_grip = (grip != Grip::Body).then_some((index, grip));
+                        if let Some(view) = view.upgrade() {
+                            view.area.set_cursor_from_name(Some(s.grip_cursor(index, grip, false)));
+                        }
                         let before = s.undo.last().cloned().unwrap_or_default();
                         let moved: Vec<Drawing> = s
                             .drawings
@@ -4112,6 +4332,7 @@ impl ChartView {
                         moved
                     };
                     if let Some(view) = view.upgrade() {
+                        view.area.queue_draw();
                         for drawing in moved {
                             view.tell(DrawingEvent::Changed(drawing));
                         }
@@ -4145,6 +4366,12 @@ impl ChartView {
         let view = Rc::downgrade(self);
         click.connect_pressed(move |_, presses, x, y| {
             if presses < 2 {
+                return;
+            }
+            // The press that made this a double-click already ended a
+            // zig-zag on its last corner; the drawing it left is not one to
+            // start typing into.
+            if std::mem::take(&mut state.borrow_mut().closed_by_press) {
                 return;
             }
             // A zig-zag being laid down: the second click is the end of it.
@@ -4506,8 +4733,21 @@ fn draw_pointer(cr: &cairo::Context, width: f64, height: f64, state: &State) {
         cr.save().ok();
         cr.rectangle(plan.plot_x, plan.price_y, plan.plot_w, plan.price_h);
         cr.clip();
-        let placed = state.project(&plan, &scale, placing);
-        draw_drawing(cr, state, &placed, placing, true, false);
+        // On the last corner of a zig-zag a press ends it, so it is drawn as
+        // it will be left — without the leg following the hand — with that
+        // corner lit.
+        let closing = state.pointer.is_some_and(|(x, y)| state.closes_path(width, height, x, y));
+        let shown = match closing {
+            true => {
+                let mut finished = placing.clone();
+                finished.finish_path();
+                Cow::Owned(finished)
+            }
+            false => Cow::Borrowed(placing),
+        };
+        let lit = closing.then(|| (Grip::Corner(shown.points.len().saturating_sub(1)), Lit::Hover));
+        let placed = state.project(&plan, &scale, &shown);
+        draw_drawing(cr, state, &placed, &shown, true, false, lit);
         cr.restore().ok();
     }
 
@@ -5482,6 +5722,15 @@ fn draw_crosshair(
         return;
     }
     let crosshair = &state.theme.ui.crosshair;
+    // A drawing's point in hand: the labels are its price and its time, so
+    // they wear its colour and read as the point's rather than the pointer's.
+    let held = match state.drag {
+        Some(Drag::Grip { index, grip, .. }) if grip != Grip::Body => {
+            state.drawings.get(index).map(|d| d.style(&state.configs).colour.hex(&state.theme))
+        }
+        _ => None,
+    };
+    let tint = held.as_deref().unwrap_or(crosshair);
 
     // Snap to the centre of the bar under the pointer.
     let index_in_view = ((px - plot_x) / bar_w).floor();
@@ -5514,7 +5763,7 @@ fn draw_crosshair(
             plot_x + plot_w,
             below_cover(state, py.round() + 0.5),
             width,
-            crosshair,
+            tint,
         );
     }
 
@@ -5533,10 +5782,10 @@ fn draw_crosshair(
             // badly for a moment.
             let x = (snapped_x - w / 2.0).clamp(plot_x, (plot_x + plot_w - w).max(plot_x));
             let y = height - TIME_AXIS_H + 2.0;
-            colors::set_source(cr, crosshair);
+            colors::set_source(cr, tint);
             cr.rectangle(x, y, w, TIME_AXIS_H - 4.0);
             let _ = cr.fill();
-            colors::set_source(cr, colors::readable_on(crosshair));
+            colors::set_source(cr, colors::readable_on(tint));
             cr.move_to(x + 5.0, y + TIME_AXIS_H - 10.0);
             let _ = cr.show_text(&label);
         }
@@ -5706,11 +5955,24 @@ fn preset_number(key: gtk::gdk::Key) -> Option<usize> {
 /// Half the side of a grip, the small square at a selected drawing's anchor.
 const GRIP_HALF: f64 = 3.5;
 
+/// Half the side of the soft square round the grip under the hand. A whole
+/// number of pixels more than the grip's own half, so both edges land on
+/// the same pixel grid and the halo stays as crisp as the grip it frames.
+const GRIP_HALO: f64 = 8.5;
+
+/// How a grip the hand is on is drawn: a size up, in a square halo of its
+/// own colour, and a wider, stronger one once it is held.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Lit {
+    Hover,
+    Held,
+}
+
 /// What has been drawn on the symbol, over the candles and the indicator
 /// lines and under the strips, clipped to the price plot so a line drawn
 /// off the top does not cross an RSI.
 fn draw_drawings(cr: &cairo::Context, state: &State, plan: &Layout, scale: &PriceScale) {
-    if state.drawings.is_empty() {
+    if state.drawings.is_empty() || !state.show_drawings {
         return;
     }
     cr.save().ok();
@@ -5719,7 +5981,9 @@ fn draw_drawings(cr: &cairo::Context, state: &State, plan: &Layout, scale: &Pric
     for (index, drawing) in state.drawings.iter().enumerate() {
         let projected = state.project(plan, scale, drawing);
         let typing = state.editing == Some(index);
-        draw_drawing(cr, state, &projected, drawing, state.selected.contains(&index), typing);
+        let selected = state.selected.contains(&index);
+        let lit = selected.then(|| state.lit_grip(index)).flatten();
+        draw_drawing(cr, state, &projected, drawing, selected, typing, lit);
         if typing {
             draw_editing_ground(cr, state, drawing);
         }
@@ -5742,6 +6006,7 @@ fn draw_drawing(
     drawing: &Drawing,
     selected: bool,
     typing: bool,
+    lit: Option<(Grip, Lit)>,
 ) {
     let style = drawing.style(&state.configs);
     let colour = style.colour.hex(&state.theme);
@@ -5868,16 +6133,25 @@ fn draw_drawing(
         }
         for grip in drawing.grips() {
             let Some((x, y)) = projected.grip(grip) else { continue };
+            // The grip under the hand says so: without it, nothing tells a
+            // hand reaching for a point whether a press takes the point or
+            // the line, nor, once dragging, which point it has.
+            let shine = lit.filter(|(at, _)| *at == grip).map(|(_, how)| how);
+            if let Some(how) = shine {
+                let (half, alpha) = match how {
+                    Lit::Hover => (GRIP_HALO, 0.22),
+                    Lit::Held => (GRIP_HALO + 2.0, 0.32),
+                };
+                colors::set_source_alpha(cr, &colour, alpha);
+                cr.rectangle(x - half, y - half, 2.0 * half, 2.0 * half);
+                let _ = cr.fill();
+            }
+            let half = GRIP_HALF + if shine.is_some() { 1.0 } else { 0.0 };
             colors::set_source(cr, &state.theme.ui.background);
-            cr.rectangle(
-                x - GRIP_HALF - 1.0,
-                y - GRIP_HALF - 1.0,
-                2.0 * GRIP_HALF + 2.0,
-                2.0 * GRIP_HALF + 2.0,
-            );
+            cr.rectangle(x - half - 1.0, y - half - 1.0, 2.0 * half + 2.0, 2.0 * half + 2.0);
             let _ = cr.fill();
             colors::set_source(cr, &colour);
-            cr.rectangle(x - GRIP_HALF, y - GRIP_HALF, 2.0 * GRIP_HALF, 2.0 * GRIP_HALF);
+            cr.rectangle(x - half, y - half, 2.0 * half, 2.0 * half);
             let _ = cr.fill();
         }
     }
@@ -6063,7 +6337,7 @@ fn draw_indicator_fills(
     columns: &Columns,
     to_y: &impl Fn(f64) -> f64,
 ) {
-    for drawn in state.indicators.iter().filter(|d| d.indicator.visible) {
+    for drawn in state.shown_indicators() {
         match &drawn.output {
             Output::Bands(bands) => {
                 // One shaded region, between the first band's own edges: the
@@ -6096,7 +6370,7 @@ fn draw_indicator_lines(
     columns: &Columns,
     to_y: &impl Fn(f64) -> f64,
 ) {
-    for drawn in state.indicators.iter().filter(|d| d.indicator.visible) {
+    for drawn in state.shown_indicators() {
         let lit = state.picked == Some(drawn.indicator.id);
         match &drawn.output {
             Output::Line(values) => {
@@ -6208,7 +6482,7 @@ fn draw_time_ground(cr: &cairo::Context, state: &State, columns: &Columns, plan:
     cr.save().ok();
     cr.rectangle(left, top, plan.plot_w, plan.total_h);
     cr.clip();
-    for drawn in state.indicators.iter().filter(|d| d.indicator.visible) {
+    for drawn in state.shown_indicators() {
         let Output::Time(time) = &drawn.output else { continue };
         for span in time.spans.iter().filter(|s| on_screen_run(columns, s.from, s.to)) {
             let (colour, alpha) =
@@ -7209,7 +7483,7 @@ mod tests {
     }
 
     /// Draw something onto a surface of this size and hand back its pixels.
-    fn frame(width: f64, height: f64, paint: impl FnOnce(&cairo::Context)) -> Vec<u8> {
+    pub(super) fn frame(width: f64, height: f64, paint: impl FnOnce(&cairo::Context)) -> Vec<u8> {
         let mut surface =
             cairo::ImageSurface::create(cairo::Format::ARgb32, width as i32, height as i32)
                 .expect("a surface to draw on");
@@ -7853,6 +8127,31 @@ mod tests {
     }
 
 
+    /// Hiding every indicator takes their strips away as well, so the price
+    /// gets the height, and leaves each one's own `visible` as it was.
+    #[test]
+    fn hiding_the_indicators_gives_their_strips_back_to_the_price() {
+        let (w, h) = (600.0, 400.0);
+        let mut state = charted(11);
+        state.bars = ramp(40);
+        let series = state.bars.clone();
+        let indicator = Indicator::new(1, indicators::Kind::Atr);
+        state.indicators = vec![Drawn {
+            color: "#5588ff".to_string(),
+            output: indicators::compute(&indicator, &series, 0, state.timeframe, None),
+            indicator,
+        }];
+        let shown = layout(&state, w, h);
+        assert!(shown.rows.iter().any(|row| row.pane == Some(1)), "the ATR has a strip");
+
+        state.show_indicators = false;
+        let hidden = layout(&state, w, h);
+        assert!(hidden.rows.iter().all(|row| row.pane.is_none()), "no strip while hidden");
+        assert!(hidden.price_h > shown.price_h, "the price takes the room");
+        assert!(state.indicators[0].indicator.visible, "the indicator's own switch is untouched");
+        assert_eq!(state.shown_indicators().count(), 0);
+    }
+
     /// An ATR zoomed into its own warm-up has nothing to scale to and nothing
     /// to draw, and it is the one strip that can be in that position: a fixed
     /// scale is its own bounds whatever is in it, and a MACD's zero guide is a
@@ -8247,6 +8546,30 @@ mod drawing_tests {
         assert_eq!(state.placing.as_ref().unwrap().config, Some(1));
     }
 
+    /// A press back on a zig-zag's last corner ends it there, which is
+    /// what a double-click too slow to count as one meant: it used to pin
+    /// another corner on the same spot.
+    #[test]
+    fn a_press_on_the_last_corner_ends_a_zigzag() {
+        let (w, h) = (800.0, 400.0);
+        let mut state = charted(400);
+        state.tool = Some(DrawingKind::Zigzag);
+        assert!(state.begin_placing(w, h, 200.0, 150.0, false));
+        // One corner pinned: ending there would leave no drawing.
+        assert!(!state.closes_path(w, h, 200.0, 150.0));
+
+        // A second corner, pinned the way a press pins one.
+        let corner = state.locate(w, h, 300.0, 100.0).unwrap();
+        let placing = state.placing.as_mut().unwrap();
+        placing.move_last_corner(corner);
+        placing.add_corner(corner);
+
+        assert!(state.closes_path(w, h, 300.0, 100.0));
+        assert!(state.closes_path(w, h, 303.0, 102.0), "a hand a few pixels off still means that corner");
+        assert!(!state.closes_path(w, h, 200.0, 150.0), "the first corner is not where it ends");
+        assert!(!state.closes_path(w, h, 400.0, 200.0));
+    }
+
     /// A paste puts the copies down, takes hold of them, and leaves one
     /// step back on the stack however many were pasted.
     #[test]
@@ -8368,6 +8691,26 @@ mod drawing_tests {
         state.tool = None;
         state.placing = None;
         assert!(!state.begin_placing(800.0, 400.0, 200.0, 150.0, false));
+    }
+
+    /// A chart that hides its drawings draws none of them, and none answers
+    /// the pointer or a marquee; they are all still held.
+    #[test]
+    fn hidden_drawings_are_neither_drawn_nor_picked() {
+        let mut state = charted(400);
+        let (w, h) = (800.0, 400.0);
+        let a = state.locate(w, h, 200.0, 150.0).unwrap();
+        let b = state.locate(w, h, 500.0, 250.0).unwrap();
+        let bare = super::tests::frame(w, h, |cr| draw(cr, w, h, &state));
+        state.drawings.push(Drawing::new(DrawingKind::Rect, a, b));
+        assert!(state.drawing_at(w, h, 350.0, 200.0).is_some(), "shown, the box answers");
+        assert_ne!(super::tests::frame(w, h, |cr| draw(cr, w, h, &state)), bare, "and is drawn");
+
+        state.show_drawings = false;
+        assert_eq!(state.drawing_at(w, h, 350.0, 200.0), None);
+        assert!(state.drawings_in(w, h, (0.0, 0.0, w, h)).is_empty());
+        assert_eq!(super::tests::frame(w, h, |cr| draw(cr, w, h, &state)), bare, "nothing of it is left on the picture");
+        assert_eq!(state.drawings.len(), 1, "it is still held");
     }
 
     /// The newest drawing is picked first, and a press on an unselected
