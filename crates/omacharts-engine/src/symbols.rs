@@ -81,7 +81,8 @@ pub struct Instrument {
     /// 0 is a curated major, 3 is excluded from search.
     pub tier: u8,
     /// Seconds past midnight UTC that this instrument's session opens. Drives
-    /// session-aware resampling; 0 for anything that trades a normal day.
+    /// session resets, and folding for a market whose hours are not known
+    /// (see [`crate::bars::Grid`]); 0 for anything that trades a normal day.
     pub session_origin: i64,
     /// Per-provider spellings that no template produces.
     pub overrides: Vec<(String, String)>,
