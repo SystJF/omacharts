@@ -1035,6 +1035,12 @@ writing it again, which matters because the widget is installed once and then
 never touched: without that, the bar keeps running whichever version shipped
 the day the switch was flicked.
 
+A window that starts brings the widget up to date as well, and the first window
+to open on an Omarchy desktop puts it in the bar. Both happen only for a window
+using the default data folder, `~/.local/share/omacharts`, because that is the
+folder the widget reads. A window started with `XDG_DATA_HOME` pointing
+somewhere else leaves the widget as it found it.
+
 `uninstall` is idempotent, and a desktop with no Omarchy shell is reported
 rather than refused — having no bar is a fact about the machine, not a command
 that went wrong. Both exit 0:
