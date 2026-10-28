@@ -607,7 +607,7 @@ mod tests {
                 drawings: Vec::new(),
                 auto_scale: false,
                 log_scale: true,
-                show_indicators: true,
+                indicators_shown: true,
                 drawings_shown: true,
             }],
             watchlist: Some(4),
@@ -683,7 +683,7 @@ mod tests {
             drawings: Vec::new(),
             auto_scale: true,
             log_scale: false,
-            show_indicators: true,
+            indicators_shown: true,
             drawings_shown: true,
         }
     }
@@ -1479,7 +1479,7 @@ struct StoredPane {
     /// at the bars. Missing from a chart written before they could all be
     /// hidden at once, and every one of those drew them.
     #[serde(default = "yes")]
-    show_indicators: bool,
+    indicators_shown: bool,
     /// Whether the chart draws its drawings, its own and the shared, or
     /// hides them all. Missing from a chart written before they could be
     /// hidden, and every one of those drew them.
@@ -2430,8 +2430,10 @@ impl Window {
                 shower.sync_drawing_bar();
                 // A tool picked up on a chart with its drawings hidden shows
                 // them again, and that is stored like the key would store it.
-                let hidden = shower.drawings_action.borrow().as_ref().and_then(|a| a.state()).and_then(|v| v.get::<bool>()) == Some(false);
-                if hidden && shower.drawings_shown() {
+                // The menu's tick still says hidden until it is told.
+                let ticked = shower.drawings_action.borrow().as_ref().and_then(|a| a.state());
+                let was_hidden = ticked.and_then(|v| v.get::<bool>()) == Some(false);
+                if was_hidden && shower.drawings_shown() {
                     let pane = shower.focused_pane();
                     shower.sync_chart_actions(&pane);
                     shower.save_soon();
@@ -3312,7 +3314,7 @@ impl Window {
                     drawings: pane.local_drawings.borrow().clone(),
                     auto_scale: pane.view.price_auto(),
                     log_scale: pane.view.price_log(),
-                    show_indicators: pane.view.show_indicators(),
+                    indicators_shown: pane.view.show_indicators(),
                     drawings_shown: pane.view.show_drawings(),
                 }
             })
@@ -3513,7 +3515,7 @@ impl Window {
             pane.view.set_price_log(stored.log_scale);
             pane.bars_hidden.set(stored.bars_hidden);
             pane.view.set_bars_hidden(stored.bars_hidden);
-            pane.view.set_show_indicators(stored.show_indicators);
+            pane.view.set_show_indicators(stored.indicators_shown);
             pane.view.set_show_drawings(stored.drawings_shown);
             restored.push((pane, stored));
         }

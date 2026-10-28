@@ -597,7 +597,7 @@ checked before anything is written, so you never get a half-applied chart.
 
 Besides what a chart shows, `chart set` carries how it shows it — `--style`,
 `--bars`, `--session`, `--grid`, `--auto-scale`, `--log-scale`,
-`--show-indicators` and `--drawings` — and those are stored with the chart,
+`--indicators` and `--drawings` — and those are stored with the chart,
 so a price axis held still with `--auto-scale off` is still held the next
 time the app opens.
 
@@ -611,13 +611,13 @@ the axis draws linear and turns logarithmic again once they are off screen.
 omacharts chart set --resolution 1W --log-scale on
 ```
 
-`--show-indicators off` hides every indicator on the chart, the strips under
+`--indicators off` hides every indicator on the chart, the strips under
 it as well, for a look at the bars alone; `on` brings them back. Each keeps
 its own settings and whether it was hidden on its own, so they come back as
 they were. In the window it is Ctrl+Shift+H.
 
 ```sh
-omacharts chart set --show-indicators off
+omacharts chart set --indicators off
 ```
 
 `--drawings off` hides every drawing on the chart, its own and those other

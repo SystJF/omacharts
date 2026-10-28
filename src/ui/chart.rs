@@ -1149,20 +1149,20 @@ impl State {
         }
     }
 
-    /// Remember the drawings as they are, for undo, before they change. A
-    /// new change is a new future, so what was redoable is not any more.
-    /// Drop the step most recently remembered, for a change that turned out
-    /// not to be one: the step is still the top of the stack, because
-    /// nothing else can have been remembered in between.
     /// The indicators on screen: the ones shown, while the chart shows any.
-    fn shown_indicators(&self) -> impl Iterator<Item = &Drawn> {
+    fn shown_indicators(&self) -> impl DoubleEndedIterator<Item = &Drawn> {
         self.indicators.iter().filter(|drawn| self.show_indicators && drawn.indicator.visible)
     }
 
+    /// Drop the step most recently remembered, for a change that turned out
+    /// not to be one: the step is still the top of the stack, because
+    /// nothing else can have been remembered in between.
     fn forget(&mut self) {
         self.undo.pop();
     }
 
+    /// Remember the drawings as they are, for undo, before they change. A
+    /// new change is a new future, so what was redoable is not any more.
     fn remember(&mut self) {
         self.undo.push(self.drawings.clone());
         if self.undo.len() > HISTORY {

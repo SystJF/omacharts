@@ -394,7 +394,7 @@ omacharts: "3x" is not a resolution; try 5m, 1h, 1D, 1W, 1M or 1Y
 | `--grid on` or `off` | Draws the grid | [Gridlines](/manual/charts/#gridlines) |
 | `--auto-scale on` or `off` | Fits the price axis to the visible bars, or holds it still | [Scales](/manual/charts/#scales) |
 | `--log-scale on` or `off` | Logarithmic or linear price axis | [Logarithmic scale](/manual/charts/#logarithmic-scale) |
-| `--show-indicators on` or `off` | Draws the chart's indicators, or hides them all | [Hiding every indicator](/manual/indicators/#hiding-every-indicator) |
+| `--indicators on` or `off` | Draws the chart's indicators, or hides them all | [Hiding every indicator](/manual/indicators/#hiding-every-indicator) |
 | `--link MODE` | `focus`, `follow`, `pinned` | [Linking charts to the watchlist](/manual/watchlists/#linking-charts-to-the-watchlist) |
 | `--template T` | A chart template, or `none` | [Chart templates](/manual/chart-templates/) |
 | `--drawings on` or `off` | Draws the chart's drawings, its own and the shared, or hides them all | [Hiding the drawings](/manual/drawings/#hiding-the-drawings) |

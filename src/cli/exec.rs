@@ -1445,8 +1445,8 @@ fn chart_set(
         chart["log_scale"] = json!(log == "on");
         changed.push(format!("log scale {log}"));
     }
-    if let Some(shown) = arg(m, "show-indicators") {
-        chart["show_indicators"] = json!(shown == "on");
+    if let Some(shown) = arg(m, "indicators") {
+        chart["indicators_shown"] = json!(shown == "on");
         changed.push(format!("indicators {}", if shown == "on" { "shown" } else { "hidden" }));
     }
     if let Some(shown) = arg(m, "drawings") {
@@ -1478,7 +1478,7 @@ fn chart_set(
     if changed.is_empty() {
         return Err(Fault::usage(
             "nothing to change; pass --symbol, --resolution, --style, --bars, --session, --link, --grid, \
-             --auto-scale, --log-scale, --show-indicators, --drawings, --show-drawings, \
+             --auto-scale, --log-scale, --indicators, --drawings, --show-drawings, \
              --send-drawings or --template"
                 .into(),
         ));
@@ -3346,7 +3346,7 @@ fn pane_json(pane: &Value) -> String {
         // Likewise linear, before an axis could be anything else.
         "log_scale": pane["log_scale"].as_bool().unwrap_or(false),
         // And shown, before they could all be hidden at once.
-        "show_indicators": pane["show_indicators"].as_bool().unwrap_or(true),
+        "indicators_shown": pane["indicators_shown"].as_bool().unwrap_or(true),
         "drawings_shown": pane["drawings_shown"].as_bool().unwrap_or(true),
         "link": stored_mode(pane).key(),
         "shows_drawings": pane["shows_drawings"].as_bool().unwrap_or(true),
@@ -5775,16 +5775,16 @@ mod tests {
         let charts = |store: &Store| -> serde_json::Value {
             serde_json::from_str(&run("chart list --book Macro --json", store).out).unwrap()
         };
-        assert_eq!(charts(&store)["charts"][0]["show_indicators"], true, "shown to begin with");
+        assert_eq!(charts(&store)["charts"][0]["indicators_shown"], true, "shown to begin with");
 
-        let off = run("chart set --book Macro --show-indicators off", &store);
+        let off = run("chart set --book Macro --indicators off", &store);
         assert_eq!(off.code, 0, "{}", off.err);
         assert!(off.out.contains("indicators hidden"), "{}", off.out);
-        assert_eq!(charts(&store)["charts"][0]["show_indicators"], false);
+        assert_eq!(charts(&store)["charts"][0]["indicators_shown"], false);
         assert_eq!(charts(&store)["charts"][0]["indicators"], serde_json::json!(["rsi"]), "kept");
 
-        run("chart set --book Macro --show-indicators on", &store);
-        assert_eq!(charts(&store)["charts"][0]["show_indicators"], true);
+        run("chart set --book Macro --indicators on", &store);
+        assert_eq!(charts(&store)["charts"][0]["indicators_shown"], true);
     }
 
     /// Hiding a chart's drawings is stored with it and reported back, keeps

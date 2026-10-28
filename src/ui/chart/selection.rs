@@ -49,12 +49,7 @@ impl State {
         if x < frame.plan.plot_x || x > frame.plan.plot_x + frame.plan.plot_w {
             return None;
         }
-        let pickable = || {
-            self.indicators
-                .iter()
-                .rev()
-                .filter(|d| self.show_indicators && d.indicator.visible && d.indicator.kind.selectable())
-        };
+        let pickable = || self.shown_indicators().rev().filter(|d| d.indicator.kind.selectable());
         match row.pane {
             None => {
                 let to_y = |price: f64| frame.scale.to_y(price, frame.plan.price_y, frame.plan.price_h);
