@@ -49,7 +49,9 @@ A PR handed over with nothing else said means the whole of it: review
 it, converge it, get it green and merge it, without coming back to ask.
 Asking first is for when the owner says so, or for the stops this skill
 already names — something that looks deliberate, a red run, an open
-blocker, a performance regression that is his call.
+blocker, a performance regression that is his call. A choice between two
+acceptable ways to finish the PR is not one of them: make it, say which
+and why in the report, and land it.
 
 The owner's standing instructions travel with the hand-off: that default,
 unless he said otherwise, and that the review is done with simplifying in
