@@ -123,7 +123,7 @@ Tools and configurations:
 | <kbd>Alt</kbd> + <kbd>L</kbd> | A line: click where it starts, then where it ends | [Drawings](/manual/drawings/) |
 | <kbd>Alt</kbd> + <kbd>H</kbd> | A horizontal line | [Drawings](/manual/drawings/) |
 | <kbd>Alt</kbd> + <kbd>A</kbd> | An arrow | [Drawings](/manual/drawings/) |
-| <kbd>Alt</kbd> + <kbd>Z</kbd> | A zig-zag: click each corner, double-click or <kbd>Enter</kbd> to end it | [Drawings](/manual/drawings/) |
+| <kbd>Alt</kbd> + <kbd>Z</kbd> | A zig-zag: click each corner, then click the last one again, double-click or press <kbd>Enter</kbd> to end it | [Drawings](/manual/drawings/) |
 | <kbd>Alt</kbd> + <kbd>R</kbd> | A rectangle | [Drawings](/manual/drawings/) |
 | <kbd>Alt</kbd> + <kbd>C</kbd> | A circle, dragged to any shape | [Drawings](/manual/drawings/) |
 | <kbd>Alt</kbd> + <kbd>T</kbd> | Text: click, then type | [Drawings](/manual/drawings/) |
