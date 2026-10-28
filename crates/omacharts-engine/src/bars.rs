@@ -2,7 +2,7 @@
 
 use std::cell::Cell;
 
-use chrono::{Datelike, NaiveDate, TimeZone, Utc};
+use chrono::{Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::exchanges::{registry, Schedule};
@@ -612,10 +612,11 @@ pub fn drawable_from(native: &[Bar], start: usize, timeframe: Timeframe, kind: I
 pub struct Grid {
     origin: i64,
     hours: Option<(Schedule<'static>, bool)>,
-    /// The last trading day asked about: its date, where it starts, and where
-    /// its bars do. Bars are folded in order, so this is one time zone
-    /// conversion a bar and two a day.
-    day: Cell<Option<(NaiveDate, i64, i64)>>,
+    /// The last trading day asked about: where it starts, where the next one
+    /// does, and where its bars start. Bars are folded in order, so a bar is
+    /// usually a comparison against this and the time zone is only read when
+    /// the day changes; read for every bar, it made a fold six times slower.
+    day: Cell<Option<(i64, i64, i64)>>,
 }
 
 impl Grid {
@@ -635,6 +636,7 @@ impl Grid {
     }
 
     /// Midnight UTC moved by `origin` seconds, every day alike.
+    #[cfg(test)]
     pub fn fixed(origin: i64) -> Grid {
         Grid { origin, hours: None, day: Cell::new(None) }
     }
@@ -647,13 +649,14 @@ impl Grid {
     /// the day before.
     fn counts_from(&self, ts: i64) -> i64 {
         let Some((schedule, regular)) = self.hours else { return self.origin };
-        let Some(date) = schedule.trading_date(ts) else { return self.origin };
-        let (start, bars) = match self.day.get() {
-            Some((known, start, bars)) if known == date => (start, bars),
+        let (start, _, bars) = match self.day.get() {
+            Some(day @ (start, end, _)) if (start..end).contains(&ts) => day,
             _ => {
-                let found = (schedule.day_start(date), schedule.bars_start(date, regular));
-                self.day.set(Some((date, found.0, found.1)));
-                found
+                let Some(date) = schedule.trading_date(ts) else { return self.origin };
+                let end = date.succ_opt().map_or(i64::MAX, |next| schedule.day_start(next));
+                let day = (schedule.day_start(date), end, schedule.bars_start(date, regular));
+                self.day.set(Some(day));
+                day
             }
         };
         if ts >= bars { bars } else { start }
