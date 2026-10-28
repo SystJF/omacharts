@@ -1103,7 +1103,8 @@ impl RangeCard {
         let touched = self.touched.get();
 
         let wrong = !text.trim().is_empty() && parsed.is_none() && !could_become(&text);
-        set_class(&self.frame.entry, "error", wrong);
+        let empty = parsed.is_some_and(|range| !range.holds_days(today));
+        set_class(&self.frame.entry, "error", wrong || empty);
 
         let (from, to) = match parsed {
             Some(range) => Self::days(range, context),
@@ -1283,8 +1284,8 @@ impl RangeCard {
     fn commit(&self) {
         let text = self.frame.entry.text().trim().to_string();
         let forced = self.forced.get();
-        let (apply, resolution) = match self.context.borrow().as_ref() {
-            Some(context) => (context.apply.clone(), context.resolution.clone()),
+        let (apply, resolution, today) = match self.context.borrow().as_ref() {
+            Some(context) => (context.apply.clone(), context.resolution.clone(), context.today),
             None => return,
         };
         if text.is_empty() {
@@ -1294,8 +1295,9 @@ impl RangeCard {
             }
             return;
         }
-        // Not a range: the box says so in red and the card stays.
-        let Some(range) = Range::parse(&text) else { return };
+        // Not a range, or one with no days to show: the box says so in red
+        // and the card stays.
+        let Some(range) = Range::parse(&text).filter(|range| range.holds_days(today)) else { return };
         self.frame.close();
         glib::idle_add_local_once(move || apply(range, forced));
     }

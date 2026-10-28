@@ -433,7 +433,14 @@ showing from 2025 to today on pos:1 NVDA 1W in "Manual"
 $ omacharts chart range 6x
 omacharts: 6x is not a range; try ytd, 1y, 2025: or all
   [exit 2]
+
+$ omacharts chart range 2030
+omacharts: 2030 holds no days up to today
+  [exit 2]
 ```
+
+A range that starts with a minus, such as `-6m:-1m`, goes after `--`, or it
+reads as a flag: `omacharts chart range -- -6m:-1m`.
 
 | Argument or flag | Takes |
 |---|---|

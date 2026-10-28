@@ -990,6 +990,9 @@ fn chart_range(live: Option<&dyn Live>, m: &clap::ArgMatches) -> Result<String, 
     let text = required(m, "RANGE")?;
     let range = omacharts_engine::Range::parse(text)
         .ok_or_else(|| Fault::usage(format!("{text} is not a range; try ytd, 1y, 2025: or all")))?;
+    if !range.holds_days(chrono::Local::now().date_naive()) {
+        return Err(Fault::usage(format!("{text} holds no days up to today")));
+    }
     let resolution = match m.get_one::<String>("resolution") {
         None => None,
         Some(text) => Some(

@@ -971,13 +971,14 @@ the unit says which sort:
   one before, with every day of the week from `mon` to `sun` and any count;
   `today` and `yesterday`. A day ends a slice too: `mon:` is since Monday;
 - a dash in front of a count or a day of the week changes nothing, so `-2w`
-  is `2w` and `-2mon` is `2mon`;
+  is `2w` and `-2mon` is `2mon` (on the command line, after `--`);
 - a colon slices, the way pandas slices dates, with both ends included:
   `2025:` from 1 January 2025 to today, `2024:2025-06` from the start of 2024
   to the end of June 2025, `:2020` from the first bar to the end of 2020, and
   `2026-03-21:2026-09-30` between two days, which `2026/03/21:2026/09/30`
   also says. An end can be an offset back from today, `-2y:-1y` being the
-  year before last. Two dots, the way Ruby writes a range, slice the same:
+  year before last; on the command line it starts with a minus, so it goes
+  after `--`: `omacharts chart range -- -2y:-1y`. Two dots, the way Ruby writes a range, slice the same:
   `2025..`, `2024..2025-06`. A slice open at the end stays live, so new bars
   still arrive in it;
 - `all`, or `:` alone, is the whole series.

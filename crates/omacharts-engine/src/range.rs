@@ -495,6 +495,14 @@ impl Range {
         }
     }
 
+    /// Whether the range holds a single day up to today. `2030` and
+    /// `2025:2024` read as ranges but hold none, and showing one leaves the
+    /// chart on no bars at a resolution picked for nothing.
+    pub fn holds_days(self, today: NaiveDate) -> bool {
+        let last = self.end(today).map_or(today, |end| end.min(today));
+        self.start(today).is_none_or(|start| start <= last)
+    }
+
     /// Calendar days the range covers up to today, today included; `None`
     /// for all of it.
     pub fn days(self, today: NaiveDate) -> Option<i64> {
@@ -1175,5 +1183,19 @@ mod tests {
         assert_eq!(Range::parse("mon:").map(|r| r.description()), Some("from Monday to today".into()));
         assert_eq!(Range::parse("10/1..10/15").and_then(|r| r.end(today)), Some(day(2026, 10, 15)));
         assert_eq!(Range::suggest("mon", today), vec![Range::parse("mon").unwrap_or(Range::All), Range::parse("mon:").unwrap_or(Range::All)]);
+    }
+
+    /// A range that reads but lands on no day before today is no range to
+    /// show: backwards, or wholly in the future.
+    #[test]
+    fn a_range_with_no_days_up_to_today_holds_none() {
+        let today = day(2026, 10, 20);
+        let holds = |text: &str| Range::parse(text).is_some_and(|range| range.holds_days(today));
+        for good in ["ytd", "1d", "2026-10", "2026", "2024:2025", "-6m:-1m", ":2020", "all", "2026-10-20:"] {
+            assert!(holds(good), "{good}");
+        }
+        for empty in ["2030", "2026-11", "2025:2024", "-1m:-6m", "2026-10-21:"] {
+            assert!(!holds(empty), "{empty}");
+        }
     }
 }
