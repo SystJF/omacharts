@@ -240,9 +240,15 @@ pub fn session_times(
                 let regular = matches!(range.hours, Hours::Rth);
                 // Outside the regular session is extended, a bar between
                 // sessions included: a print while the exchange is shut is
-                // still not regular hours.
-                let step = timeframe.seconds();
-                runs(bars, |bar| in_regular_hours(&schedule, bar.ts, step) == regular)
+                // still not regular hours. A bar is regular when any of it
+                // is: a 4h bar from 08:00 holds the 09:30 open, and taken by
+                // its start alone every other 4h bar was shaded.
+                let step = timeframe.seconds().max(1);
+                let sessions = regular_sessions(&schedule, bars, step);
+                runs(bars, |bar| {
+                    let at = sessions.partition_point(|(_, to)| *to <= bar.ts);
+                    sessions.get(at).is_some_and(|(from, _)| *from < bar.ts + step) == regular
+                })
             }
             Hours::Clock { from, to, zone: own } => {
                 let zone = own.as_deref().and_then(|z| z.parse::<Tz>().ok()).unwrap_or(zone);
@@ -264,18 +270,19 @@ pub fn session_times(
     time
 }
 
-/// Whether any of the bar starting at `ts`, `step` seconds long, falls in
-/// the regular session. A 4h bar from 08:00 holds the 09:30 open; taken by
-/// its start alone it was pre-market, and on a chart of regular hours every
-/// other 4h bar was shaded.
-fn in_regular_hours(schedule: &Schedule, ts: i64, step: i64) -> bool {
-    if schedule.part_at(ts) == Some(Part::Regular) {
-        return true;
-    }
-    let end = ts + step.max(1);
-    schedule.days(ts, end - 1).iter().any(|day| {
-        day.segments.iter().any(|(part, from, to)| *part == Part::Regular && *from < end && *to > ts)
-    })
+/// The regular sessions across these bars, as instants, oldest first.
+///
+/// Laid out once for the series rather than once a bar, which made a
+/// minute chart lay out the same day hundreds of times.
+fn regular_sessions(schedule: &Schedule, bars: &[Bar], step: i64) -> Vec<(i64, i64)> {
+    let (Some(first), Some(last)) = (bars.first(), bars.last()) else { return Vec::new() };
+    schedule
+        .days(first.ts, last.ts + step - 1)
+        .into_iter()
+        .flat_map(|day| day.segments)
+        .filter(|(part, ..)| *part == Part::Regular)
+        .map(|(_, from, to)| (from, to))
+        .collect()
 }
 
 /// The runs of consecutive bars that pass `test`.
