@@ -965,6 +965,13 @@ the unit says which sort:
 - four digits are a calendar year, `2025`, and a year and a month one month,
   `2026-09`. These are the ones that stop before today: the chart shows that
   year or that month edge to edge, and new bars do not move it;
+- a day is that day alone: `2026-03-12` or `2026/3/12`; `10/12` or `12 mar`
+  with no year, the latest one that has passed, so this year's unless it is
+  still to come; `mon` this week's Monday, today on a Monday, and `2mon` the
+  one before, with every day of the week from `mon` to `sun` and any count;
+  `today` and `yesterday`. A day ends a slice too: `mon:` is since Monday;
+- a dash in front of a count or a day of the week changes nothing, so `-2w`
+  is `2w` and `-2mon` is `2mon`;
 - a colon slices, the way pandas slices dates, with both ends included:
   `2025:` from 1 January 2025 to today, `2024:2025-06` from the start of 2024
   to the end of June 2025, `:2020` from the first bar to the end of 2020, and

@@ -270,7 +270,12 @@ crop: 898,193,763,532   (the whole card, 24px layout margin)
 | `2025/03:2025/06` | From the start of March to the end of June 2025. A colon joins two ends, and both are included. Two dots do the same: `2025/03..2025/06`, `2025..` |
 | `:2020` | From the first bar to the end of 2020 |
 | `2026/03/12:` | From 12 March 2026 to today |
+| `2026/03/12`, `10/12`, `12 mar` | That one day. With no year, the latest one that has passed: this year's, or last year's if this year's is still to come |
+| `mon`, `2mon` | This week's Monday (today, on a Monday), and the one before it. Every day of the week works, `tue` to `sun`, and so does any count |
+| `mon:`, `2mon:fri` | From Monday to today; from the Monday before last to the latest Friday |
+| `today`, `yesterday` | That day |
 | `-6m:-1m` | From six months ago to one month ago |
+| `-2w`, `-2mon` | The same as `2w` and `2mon`: a dash in front of a count or a day of the week changes nothing |
 | `all` or `:` | The whole history |
 
 Today is the day of the last bar. The ⓘ beside the title shows examples like these. Text that cannot become a range, whatever you type next, turns the box red.

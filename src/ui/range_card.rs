@@ -489,7 +489,7 @@ impl RangeCard {
                             ("6m 3y", "the last 6 months, 3 years"),
                             ("ytd qtd mtd", "this year, quarter, month"),
                             ("2ytd", "this year and last"),
-                            ("2026/03/12:", "since 12 Mar 2026"),
+                            ("mon: 10/12:", "since Monday, 12 Oct"),
                             ("all", "the whole history"),
                         ],
                     ),
@@ -498,6 +498,8 @@ impl RangeCard {
                         &[
                             ("2025", "all of 2025"),
                             ("2025/03", "March 2025"),
+                            ("2025/03/12 12 mar", "one day; no year is this year"),
+                            ("mon 2mon", "this Monday, the one before"),
                             ("2025/03:2025/06", "March to June 2025"),
                             ("-6m:-1m", "6 months to 1 month ago"),
                         ],
@@ -1109,18 +1111,37 @@ fn slashed(range: Range) -> String {
 }
 
 /// Text that is not a range yet but could be with more keys: `20` on the
-/// way to `2025`, `2026-` to a month, `y` to `ytd`. Only text no key can
-/// save turns the box red.
+/// way to `2025`, `2026-` to a month, `y` to `ytd`, `12 n` to `12 nov`.
+/// Only text no key can save turns the box red.
 fn could_become(text: &str) -> bool {
-    // The first dot of `2025..` is on its way to being a slice.
-    let text = text.trim().trim_end_matches('.');
-    if text.chars().all(|c| c.is_ascii_digit() || matches!(c, '-' | '/' | ':' | '.')) {
-        return true;
+    const MONTHS: [&str; 12] = [
+        "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november",
+        "december",
+    ];
+    const WORDS: [&str; 19] = [
+        "ytd", "mtd", "qtd", "wtd", "year", "month", "week", "day", "all", "max", "today", "yesterday", "monday",
+        "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    ];
+    let text = text.trim().to_lowercase();
+    // Each run of letters is on its way to a word the grammar knows; one
+    // with digits after it can only be a month's name, `mar 12`.
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find(|c: char| c.is_ascii_alphabetic()) {
+        let after = &rest[start..];
+        let len = after.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(after.len());
+        let (word, tail) = after.split_at(len);
+        let scope = tail.split([':', '.']).next().unwrap_or_default();
+        let known = match scope.contains(|c: char| c.is_ascii_digit()) {
+            true => MONTHS.iter().any(|month| month.starts_with(word)),
+            false => MONTHS.iter().chain(WORDS.iter()).any(|known| known.starts_with(word)),
+        };
+        if !known {
+            return false;
+        }
+        rest = tail;
     }
-    let unit = text.trim_start_matches(['-', ':']).trim_start_matches(|c: char| c.is_ascii_digit()).to_lowercase();
-    ["ytd", "mtd", "qtd", "wtd", "year", "month", "week", "day", "all", "max"]
-        .iter()
-        .any(|word| word.starts_with(&unit))
+    // And the rest is numbers and what goes between them.
+    text.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '/' | ':' | '.' | ' ' | ','))
 }
 
 fn days_in(year: i32, month: u32) -> u32 {
@@ -1207,10 +1228,10 @@ mod tests {
 
     #[test]
     fn half_typed_text_is_not_an_error() {
-        for text in ["2", "20", "2026-", "2026-0", "2026/0", "2026/03/1", "2025:", "2025.", "2025..20", "-6m.", "-2", "y", "2yt", "a", "m"] {
+        for text in ["2", "20", "2026-", "2026-0", "2026/0", "2026/03/1", "2025:", "2025.", "2025..20", "-6m.", "-2", "y", "2yt", "a", "m", "2mo", "th", "12 n", "mar 1", "10/", "yest", "mon:1"] {
             assert!(could_become(text), "{text}");
         }
-        for text in ["6x", "2025q4", "zz"] {
+        for text in ["6x", "2025q4", "zz", "mon2", "12 x"] {
             assert!(!could_become(text), "{text}");
         }
     }
