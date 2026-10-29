@@ -326,15 +326,6 @@ impl PickFrame {
         *self.overlay.borrow_mut() = Some(overlay);
     }
 
-    /// Pin `widget` inside the bare box's bottom-right corner, over the
-    /// text rather than beside it, so the text stays centred.
-    pub fn pin_in_box(&self, widget: &impl IsA<gtk::Widget>) {
-        let Some(overlay) = self.overlay.borrow().clone() else { return };
-        widget.set_halign(gtk::Align::End);
-        widget.set_valign(gtk::Align::End);
-        overlay.add_overlay(widget);
-    }
-
     /// Keep the list folded away until asked for, and drop it down over
     /// whatever is under the box then, so the frame keeps its shape.
     pub fn drop_list(&self) {

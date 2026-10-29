@@ -286,7 +286,7 @@ Today is the day of the last bar. The ⓘ beside the title shows examples like t
 |---|---|
 | <kbd>Enter</kbd> | Shows the range. <kbd>Ctrl</kbd> + <kbd>Enter</kbd> does it from anywhere in the card |
 | <kbd>Space</kbd> or <kbd>?</kbd> in an empty box, or <kbd>↓</kbd> | Drops a list under the box: the common ranges when nothing is typed, and what the text could mean once something is, each with the day it starts. <kbd>↑</kbd> <kbd>↓</kbd> move through it and <kbd>Enter</kbd> shows the highlighted row |
-| <kbd>Tab</kbd> | Moves to the resolution in the corner of the box, then to **From** and **To** |
+| <kbd>Tab</kbd> | Moves to the resolution under the box, then to **From** and **To** |
 | <kbd>Esc</kbd>, or a click outside | Closes it, changing nothing |
 
 <!-- regenerate:
@@ -302,7 +302,7 @@ crop: 898,193,763,889   (the card and the list, 24px layout margin)
 
 ### The resolution in Go to
 
-The corner of the box shows the resolution the range will be shown at. **auto** beside it means Omacharts chose it, and **auto** alone, with nothing typed yet, means it will choose once there is a range; until then it has nothing to open. The chart keeps its own resolution unless the range would make too few bars or too many, or reaches further back than the feed keeps bars of that resolution. Then it takes the one on the strip that fits best, the one nearest a comfortable 140 or so candles however far it is from the chart's own, or, when none on the strip fits, a common one off it such as `5m`. A year of 5m bars is shown daily, a month of daily bars hourly, and a single day 5m even on a strip that starts at `1h`.
+Under the box, at its right, is the resolution the range will be shown at. **auto** beside it means Omacharts chose it, and **auto** alone, with nothing typed yet, means it will choose once there is a range; until then it has nothing to open. The chart keeps its own resolution unless the range would make too few bars or too many, or reaches further back than the feed keeps bars of that resolution. Then it takes the one on the strip that fits best, the one nearest a comfortable 140 or so candles however far it is from the chart's own, or, when none on the strip fits, a common one off it such as `5m`. A year of 5m bars is shown daily, a month of daily bars hourly, and a single day 5m even on a strip that starts at `1h`.
 
 To choose one yourself, <kbd>Tab</kbd> to it. Only a resolution the range can be shown at is offered: one the feed keeps far enough back, which makes at least 12 bars and no more than 3,000. A daily bar for today, or a year of 5m bars, is skipped by the arrows, the wheel and typing alike, and a resolution you chose goes back to **auto** when the range changes to one it doesn't fit.
 

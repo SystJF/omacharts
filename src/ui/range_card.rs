@@ -8,7 +8,7 @@
 //! around that chart, not in words.
 //!
 //! The range card has two more things. The resolution it will show at sits
-//! in the box's corner, `1D auto`, and Tab reaches it; it offers only the
+//! under the box at its right, `1D auto`, and Tab reaches it; it offers only the
 //! resolutions the range can be shown at. From and To, under the box, are
 //! the first and last day the range lands on, and Tab goes into them to set
 //! either by hand, which writes the range back into the box as a slice,
@@ -69,7 +69,7 @@ pub struct Context {
 }
 
 /// The resolution a range will show at, in a key-sized chip pinned in the
-/// box's corner: `1D`, or `1W auto` when it is the window's pick.
+/// row under the box: `1D`, or `1W auto` when it is the window's pick.
 struct Chip {
     chip: gtk::Box,
     key: gtk::Label,
@@ -764,7 +764,14 @@ impl RangeCard {
         chip.chip.set_focusable(true);
         chip.chip.set_focus_on_click(true);
         chip.chip.set_cursor_from_name(Some("pointer"));
-        frame.pin_in_box(&chip.chip);
+        // The resolution on a row of its own under the box, at its right:
+        // in the box's corner, a long slice ran under it.
+        chip.chip.set_halign(gtk::Align::End);
+        let resolution = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        resolution.add_css_class("range-chip-row");
+        resolution.append(&chip.chip);
+        chip.chip.set_hexpand(true);
+        frame.append(&resolution);
 
         let from = DateCell::new("From", true);
         let to = DateCell::new("To", false);
@@ -1097,8 +1104,6 @@ impl RangeCard {
 
         let wrong = !text.trim().is_empty() && parsed.is_none() && !could_become(&text);
         set_class(&self.frame.entry, "error", wrong);
-        // Long text keeps clear of the chip in the corner.
-        set_class(&self.frame.entry, "long", text.chars().count() > 12);
 
         let (from, to) = match parsed {
             Some(range) => Self::days(range, context),

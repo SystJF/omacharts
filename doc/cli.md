@@ -1013,7 +1013,7 @@ showing from 2025 to today on pos:0 AAPL 1W in "Macro"
 ```
 
 In the window, Ctrl+G opens a card over the chart, where the symbol picker
-opens: a box with the resolution in its corner, `1D auto`, or `auto` alone
+opens: a box with the resolution under it at its right, `1D auto`, or `auto` alone
 while nothing is typed (with nothing to open then, and Tab passes it by), and under it the
 first and last day the range lands on, `2026/03/21`. Every chart fades while
 it is open, and the one it acts on wears its focus ring twice as wide. The ⓘ
@@ -1022,7 +1022,7 @@ is typed, and the box turns red only for text no further key could make a
 range.
 Space or `?` on an empty box, or Down, drops a list over it: the common ranges
 with nothing typed, what the text could mean once something is, each with the
-day it starts. Tab goes first to the resolution in the box's corner: Up and
+day it starts. Tab goes first to the resolution under the box: Up and
 Down count it up or down, and Left and Right move it along minutes, hours,
 days, weeks, months, quarters and years keeping the count, so `3D` becomes
 `3W`, whether or not the strip offers it; where the count does not fit, they

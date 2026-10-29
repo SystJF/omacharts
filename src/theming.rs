@@ -485,7 +485,6 @@ popover.pick-bare .pick-query entry {
 popover.pick-bare .pick-query entry:focus-within { box-shadow: inset 0 0 0 2px @accent_color; }
 popover.pick-bare .pick-query entry.error { box-shadow: inset 0 0 0 2px @error_color; }
 popover.range-goto .pick-query entry { min-height: 48px; }
-popover.range-goto .pick-query entry.long > text { margin-right: 76px; }
 popover.pick-drop > contents { padding: 0; }
 /* The month under the Go to card, as wide as it: one header between two
    arrows, From to To shaded, the end being set filled and the other ringed.
@@ -570,8 +569,9 @@ entry.range-date > image { opacity: 0.45; -gtk-icon-size: 13px; }
 entry.range-date > image:hover { opacity: 0.9; }
 
 /* The resolution, pinned in the range box's bottom-right corner. */
+.range-chip-row { padding: 8px 20px 0 20px; }
 .range-chip {
-  margin: 0 6px 6px 0;
+  margin: 0;
   padding: 1px 6px;
   border-radius: 5px;
   font-family: monospace;
