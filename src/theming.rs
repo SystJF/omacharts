@@ -458,21 +458,21 @@ popover.pick-frame > contents { padding: 0; }
 .pick-list.navigation-sidebar > row:selected:focus-visible { outline: none; }
 .pick-ticker { font-family: monospace; font-weight: 700; font-size: 0.9em; }
 .pick-name { font-size: 0.9em; opacity: 0.55; }
-/* The chart a picker will change, dimmed under it. */
+/* Every chart while a picker is open, faded under it; the one it will
+   change wears the wide ring. */
 .pick-shade { background-color: alpha(black, 0.4); }
 
 /* A picker that takes something typed — Ctrl+G's range, a digit's resolution:
-   a centred title with an ⓘ for the syntax, the chart it acts on under it
-   when there are several, a framed box with the text centred, and under it
-   what the answer comes to. Nothing under the box comes or goes with typing;
-   the list drops down over it in a popover of its own. */
+   a centred title with an ⓘ for the syntax, a framed box with the text
+   centred, and under it what the answer comes to. Nothing under the box
+   comes or goes with typing; the list drops down over it in a popover of
+   its own. */
 popover.pick-bare > contents { padding: 0; }
 popover.pick-bare > contents > box { padding-bottom: 22px; }
 popover.pick-bare .pick-header { padding: 14px 20px 0 20px; }
 popover.pick-bare .pick-title { font-weight: 700; font-size: 1.2em; }
 popover.pick-bare .pick-info { opacity: 0.35; -gtk-icon-size: 14px; }
 popover.pick-bare .pick-info:hover { opacity: 0.8; }
-popover.pick-bare .pick-target { margin-top: 2px; }
 popover.pick-bare .pick-query { padding: 14px 20px 0 20px; border-bottom: none; }
 popover.pick-bare .pick-query entry {
   min-height: 42px;
@@ -1089,6 +1089,14 @@ paned.chart-split > separator:active {{ background-color: @omacharts_gutter_hove
   border: {ring}px solid transparent;
 }}
 .chart-split .chart-pane.focused {{ border-color: @omacharts_focus; }}
+/* While a picker is open every chart fades, and the one it will change
+   wears the ring twice as wide: a second ring inside the border, as an
+   outline, so nothing inside the pane moves. */
+.chart-split .chart-pane.picked {{
+  border-color: @omacharts_focus;
+  outline: {ring}px solid @omacharts_focus;
+  outline-offset: -{double}px;
+}}
 /* The drawing tools stand beside the charts on the window's own ground,
    with the ring's width of it before the tools, so the toggle above stands
    centred over them. Their edge against the charts is the rail's against
@@ -1102,6 +1110,7 @@ paned.chart-split > separator:active {{ background-color: @omacharts_gutter_hove
 ",
         gutter = GUTTER_WIDTH,
         ring = RING_WIDTH,
+        double = 2 * RING_WIDTH,
     );
     css
 }

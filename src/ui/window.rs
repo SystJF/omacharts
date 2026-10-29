@@ -5500,7 +5500,8 @@ impl Window {
         let pane = self.focused_pane();
         let leaves = self.layout.borrow().leaves();
         let at = leaves.iter().position(|leaf| *leaf == pane.id).unwrap_or(0);
-        Over::chart(&pane, at, leaves.len() < 2)
+        let panes = self.panes.borrow();
+        Over::chart(&pane, panes.iter().map(|pane| pane.as_ref()), at)
     }
 
     /// The resolution box: type "3", "15", "4h", "1D".

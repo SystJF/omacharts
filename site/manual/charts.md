@@ -68,7 +68,7 @@ crop: 898,193,763,399   (the whole card, 24px layout margin)
 -->
 {% include figure.html src="/assets/manual/charts/change-resolution.png" alt="The Change resolution card over an NVDA daily chart, with 4h typed and 4 hours under the box" caption="**Change resolution** with 4h typed." %}
 
-**Change resolution** opens near the top of the window, over the focused chart. Under the box it says what you have typed as a resolution (`240` shows **4 hours**), or **not a resolution** in red. With more than one chart in the window, the symbol and position of the chart it will change are under the title, such as **NVDA · pos:1**. The ⓘ beside the title shows examples of what it takes.
+**Change resolution** opens near the top of the window, over the focused chart. Under the box it says what you have typed as a resolution (`240` shows **4 hours**), or **not a resolution** in red. With more than one chart in the window, every chart fades and the one it will change wears its focus ring twice as wide. The ⓘ beside the title shows examples of what it takes.
 
 <kbd>Enter</kbd> sets the resolution; <kbd>Esc</kbd> or a click elsewhere closes it without changing anything. A resolution not on the strip is added to it, in order of length.
 

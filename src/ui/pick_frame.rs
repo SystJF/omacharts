@@ -5,11 +5,12 @@
 //! on the window a sixth of the way down, so the eye knows where to look
 //! whichever chart is focused; opening over the chart itself put it in a
 //! different corner each time and half off a small pane. Which chart a pick
-//! lands on is said instead: that chart dims, the others stay lit, and the
-//! search row names it. Type, pick, gone — there is nothing here anybody
-//! would want to drag beside a chart, so it stays inside the window.
+//! lands on is said instead: every chart fades behind the frame, the one it
+//! changes wears its focus ring twice as wide, and the search row names it.
+//! Type, pick, gone — there is nothing here anybody would want to drag
+//! beside a chart, so it stays inside the window.
 //!
-//! A pick that changes no chart — a symbol for a watchlist — dims nothing
+//! A pick that changes no chart — a symbol for a watchlist — fades nothing
 //! and names the list.
 
 use std::cell::{Cell, RefCell};
@@ -34,20 +35,21 @@ const FEWEST_ROWS: i32 = 5;
 
 /// What the frame opens over.
 pub enum Over {
-    /// One chart: it dims, the others stay lit, and the search row names it
-    /// by position, the way every command names a chart. `symbol` and
-    /// `alone` are for a bare frame, which names the chart only when the
-    /// window holds more than one.
-    Chart { inside: gtk::Widget, shade: gtk::Widget, at: usize, symbol: Option<String>, alone: bool },
+    /// One chart: every chart fades, `ring` (the chart's pane) wears a ring
+    /// twice the focus ring's width, and the search row names it by
+    /// position, the way every command names a chart. A bare frame names
+    /// nothing: the ring says which.
+    Chart { inside: gtk::Widget, shades: Vec<gtk::Widget>, ring: gtk::Widget, at: usize },
     /// The window, for a pick that changes no chart. `name` is what it does
     /// change.
     Window { inside: gtk::Widget, name: String },
 }
 
 impl Over {
-    pub fn chart(pane: &ChartPane, at: usize, alone: bool) -> Over {
-        let symbol = pane.instrument.borrow().as_ref().map(|i| i.display_symbol());
-        Over::Chart { inside: window_content(&pane.root), shade: pane.shade.clone().upcast(), at, symbol, alone }
+    /// Over `pane`, at `at` among `all`, the charts on screen.
+    pub fn chart<'a>(pane: &ChartPane, all: impl IntoIterator<Item = &'a ChartPane>, at: usize) -> Over {
+        let shades = all.into_iter().map(|pane| pane.shade.clone().upcast()).collect();
+        Over::Chart { inside: window_content(&pane.root), shades, ring: pane.root.clone().upcast(), at }
     }
 
     /// Centred on the window `from` is in, naming `name`.
@@ -82,7 +84,8 @@ pub struct PickFrame {
     /// "→ pos:1": which chart a pick will change. On a bare frame, the
     /// line under the title.
     target: gtk::Label,
-    shade: RefCell<Option<gtk::Widget>>,
+    /// The charts' shades, and the pane wearing the wide ring, while open.
+    shade: RefCell<Option<(Vec<gtk::Widget>, gtk::Widget)>>,
     /// Where the keyboard was before the frame opened, to hand it back to.
     back: RefCell<Option<glib::WeakRef<gtk::Widget>>>,
     /// The catcher for keys typed while the frame is still opening, and the
@@ -311,9 +314,8 @@ impl PickFrame {
         header.set_halign(gtk::Align::Center);
         header.append(&name);
         header.append(&info);
+        // The chart is named by its ring, not in words.
         self.query.remove(&self.target);
-        self.target.set_halign(gtk::Align::Center);
-        self.content.prepend(&self.target);
         self.content.prepend(&header);
 
         self.query.remove(&self.entry);
@@ -390,23 +392,23 @@ impl PickFrame {
         *self.on_pick.borrow_mut() = Some(Rc::new(on_pick));
 
         let anchor = match over {
-            Over::Chart { inside, shade, at, symbol, alone } => {
+            Over::Chart { inside, shades, ring, at } => {
                 let bare = self.overlay.borrow().is_some();
-                let text = match (bare, symbol) {
-                    (false, _) => format!("→ pos:{at}"),
-                    (true, _) if *alone => String::new(),
-                    (true, Some(symbol)) => format!("{symbol} · pos:{at}"),
-                    (true, None) => format!("pos:{at}"),
-                };
-                self.target.set_text(&text);
-                shade.set_visible(true);
+                self.target.set_text(&match bare {
+                    true => String::new(),
+                    false => format!("→ pos:{at}"),
+                });
+                for shade in shades {
+                    shade.set_visible(true);
+                }
+                ring.add_css_class("picked");
                 // The window's corners stand over the charts on a patch of
                 // their colour, which the shade does not reach: let the
-                // dimmed chart show through it instead of a lit square.
-                if let Some(root) = shade.root() {
+                // faded chart show through it instead of a lit square.
+                if let Some(root) = ring.root() {
                     root.add_css_class("picking");
                 }
-                *self.shade.borrow_mut() = Some(shade.clone());
+                *self.shade.borrow_mut() = Some((shades.clone(), ring.clone()));
                 inside
             }
             Over::Window { inside, name } => {
@@ -508,9 +510,12 @@ impl PickFrame {
         if let Some(help) = self.help.borrow().as_ref() {
             help.popdown();
         }
-        if let Some(shade) = self.shade.borrow_mut().take() {
-            shade.set_visible(false);
-            if let Some(root) = shade.root() {
+        if let Some((shades, ring)) = self.shade.borrow_mut().take() {
+            for shade in shades {
+                shade.set_visible(false);
+            }
+            ring.remove_css_class("picked");
+            if let Some(root) = ring.root() {
                 root.remove_css_class("picking");
             }
         }
