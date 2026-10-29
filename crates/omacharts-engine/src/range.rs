@@ -683,7 +683,8 @@ fn calendar(text: &str) -> Option<Range> {
 /// [`resolution_for`].
 pub struct Fit<'a> {
     /// The resolutions offered on the strip, in any order: a range moves
-    /// only between those, never to one somebody took off it.
+    /// between those, and off them to one of [`COMMON`] only when none of
+    /// them fits.
     pub ladder: &'a [Timeframe],
     /// The fewest and the most bars a chart will spread across its width.
     pub bars: (usize, usize),
@@ -716,7 +717,8 @@ pub fn bars_in(range: Range, today: NaiveDate, timeframe: Timeframe, share: (f64
 pub const AIM_BARS: (usize, usize) = (50, 400);
 
 /// The resolution to show `range` at: `current` when it fits, or else the
-/// nearest on the ladder that does.
+/// nearest on the ladder that does, or else the nearest of [`COMMON`] that
+/// does.
 ///
 /// It fits when the feed reaches back far enough at that resolution and the
 /// range is between the fewest and the most bars asked for. Too many, or out
@@ -744,26 +746,51 @@ pub fn resolution_for(range: Range, today: NaiveDate, current: Timeframe, fit: &
             _ => 0.0,
         }
     };
-    let mut ladder: Vec<Timeframe> = fit.ladder.to_vec();
-    ladder.push(current);
-    ladder.sort_by_key(|tf| tf.seconds());
-    ladder.dedup();
-    let at = |tf: Timeframe| ladder.iter().position(|t| *t == tf).unwrap_or(0);
-    let here = at(current);
-    // Closest to fitting first, then fewest steps along the strip from
+    // Closest to fitting first, then fewest steps along the ladder from
     // `current`, then the bars nearest the middle of the band.
     let middle = (fewest * most).sqrt();
-    let rank = |tf: Timeframe| (miss(tf), at(tf).abs_diff(here), (count(tf) / middle).ln().abs());
-    ladder
-        .iter()
-        .copied()
-        .filter(|&tf| usable(tf))
-        .min_by(|&a, &b| {
+    let best = |offered: &[Timeframe]| {
+        let mut ladder: Vec<Timeframe> = offered.to_vec();
+        ladder.push(current);
+        ladder.sort_by_key(|tf| tf.seconds());
+        ladder.dedup();
+        let at = |tf: Timeframe| ladder.iter().position(|t| *t == tf).unwrap_or(0);
+        let here = at(current);
+        let rank = |tf: Timeframe| (miss(tf), at(tf).abs_diff(here), (count(tf) / middle).ln().abs());
+        ladder.iter().copied().filter(|&tf| usable(tf)).min_by(|&a, &b| {
             let (a, b) = (rank(a), rank(b));
             a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.total_cmp(&b.2))
         })
-        .unwrap_or(current)
+    };
+    // The strip first. Only when nothing on it fits does a common
+    // resolution off it come in: a day on a strip that starts at an hour
+    // is a handful of candles, and five minutes is a chart.
+    match best(fit.ladder) {
+        Some(tf) if miss(tf) == 0.0 => tf,
+        on_strip => {
+            let wider: Vec<Timeframe> = fit.ladder.iter().copied().chain(COMMON).collect();
+            match best(&wider) {
+                Some(tf) if miss(tf) == 0.0 => tf,
+                _ => on_strip.unwrap_or(current),
+            }
+        }
+    }
 }
+
+/// The resolutions a range may move to when none on the strip fits it, and
+/// that the Go to card offers beside the strip's.
+pub const COMMON: [Timeframe; 10] = [
+    Timeframe::minutes(1),
+    Timeframe::minutes(5),
+    Timeframe::minutes(10),
+    Timeframe::minutes(15),
+    Timeframe::minutes(30),
+    Timeframe::hours(1),
+    Timeframe::hours(4),
+    Timeframe::days(1),
+    Timeframe::weeks(1),
+    Timeframe::months(1),
+];
 
 #[cfg(test)]
 mod tests {
@@ -902,15 +929,33 @@ mod tests {
         assert_eq!(resolution_for(week, today, Timeframe::days(1), &stock), Timeframe::hours(1));
     }
 
-    /// Nothing on the strip fits: the chart stays put rather than jumping
-    /// to something nobody offered.
+    /// Nothing on the strip fits: the nearest common resolution that does,
+    /// and with none, the chart stays put.
     #[test]
-    fn nothing_that_fits_keeps_the_resolution() {
+    fn nothing_on_the_strip_that_fits_looks_off_it() {
         let today = day(2026, 10, 19);
         let only = [Timeframe::minutes(5)];
         let stock = fit(&only, STOCK, &yahoo);
         let year = Range::Back(1, Span::Year);
-        assert_eq!(resolution_for(year, today, Timeframe::minutes(5), &stock), Timeframe::minutes(5));
+        assert_eq!(resolution_for(year, today, Timeframe::minutes(5), &stock), Timeframe::hours(1));
+        let nothing = Fit { offers: &|tf| tf == Timeframe::minutes(5), ..fit(&only, STOCK, &yahoo) };
+        assert_eq!(resolution_for(year, today, Timeframe::minutes(5), &nothing), Timeframe::minutes(5));
+    }
+
+    /// A day on a strip that starts at an hour: an off-strip resolution
+    /// that fits beats an hour's six candles, while the feed reaches it.
+    #[test]
+    fn a_short_range_off_the_strip_takes_a_common_resolution() {
+        let today = day(2026, 10, 29);
+        let strip = [Timeframe::hours(1), Timeframe::hours(4), Timeframe::days(1), Timeframe::weeks(1)];
+        let stock = Fit { bars: AIM_BARS, ..fit(&strip, STOCK, &yahoo) };
+        let yesterday = Range::Day(End::Yesterday);
+        assert_eq!(resolution_for(yesterday, today, Timeframe::hours(1), &stock), Timeframe::minutes(5));
+        // Past the sixty days Yahoo keeps minutes for, the hour stays.
+        let april = Range::Day(End::Day(day(2026, 4, 27)));
+        assert_eq!(resolution_for(april, today, Timeframe::hours(1), &stock), Timeframe::hours(1));
+        // A strip that fits keeps its own.
+        assert_eq!(resolution_for(Range::Back(1, Span::Year), today, Timeframe::days(1), &stock), Timeframe::days(1));
     }
 
     /// Picked by the window, a range aims for 50 to 400 bars, and stays as
@@ -929,8 +974,8 @@ mod tests {
         // From further off, it stops at the first that fits.
         assert_eq!(at(Range::Back(1, Span::Year), Timeframe::minutes(5)), Timeframe::days(1));
         // Twenty years of weeks is 1,040, and nothing coarser is on the strip:
-        // the closest there is.
-        assert_eq!(at(Range::Back(20, Span::Year), Timeframe::days(1)), Timeframe::weeks(1));
+        // months, off it, are 240.
+        assert_eq!(at(Range::Back(20, Span::Year), Timeframe::days(1)), Timeframe::months(1));
     }
 
     #[test]

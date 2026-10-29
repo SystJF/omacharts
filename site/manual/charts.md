@@ -302,7 +302,7 @@ crop: 898,193,763,889   (the card and the list, 24px layout margin)
 
 ### The resolution in Go to
 
-The corner of the box shows the resolution the range will be shown at. **auto** beside it means Omacharts chose it, and **auto** alone, with nothing typed yet, means it will choose once there is a range. The chart keeps its own resolution unless the range would make too few bars or too many, or reaches further back than the feed keeps bars of that resolution. Then it takes the nearest one on the strip that fits. A year of 5m bars is shown daily, and a month of daily bars hourly.
+The corner of the box shows the resolution the range will be shown at. **auto** beside it means Omacharts chose it, and **auto** alone, with nothing typed yet, means it will choose once there is a range. The chart keeps its own resolution unless the range would make too few bars or too many, or reaches further back than the feed keeps bars of that resolution. Then it takes the nearest one on the strip that fits, or, when none on the strip fits, a common one off it such as `5m`. A year of 5m bars is shown daily, a month of daily bars hourly, and a single day 5m even on a strip that starts at `1h`.
 
 To choose one yourself, <kbd>Tab</kbd> to it. Only a resolution the range can be shown at is offered: one the feed keeps far enough back, which makes at least 12 bars and no more than 3,000. A daily bar for today, or a year of 5m bars, is skipped by the arrows, the wheel and typing alike, and a resolution you chose goes back to **auto** when the range changes to one it doesn't fit.
 
@@ -313,7 +313,7 @@ To choose one yourself, <kbd>Tab</kbd> to it. Only a resolution the range can be
 | Typing a resolution, such as `4h` or `W` | Sets it |
 | The wheel | Steps along the resolution strip |
 | <kbd>Backspace</kbd> or <kbd>Delete</kbd> | Sets the chart's own resolution. Pressed again, back to **auto** |
-| A click, or <kbd>Space</kbd> | Lists **auto**, then the chart's own resolution and the rest of the strip that fit the range |
+| A click, or <kbd>Space</kbd> | Lists **auto**, then the chart's own resolution, and the rest of the strip and common resolutions off it (`1m` to `1M`) that fit the range |
 
 ### From and To
 

@@ -1000,7 +1000,9 @@ strip that fits. A year of five-minute bars is past what the feed keeps and
 an hour makes 1,700, so it moves to daily; a month from last spring is short,
 but the feed keeps five-minute bars for sixty days, so it moves too; a month
 of daily bars is 21 candles, so it moves to hourly. Nothing on the strip
-fitting takes the one closest to fitting. `--resolution` names one instead, and the range is shown at it whether
+fitting looks off it, at 1m, 5m, 10m, 15m, 30m, 1h, 4h, 1D, 1W and 1M, so a
+single day on a strip that starts at an hour shows at five minutes; nothing
+there either takes the one on the strip closest to fitting. `--resolution` names one instead, and the range is shown at it whether
 it fits or not:
 
 ```
@@ -1031,7 +1033,7 @@ resolution the range can be shown at is ever set: the feed reaches back far
 enough at it, and it makes between 12 and 3,000 bars. The rest are stepped
 over, and one set by hand goes back to the window's pick when the range moves
 past it. A click on it or Space lists auto, then the chart's own resolution
-and the rest of the strip that fit; Enter shows the
+and the rest of the strip and of those common ones that fit; Enter shows the
 range. Tab again goes into From
 and To, where Left and Right pick the year, month or day, and Up and Down,
 digits or a month's first letters set it; the box then says the slice that

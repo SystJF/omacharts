@@ -681,9 +681,13 @@ impl RangeCard {
             Some(context) => (context.plan.clone(), context.ladder.clone(), context.current),
             None => return,
         };
-        // Auto, then the chart's own resolution, then the rest of the strip:
-        // those the range can be shown at.
-        let rest = ladder.into_iter().filter(|tf| *tf != current).map(Some);
+        // Auto, then the chart's own resolution, then the rest of the strip
+        // and the common ones off it, shortest first: those the range can be
+        // shown at. A day on a strip that starts at an hour still offers 5m.
+        let mut rest: Vec<Timeframe> = ladder.into_iter().chain(omacharts_engine::range::COMMON).filter(|tf| *tf != current).collect();
+        rest.sort_by_key(|tf| tf.seconds());
+        rest.dedup();
+        let rest = rest.into_iter().map(Some);
         let picks: Vec<Option<Timeframe>> = [None, Some(current)]
             .into_iter()
             .chain(rest)
