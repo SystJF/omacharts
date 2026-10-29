@@ -1003,8 +1003,10 @@ showing from 2025 to today on pos:0 AAPL 1W in "Macro"
 ```
 
 In the window, Ctrl+G opens a card over the chart, where the symbol picker
-opens: a box with the resolution in its corner, `1D auto`, the bars that makes
-under it, and the first and last day the range lands on, `2026/03/21`. The ⓘ
+opens: a box with the resolution in its corner, `1D auto`, or `auto` alone
+while nothing is typed, and under it the
+first and last day the range lands on, `2026/03/21`. Every chart fades while
+it is open, and the one it acts on wears its focus ring twice as wide. The ⓘ
 beside the title lists what can be typed. The card keeps that shape whatever
 is typed, and the box turns red only for text no further key could make a
 range.
@@ -1013,11 +1015,16 @@ with nothing typed, what the text could mean once something is, each with the
 day it starts. Tab goes first to the resolution in the box's corner: Up and
 Down count it up or down, and Left and Right move it along minutes, hours,
 days, weeks, months, quarters and years keeping the count, so `3D` becomes
-`3W`, whether or not the strip offers it. The wheel steps along the strip, a
+`3W`, whether or not the strip offers it; where the count does not fit, they
+take the nearest that does, the strip's first, so `1D` on a year of bitcoin
+goes left to `4h`. The wheel steps along the strip, a
 key such as `4h` or `W` sets it, and Backspace or Delete sets the chart's own
-resolution, then pressed again hands back to the window's pick. A click on it
-or Space lists auto, the chart's own resolution, then the rest of the strip,
-with the bars each makes and which reach back far enough; Enter shows the
+resolution, then pressed again hands back to the window's pick. Only a
+resolution the range can be shown at is ever set: the feed reaches back far
+enough at it, and it makes between 12 and 3,000 bars. The rest are stepped
+over, and one set by hand goes back to the window's pick when the range moves
+past it. A click on it or Space lists auto, then the chart's own resolution
+and the rest of the strip that fit; Enter shows the
 range. Tab again goes into From
 and To, where Left and Right pick the year, month or day, and Up and Down,
 digits or a month's first letters set it; the box then says the slice that

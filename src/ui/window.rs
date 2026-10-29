@@ -5536,10 +5536,7 @@ impl Window {
             None => crate::ui::range_card::Plan {
                 timeframe: forced.unwrap_or(Timeframe::days(1)),
                 auto: false,
-                bumped: false,
-                bars: None,
-                many: false,
-                short_of: None,
+                fits: true,
             },
         };
         let weak = Rc::downgrade(self);
@@ -7829,10 +7826,7 @@ impl Window {
             return crate::ui::range_card::Plan {
                 timeframe: forced.unwrap_or(current),
                 auto: forced.is_none(),
-                bumped: false,
-                bars: None,
-                many: false,
-                short_of: None,
+                fits: true,
             };
         };
         let provider = self.provider();
@@ -7870,17 +7864,16 @@ impl Window {
             },
         };
         let bars = bars_in(counted, today, timeframe, share);
-        let short_of = match (reach(timeframe), counted.reach(today)) {
-            (Some(limit), Some(back)) if i64::from(limit) < back => Some(limit),
-            _ => None,
+        let reaches = match (reach(timeframe), counted.reach(today)) {
+            (Some(limit), Some(back)) => i64::from(limit) >= back,
+            _ => true,
         };
+        let (fewest, most) = crate::ui::chart::VISIBLE_BARS;
+        let readable = bars.is_none_or(|bars| (fewest as f64..=most as f64).contains(&bars.round()));
         crate::ui::range_card::Plan {
             timeframe,
             auto: forced.is_none(),
-            bumped: forced.is_none() && timeframe != current,
-            bars,
-            many: bars.is_some_and(|bars| bars > crate::ui::chart::VISIBLE_BARS.1 as f64),
-            short_of,
+            fits: offers(timeframe) && reaches && readable,
         }
     }
 

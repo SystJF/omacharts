@@ -509,9 +509,8 @@ popover.background.pick-help-pop > contents { padding: 14px 16px; }
 .pick-help-foot { font-size: 0.85em; color: alpha(currentColor, 0.5); }
 .pick-help-cap { color: @window_fg_color; }
 
-.range-hint { padding: 8px 20px 0 20px; font-size: 0.9em; font-feature-settings: 'tnum'; }
-.range-hint > label { opacity: 0.6; }
-.range-hint > label.error { color: @error_color; opacity: 1; }
+.range-hint { padding: 8px 20px 0 20px; font-size: 0.9em; opacity: 0.6; }
+.range-hint.error { color: @error_color; opacity: 1; }
 .range-dates { padding: 12px 20px 0 20px; }
 .range-cell-name { font-size: 0.78em; opacity: 0.45; }
 .range-today { font-size: 0.78em; color: @success_color; }
@@ -544,14 +543,9 @@ popover.background.pick-help-pop > contents { padding: 14px 16px; }
   box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.18);
 }
 .range-chip:focus { box-shadow: inset 0 0 0 2px @accent_color; outline: none; }
-.range-chip.bumped { color: @warning_color; }
 .range-chip:hover { box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.35); }
 .range-caret { font-size: 0.8em; opacity: 0.5; }
 .range-auto { font-family: sans-serif; font-weight: 400; font-size: 0.9em; opacity: 0.55; }
-.range-dot { opacity: 0.4; }
-.range-hint > label.range-count { opacity: 0.85; }
-.range-count.many, .range-hint > label.range-count.many { color: @warning_color; opacity: 1; }
-.range-count.short { color: @error_color; opacity: 1; }
 
 /* The link toggle is a glyph, not a button: no frame, no fill, not even when
    it is on — a chart that follows the rail says so by the icon being there at

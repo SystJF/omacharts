@@ -275,7 +275,7 @@ crop: 898,193,763,532   (the whole card, 24px layout margin)
 
 Today is the day of the last bar. The ⓘ beside the title shows examples like these. Text that cannot become a range, whatever you type next, turns the box red.
 
-Under the box is the number of bars the range makes. **From** and **To** are its first and last day, and **today** over **To** means the range runs to the latest bar, so new bars stay in it. With more than one chart in the window, the chart it will change is named under the title, such as **NVDA · pos:1**.
+**From** and **To**, under the box, are the range's first and last day, and **today** over **To** means the range runs to the latest bar, so new bars stay in it. With more than one chart in the window, every chart fades and the one it will change wears its focus ring twice as wide.
 
 | Key | In Go to |
 |---|---|
@@ -297,18 +297,18 @@ crop: 898,193,763,889   (the card and the list, 24px layout margin)
 
 ### The resolution in Go to
 
-The corner of the box shows the resolution the range will be shown at. **auto** beside it means Omacharts chose it. The chart keeps its own resolution unless the range would make too few bars or too many, or reaches further back than the feed keeps bars of that resolution. Then it takes the nearest one on the strip that fits, coloured to show it is not the chart's own. A year of 5m bars is shown daily, and a month of daily bars hourly.
+The corner of the box shows the resolution the range will be shown at. **auto** beside it means Omacharts chose it, and **auto** alone, with nothing typed yet, means it will choose once there is a range. The chart keeps its own resolution unless the range would make too few bars or too many, or reaches further back than the feed keeps bars of that resolution. Then it takes the nearest one on the strip that fits. A year of 5m bars is shown daily, and a month of daily bars hourly.
 
-To choose one yourself, <kbd>Tab</kbd> to it.
+To choose one yourself, <kbd>Tab</kbd> to it. Only a resolution the range can be shown at is offered: one the feed keeps far enough back, which makes at least 12 bars and no more than 3,000. A daily bar for today, or a year of 5m bars, is skipped by the arrows, the wheel and typing alike, and a resolution you chose goes back to **auto** when the range changes to one it doesn't fit.
 
 | Key or gesture | On the resolution |
 |---|---|
 | <kbd>↑</kbd> <kbd>↓</kbd> | Counts it up or down: `1D`, `2D`, `3D` |
-| <kbd>←</kbd> <kbd>→</kbd> | Moves to a shorter or longer unit, keeping the count: `2D` becomes `2h` or `2W` |
+| <kbd>←</kbd> <kbd>→</kbd> | Moves to a shorter or longer unit, keeping the count: `2D` becomes `2h` or `2W`. When that count doesn't fit the range, it takes the nearest one that does, the strip's first: from `1D` on a year of bitcoin, <kbd>←</kbd> goes to `4h` |
 | Typing a resolution, such as `4h` or `W` | Sets it |
 | The wheel | Steps along the resolution strip |
 | <kbd>Backspace</kbd> or <kbd>Delete</kbd> | Sets the chart's own resolution. Pressed again, back to **auto** |
-| A click, or <kbd>Space</kbd> | Lists **auto**, the chart's own resolution and the rest of the strip, each with the bars it makes. One the feed does not keep far enough back says so, such as **only 60 days of 5m** |
+| A click, or <kbd>Space</kbd> | Lists **auto**, then the chart's own resolution and the rest of the strip that fit the range |
 
 ### From and To
 

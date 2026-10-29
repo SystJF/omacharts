@@ -2,16 +2,17 @@
 //! range and the resolution a digit on the chart starts.
 //!
 //! Both are the picker's frame with the list folded away: a centred title
-//! whose ⓘ holds the syntax, a box, and under it what the answer comes to:
-//! `4 hours · 536 bars`, or just the bars for a range. Nothing under the
-//! box comes or goes with what is typed, so the card keeps one shape; the
-//! list drops down over it when asked for.
+//! whose ⓘ holds the syntax and a box. Nothing under the box comes or goes
+//! with what is typed, so the card keeps one shape; the list drops down
+//! over it when asked for. Which chart it acts on is said by the ring
+//! around that chart, not in words.
 //!
 //! The range card has two more things. The resolution it will show at sits
-//! in the box's corner, `1D auto`, and Tab reaches it. From and To, under
-//! the bars, are the first and last day the range lands on, and Tab goes
-//! into them to set either by hand, which writes the range back into the
-//! box as a slice, `2026/03/21:`.
+//! in the box's corner, `1D auto`, and Tab reaches it; it offers only the
+//! resolutions the range can be shown at. From and To, under the box, are
+//! the first and last day the range lands on, and Tab goes into them to set
+//! either by hand, which writes the range back into the box as a slice,
+//! `2026/03/21:`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -22,26 +23,24 @@ use gtk::gdk;
 use gtk::glib;
 use omacharts_engine::bars::Unit;
 use omacharts_engine::range::End;
-use omacharts_engine::{grouped_decimals, Range, Timeframe};
+use omacharts_engine::{Range, Timeframe};
 
 use crate::ui::pick_frame::{Over, PickFrame};
 
 /// As wide as two dates side by side and no wider.
 const WIDTH: i32 = 320;
 
-/// What a range comes to at a resolution, for the line under the dates.
+/// What a range comes to at a resolution, for the chip and its list.
 pub struct Plan {
     pub timeframe: Timeframe,
     /// Picked by the window rather than set by hand.
     pub auto: bool,
-    /// Picked, and not the resolution the chart has now.
-    pub bumped: bool,
-    pub bars: Option<f64>,
-    /// More bars than a chart spreads across.
-    pub many: bool,
-    /// The feed keeps this resolution only so many days back, and the range
-    /// goes further.
-    pub short_of: Option<u32>,
+    /// The range can be shown at it: the feed has the symbol at it and
+    /// reaches back far enough, and the bars are a chart rather than a
+    /// candle or two, or more than a chart spreads across. One that does
+    /// not is not offered, rather than offered with a warning: a year's
+    /// candle for today is no choice anybody means.
+    pub fits: bool,
 }
 
 type PlanFn = Rc<dyn Fn(Range, Option<Timeframe>) -> Plan>;
@@ -91,7 +90,13 @@ impl Chip {
     fn show(&self, plan: &Plan) {
         self.key.set_text(&plan.timeframe.key());
         self.auto.set_visible(plan.auto);
-        set_class(&self.chip, "bumped", plan.bumped);
+    }
+
+    /// Nothing typed and nothing chosen: just `auto`, since there is no
+    /// range yet for the window to pick a resolution for.
+    fn blank(&self) {
+        self.key.set_text("auto");
+        self.auto.set_visible(false);
     }
 }
 
@@ -151,65 +156,33 @@ impl Dial {
     }
 }
 
-/// The line under the box: the bars a range makes, the resolution typed
-/// (`4 hours`), or why the text is not an answer.
+/// The line under the resolution card's box: the resolution typed, in
+/// words (`4 hours`), or why the text is not one.
 struct Hint {
-    row: gtk::Box,
     words: gtk::Label,
-    dot: gtk::Label,
-    count: gtk::Label,
 }
 
 impl Hint {
     fn new() -> Hint {
         let words = gtk::Label::new(None);
-        let dot = gtk::Label::new(Some("·"));
-        dot.add_css_class("range-dot");
-        let count = gtk::Label::new(None);
-        count.add_css_class("range-count");
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        row.add_css_class("range-hint");
-        row.set_halign(gtk::Align::Center);
-        row.append(&words);
-        row.append(&dot);
-        row.append(&count);
-        Hint { row, words, dot, count }
+        words.add_css_class("range-hint");
+        words.set_halign(gtk::Align::Center);
+        Hint { words }
     }
 
-    /// The bars `plan` makes.
-    fn show(&self, plan: &Plan) {
-        set_class(&self.words, "error", false);
-        self.words.set_visible(false);
-        self.dot.set_visible(false);
-        self.count.set_text(&plan.bars.map(bars_words).unwrap_or_default());
-        self.count.set_visible(true);
-        set_class(&self.count, "many", plan.many);
-    }
-
-    /// What was typed comes to, in words, and nothing else.
     fn name(&self, words: &str) {
         self.words.set_text(words);
-        self.words.set_visible(true);
         set_class(&self.words, "error", false);
-        self.dot.set_visible(false);
-        self.count.set_visible(false);
     }
 
     fn error(&self, what: &str) {
         self.words.set_text(what);
-        self.words.set_visible(true);
         set_class(&self.words, "error", true);
-        self.dot.set_visible(false);
-        self.count.set_visible(false);
     }
 
     /// Nothing typed yet: the line keeps its height, empty.
     fn blank(&self) {
-        self.words.set_text("");
-        self.words.set_visible(true);
-        set_class(&self.words, "error", false);
-        self.dot.set_visible(false);
-        self.count.set_visible(false);
+        self.name("");
     }
 }
 
@@ -487,7 +460,6 @@ pub struct RangeCard {
     from: Rc<DateCell>,
     to: Rc<DateCell>,
     chip: Chip,
-    hint: Hint,
     context: RefCell<Option<Context>>,
     /// The resolution set by hand on the chip, if it has been.
     forced: Cell<Option<Timeframe>>,
@@ -543,8 +515,6 @@ impl RangeCard {
         chip.chip.set_focus_on_click(true);
         chip.chip.set_cursor_from_name(Some("pointer"));
         frame.pin_in_box(&chip.chip);
-        let hint = Hint::new();
-        frame.append(&hint.row);
 
         let from = DateCell::new("From");
         let to = DateCell::new("To");
@@ -564,7 +534,6 @@ impl RangeCard {
             from,
             to,
             chip,
-            hint,
             context: RefCell::new(None),
             forced: Cell::new(None),
             showing_tf: Cell::new(None),
@@ -710,40 +679,32 @@ impl RangeCard {
             Some(context) => (context.plan.clone(), context.ladder.clone(), context.current),
             None => return,
         };
-        // Auto, then the chart's own resolution, then the rest of the strip.
+        // Auto, then the chart's own resolution, then the rest of the strip:
+        // those the range can be shown at.
         let rest = ladder.into_iter().filter(|tf| *tf != current).map(Some);
-        let picks: Vec<Option<Timeframe>> = [None, Some(current)].into_iter().chain(rest).collect();
+        let picks: Vec<Option<Timeframe>> = [None, Some(current)]
+            .into_iter()
+            .chain(rest)
+            .filter(|pick| pick.is_none_or(|tf| plan(range, Some(tf)).fits))
+            .collect();
         let list = gtk::ListBox::new();
         list.set_selection_mode(gtk::SelectionMode::Browse);
         list.add_css_class("navigation-sidebar");
         list.add_css_class("pick-list");
         for pick in &picks {
-            let planned = plan(range, *pick);
             let name = match pick {
                 Some(tf) => tf.key(),
-                None => format!("auto · {}", planned.timeframe.key()),
+                None => "auto".to_string(),
             };
             let key = gtk::Label::new(Some(&name));
             key.add_css_class("pick-ticker");
             key.set_xalign(0.0);
             key.set_hexpand(true);
-            let count = gtk::Label::new(Some(&count_words(&planned)));
-            count.add_css_class("pick-venue");
-            count.add_css_class("range-count");
-            set_class(&count, "short", planned.short_of.is_some());
-            set_class(&count, "many", planned.short_of.is_none() && planned.many);
-            let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 14);
-            row_box.append(&key);
-            row_box.append(&count);
             let row = gtk::ListBoxRow::new();
-            row.set_child(Some(&row_box));
+            row.set_child(Some(&key));
             list.append(&row);
         }
-        // The row the chip names: auto only when the chip says auto.
-        let named = match self.chip.auto.is_visible() {
-            true => self.forced.get(),
-            false => self.forced.get().or(Some(current)),
-        };
+        let named = self.forced.get();
         let at = picks.iter().position(|pick| *pick == named).unwrap_or(0);
         if let Some(row) = list.row_at_index(at as i32) {
             list.select_row(Some(&row));
@@ -794,8 +755,8 @@ impl RangeCard {
         self.typed_tf.borrow_mut().clear();
         let Some(now) = self.showing_tf.get() else { return };
         let next = match coarser {
-            true => ladder.iter().copied().find(|tf| tf.seconds() > now.seconds()),
-            false => ladder.iter().rev().copied().find(|tf| tf.seconds() < now.seconds()),
+            true => ladder.iter().copied().find(|tf| tf.seconds() > now.seconds() && self.fits(*tf)),
+            false => ladder.iter().rev().copied().find(|tf| tf.seconds() < now.seconds() && self.fits(*tf)),
         };
         if let Some(next) = next {
             self.forced.set(Some(next));
@@ -884,20 +845,41 @@ impl RangeCard {
         set_class(&self.to.field, "error", from > to);
 
         // What the chip counts: what is typed, or else the days on show.
-        // Nothing asked yet: the chart as it is, at the resolution it has,
-        // not the one the window would pick for those days.
         let range = parsed.unwrap_or_else(|| slice(from, to, today));
-        let forced = self.forced.get().or(idle.then_some(context.current));
+        // A resolution set by hand that this range cannot be shown at goes
+        // back to the window's pick.
+        if let Some(forced) = self.forced.get()
+            && !(context.plan)(range, Some(forced)).fits
+        {
+            self.forced.set(None);
+        }
+        let forced = self.forced.get();
         let plan = (context.plan)(range, forced);
         self.counting.set(Some(range));
-        self.showing_tf.set(Some(plan.timeframe));
-        self.chip.show(&plan);
+        // Nothing asked yet: the arrows and the wheel start from the
+        // chart's own resolution, not the window's pick for the days on
+        // screen.
+        match idle && forced.is_none() {
+            true => {
+                self.showing_tf.set(Some(context.current));
+                self.chip.blank();
+            }
+            false => {
+                self.showing_tf.set(Some(plan.timeframe));
+                self.chip.show(&plan);
+            }
+        }
         if let Some((count, dial)) = self.dialed() {
             self.chip.key.set_text(&dial.key(count));
         }
-        match wrong {
-            true => self.hint.error("not a range"),
-            false => self.hint.show(&plan),
+    }
+
+    /// Whether the range the chip counts can be shown at `timeframe`.
+    fn fits(&self, timeframe: Timeframe) -> bool {
+        let Some(range) = self.counting.get() else { return true };
+        match self.context.borrow().as_ref() {
+            Some(context) => (context.plan)(range, Some(timeframe)).fits,
+            None => true,
         }
     }
 
@@ -939,7 +921,7 @@ impl RangeCard {
                 let current = self.context.borrow().as_ref().map(|context| context.current);
                 let next = match self.forced.get() {
                     Some(forced) if Some(forced) == current => None,
-                    _ => current,
+                    _ => current.filter(|current| self.fits(*current)),
                 };
                 self.forced.set(next);
                 self.refresh();
@@ -957,7 +939,7 @@ impl RangeCard {
                         let found = Timeframe::parse(&typed);
                         typed.clear();
                         drop(typed);
-                        if let Some(found) = found {
+                        if let Some(found) = found.filter(|found| self.fits(*found)) {
                             self.forced.set(Some(found));
                             self.refresh();
                         }
@@ -975,17 +957,49 @@ impl RangeCard {
     }
 
     /// Up and Down count the chip's resolution up or down; Left and Right
-    /// move it along [`DIALS`], keeping the count. Anything, on the strip or
-    /// not.
+    /// move it along [`DIALS`], keeping the count where it fits. Anything,
+    /// on the strip or not, that the range can be shown at: one it cannot is
+    /// stepped over.
     fn turn(&self, count_by: i32, unit_by: i32) {
         let Some((count, dial)) = self.dialed().or_else(|| self.showing_tf.get().map(Dial::of)) else { return };
-        let at = DIALS.iter().position(|d| *d == dial).unwrap_or(0) as i32;
-        let dial = DIALS[(at + unit_by).clamp(0, DIALS.len() as i32 - 1) as usize];
-        let count = (count as i32 + count_by).clamp(1, 999) as u32;
         self.typed_tf.borrow_mut().clear();
-        self.dial.set(Some((count, dial)));
-        self.forced.set(Some(dial.timeframe(count)));
-        self.refresh();
+        let mut at = DIALS.iter().position(|d| *d == dial).unwrap_or(0) as i32;
+        let mut count = count as i32;
+        // Far enough to step over the minutes a year cannot be shown at.
+        for _ in 0..120 {
+            let next = ((count + count_by).clamp(1, 999), (at + unit_by).clamp(0, DIALS.len() as i32 - 1));
+            if next == (count, at) {
+                return;
+            }
+            (count, at) = next;
+            let dial = DIALS[at as usize];
+            let found = match unit_by {
+                0 => Some(count).filter(|count| self.fits(dial.timeframe(*count as u32))),
+                _ => self.count_in(dial, count),
+            };
+            if let Some(count) = found {
+                self.dial.set(Some((count as u32, dial)));
+                self.forced.set(Some(dial.timeframe(count as u32)));
+                self.refresh();
+                return;
+            }
+        }
+    }
+
+    /// A count of `dial` the range fits, for Left and Right landing on a
+    /// unit: `count` itself, else the nearest the strip has in that unit,
+    /// else the nearest at all. From `1D`, a year of bitcoin is too many
+    /// `1h` bars, so Left lands on the strip's `4h` rather than passing the
+    /// hours by.
+    fn count_in(&self, dial: Dial, count: i32) -> Option<i32> {
+        let fits = |count: i32| self.fits(dial.timeframe(count as u32));
+        if fits(count) {
+            return Some(count);
+        }
+        let ladder = self.context.borrow().as_ref().map(|context| context.ladder.clone()).unwrap_or_default();
+        let nearest = |counts: &mut dyn Iterator<Item = i32>| counts.filter(|c| fits(*c)).min_by_key(|c| (c - count).abs());
+        let strip = &mut ladder.into_iter().map(Dial::of).filter(|(_, d)| *d == dial).map(|(c, _)| c as i32);
+        nearest(strip).or_else(|| nearest(&mut (1..=60)))
     }
 
     /// Enter with the list folded away.
@@ -1039,7 +1053,7 @@ impl ResolutionCard {
         frame.drop_list();
         frame.set_width(WIDTH);
         let hint = Hint::new();
-        frame.append(&hint.row);
+        frame.append(&hint.words);
         let card = Rc::new(ResolutionCard { frame, hint, context: RefCell::new(None) });
 
         let weak = Rc::downgrade(&card);
@@ -1079,23 +1093,6 @@ impl ResolutionCard {
             None if wrong => self.hint.error("not a resolution"),
             None => self.hint.blank(),
         }
-    }
-}
-
-/// "1,310 bars".
-fn bars_words(bars: f64) -> String {
-    match bars.round() {
-        1.0 => "1 bar".to_string(),
-        bars => format!("{} bars", grouped_decimals(bars, 0)),
-    }
-}
-
-/// "131 bars", or why there will not be: "only 60 days of 5m".
-fn count_words(plan: &Plan) -> String {
-    match (plan.short_of, plan.bars) {
-        (Some(days), _) => format!("only {days} days of {}", plan.timeframe.key()),
-        (None, Some(bars)) => bars_words(bars),
-        (None, None) => String::new(),
     }
 }
 
@@ -1216,20 +1213,6 @@ mod tests {
         for text in ["6x", "2025q4", "zz"] {
             assert!(!could_become(text), "{text}");
         }
-    }
-
-    #[test]
-    fn counts_read_in_thousands() {
-        let words = |bars| {
-            let plan = Plan { timeframe: Timeframe::days(1), auto: false, bumped: false, bars: Some(bars), many: false, short_of: None };
-            count_words(&plan)
-        };
-        assert_eq!(words(470.0), "470 bars");
-        assert_eq!(words(8300.4), "8,300 bars");
-        assert_eq!(words(2.5), "3 bars");
-        assert_eq!(words(1.2), "1 bar");
-        assert_eq!(words(999.5), "1,000 bars");
-        assert_eq!(words(1234567.0), "1,234,567 bars");
     }
 
     #[test]
