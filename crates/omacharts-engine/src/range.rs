@@ -698,17 +698,40 @@ pub struct Fit<'a> {
 }
 
 /// Roughly how many bars of `timeframe` the range holds; `None` for all.
+///
+/// A market that shuts at weekends trades on its weekdays, counted as they
+/// fall rather than as five sevenths of every day: a single Tuesday of a
+/// stock is a whole trading day of bars, not five sevenths of one.
 pub fn bars_in(range: Range, today: NaiveDate, timeframe: Timeframe, share: (f64, f64)) -> Option<f64> {
     let days = range.days(today)? as f64;
+    let first = range.start(today)?;
+    let last = range.end(today).map_or(today, |end| end.min(today));
+    let open = match share.1 < 0.99 {
+        true => weekdays(first, last) as f64,
+        false => days,
+    };
+    // How much of a day it trades, on a day it trades.
+    let session = share.0 / share.1.max(f64::EPSILON);
     let bars = if timeframe.is_intraday() {
-        days * 86_400.0 * share.0 / timeframe.seconds() as f64
+        open * 86_400.0 * session / timeframe.seconds() as f64
     } else if timeframe.seconds() < Timeframe::weeks(1).seconds() {
-        days * share.1 / (timeframe.seconds() as f64 / 86_400.0)
+        open / (timeframe.seconds() as f64 / 86_400.0)
     } else {
         // A week, a month, a year: one bar each, trading days or not.
         days * 86_400.0 / timeframe.seconds() as f64
     };
     Some(bars.max(1.0))
+}
+
+/// Monday to Friday from `first` to `last`, both counted.
+fn weekdays(first: NaiveDate, last: NaiveDate) -> i64 {
+    let span = (last - first).num_days() + 1;
+    if span <= 0 {
+        return 0;
+    }
+    let start = i64::from(first.weekday().num_days_from_monday());
+    let rest = (0..span % 7).filter(|d| (start + d) % 7 < 5).count() as i64;
+    span / 7 * 5 + rest
 }
 
 /// The fewest and the most bars a range aims to land on when the resolution
@@ -717,8 +740,7 @@ pub fn bars_in(range: Range, today: NaiveDate, timeframe: Timeframe, share: (f64
 pub const AIM_BARS: (usize, usize) = (50, 400);
 
 /// The resolution to show `range` at: `current` when it fits, or else the
-/// nearest on the ladder that does, or else the nearest of [`COMMON`] that
-/// does.
+/// best fit on the ladder, or else the best of [`COMMON`].
 ///
 /// It fits when the feed reaches back far enough at that resolution and the
 /// range is between the fewest and the most bars asked for. Too many, or out
@@ -746,8 +768,16 @@ pub fn resolution_for(range: Range, today: NaiveDate, current: Timeframe, fit: &
             _ => 0.0,
         }
     };
-    // Closest to fitting first, then fewest steps along the ladder from
-    // `current`, then the bars nearest the middle of the band.
+    // The chart's own, while it fits: a range should not change a
+    // resolution that already shows it well.
+    if usable(current) && miss(current) == 0.0 {
+        return current;
+    }
+    // Otherwise the best fit, wherever it is: closest to fitting, then the
+    // bars nearest the middle of the band, then fewest steps along the
+    // ladder from `current`. Nearest-first took a year to date from 5m to
+    // 4h, four hundred cramped candles, when 1D is two hundred readable
+    // ones.
     let middle = (fewest * most).sqrt();
     let best = |offered: &[Timeframe]| {
         let mut ladder: Vec<Timeframe> = offered.to_vec();
@@ -756,10 +786,10 @@ pub fn resolution_for(range: Range, today: NaiveDate, current: Timeframe, fit: &
         ladder.dedup();
         let at = |tf: Timeframe| ladder.iter().position(|t| *t == tf).unwrap_or(0);
         let here = at(current);
-        let rank = |tf: Timeframe| (miss(tf), at(tf).abs_diff(here), (count(tf) / middle).ln().abs());
+        let rank = |tf: Timeframe| (miss(tf), (count(tf) / middle).ln().abs(), at(tf).abs_diff(here));
         ladder.iter().copied().filter(|&tf| usable(tf)).min_by(|&a, &b| {
             let (a, b) = (rank(a), rank(b));
-            a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.total_cmp(&b.2))
+            a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2))
         })
     };
     // The strip first. Only when nothing on it fits does a common
@@ -907,26 +937,44 @@ mod tests {
     fn a_range_out_of_reach_or_too_long_moves_coarser() {
         let today = day(2026, 10, 19);
         let year = Range::Back(1, Span::Year);
-        // Five-minute bars go back sixty days; an hour reaches two years.
+        // Five-minute bars go back sixty days. An hour reaches two years, but
+        // a year of days is the readier chart.
         let stock = fit(&STRIP, STOCK, &yahoo);
-        assert_eq!(resolution_for(year, today, Timeframe::minutes(5), &stock), Timeframe::hours(1));
-        // A year of bitcoin by the hour is 8,760 bars: four hours is 2,190.
+        assert_eq!(resolution_for(year, today, Timeframe::minutes(5), &stock), Timeframe::days(1));
+        // A year of bitcoin by the hour is 8,760 bars, by four hours 2,190,
+        // by the day 365.
         let crypto = fit(&STRIP, CRYPTO, &yahoo);
-        assert_eq!(resolution_for(year, today, Timeframe::minutes(5), &crypto), Timeframe::hours(4));
+        assert_eq!(resolution_for(year, today, Timeframe::minutes(5), &crypto), Timeframe::days(1));
+        // Five years of days is 1,300 bars; of weeks, 260.
         let five = Range::Back(5, Span::Year);
-        assert_eq!(resolution_for(five, today, Timeframe::minutes(15), &stock), Timeframe::days(1));
+        assert_eq!(resolution_for(five, today, Timeframe::minutes(15), &stock), Timeframe::weeks(1));
+    }
+
+    /// From far off, the best fit rather than the nearest: a year to date
+    /// from 5m is 1D, not 4h's four hundred cramped candles.
+    #[test]
+    fn from_far_off_the_best_fit_wins() {
+        let today = day(2026, 10, 29);
+        let stock = Fit { bars: AIM_BARS, ..fit(&STRIP, STOCK, &yahoo) };
+        let ytd = Range::ToDate(1, Period::Year);
+        assert_eq!(resolution_for(ytd, today, Timeframe::minutes(5), &stock), Timeframe::days(1));
+        assert_eq!(resolution_for(ytd, today, Timeframe::days(1), &stock), Timeframe::days(1));
+        assert_eq!(weekdays(day(2026, 10, 26), day(2026, 11, 1)), 5, "Monday to Sunday");
+        assert_eq!(weekdays(day(2026, 10, 31), day(2026, 11, 1)), 0, "a weekend");
     }
 
     #[test]
     fn a_range_too_short_moves_finer() {
         let today = day(2026, 10, 19);
         let stock = fit(&STRIP, STOCK, &yahoo);
-        // A month of weekly bars is four candles.
+        // A month of weekly bars is four candles; of daily bars 21, of
+        // hourly bars about 140, the middle of the band.
         let month = Range::Back(1, Span::Month);
-        assert_eq!(resolution_for(month, today, Timeframe::weeks(1), &stock), Timeframe::days(1));
-        // A week of daily bars is five: an hour is thirty-odd.
+        assert_eq!(resolution_for(month, today, Timeframe::weeks(1), &stock), Timeframe::hours(1));
+        // A week of daily bars is five, of hourly ones thirty-odd, of
+        // fifteen-minute ones 130.
         let week = Range::Back(1, Span::Week);
-        assert_eq!(resolution_for(week, today, Timeframe::days(1), &stock), Timeframe::hours(1));
+        assert_eq!(resolution_for(week, today, Timeframe::days(1), &stock), Timeframe::minutes(15));
     }
 
     /// Nothing on the strip fits: the nearest common resolution that does,
@@ -937,7 +985,7 @@ mod tests {
         let only = [Timeframe::minutes(5)];
         let stock = fit(&only, STOCK, &yahoo);
         let year = Range::Back(1, Span::Year);
-        assert_eq!(resolution_for(year, today, Timeframe::minutes(5), &stock), Timeframe::hours(1));
+        assert_eq!(resolution_for(year, today, Timeframe::minutes(5), &stock), Timeframe::days(1));
         let nothing = Fit { offers: &|tf| tf == Timeframe::minutes(5), ..fit(&only, STOCK, &yahoo) };
         assert_eq!(resolution_for(year, today, Timeframe::minutes(5), &nothing), Timeframe::minutes(5));
     }

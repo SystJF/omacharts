@@ -995,8 +995,9 @@ again, or a command that rewrites the arrangement such as `chart set`, starts
 the view over: set the range last.
 
 The resolution stays unless the range does not fit it: between 50 and 400
-bars, and within what the feed keeps. Otherwise it moves to the nearest on the
-strip that fits. A year of five-minute bars is past what the feed keeps and
+bars, and within what the feed keeps. Otherwise it moves to the best fit on
+the strip, the one with the bars nearest the middle of that band, however
+far it is from the chart's own: a year to date from 5m is daily, not 4h. A year of five-minute bars is past what the feed keeps and
 an hour makes 1,700, so it moves to daily; a month from last spring is short,
 but the feed keeps five-minute bars for sixty days, so it moves too; a month
 of daily bars is 21 candles, so it moves to hourly. Nothing on the strip
