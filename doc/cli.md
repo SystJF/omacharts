@@ -1013,7 +1013,7 @@ showing from 2025 to today on pos:0 AAPL 1W in "Macro"
 
 In the window, Ctrl+G opens a card over the chart, where the symbol picker
 opens: a box with the resolution in its corner, `1D auto`, or `auto` alone
-while nothing is typed, and under it the
+while nothing is typed (with nothing to open then, and Tab passes it by), and under it the
 first and last day the range lands on, `2026/03/21`. Every chart fades while
 it is open, and the one it acts on wears its focus ring twice as wide. The ⓘ
 beside the title lists what can be typed. The card keeps that shape whatever
@@ -1035,9 +1035,13 @@ over, and one set by hand goes back to the window's pick when the range moves
 past it. A click on it or Space lists auto, then the chart's own resolution
 and the rest of the strip and of those common ones that fit; Enter shows the
 range. Tab again goes into From
-and To, where Left and Right pick the year, month or day, and Up and Down,
-digits or a month's first letters set it; the box then says the slice that
-makes, `2026/03/21:`. Enter from the box or a date shows it, and Ctrl+Enter
+and To, plain boxes that take a day the way the box does, `2026/03/21`,
+`23 nov`, `yesterday`, `mon`, or a month or year (From its first day, To its
+last); Up and Down step a day, Shift ten, and a calendar in each one's corner
+opens the month under the card, From to To shaded, to pick a day with the
+pointer; its title zooms out to the months of the year, then to a dozen
+years. The box then says the slice that makes,
+`2026/03/21:`. Enter from the box or a date shows it, and Ctrl+Enter
 from anywhere in the card. A digit typed on a chart opens the same card for the
 resolution alone, which says what it read, `4 hours`. A range is
 of the chart on screen, so with nothing running the command exits `6`.

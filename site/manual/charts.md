@@ -302,7 +302,7 @@ crop: 898,193,763,889   (the card and the list, 24px layout margin)
 
 ### The resolution in Go to
 
-The corner of the box shows the resolution the range will be shown at. **auto** beside it means Omacharts chose it, and **auto** alone, with nothing typed yet, means it will choose once there is a range. The chart keeps its own resolution unless the range would make too few bars or too many, or reaches further back than the feed keeps bars of that resolution. Then it takes the nearest one on the strip that fits, or, when none on the strip fits, a common one off it such as `5m`. A year of 5m bars is shown daily, a month of daily bars hourly, and a single day 5m even on a strip that starts at `1h`.
+The corner of the box shows the resolution the range will be shown at. **auto** beside it means Omacharts chose it, and **auto** alone, with nothing typed yet, means it will choose once there is a range; until then it has nothing to open. The chart keeps its own resolution unless the range would make too few bars or too many, or reaches further back than the feed keeps bars of that resolution. Then it takes the nearest one on the strip that fits, or, when none on the strip fits, a common one off it such as `5m`. A year of 5m bars is shown daily, a month of daily bars hourly, and a single day 5m even on a strip that starts at `1h`.
 
 To choose one yourself, <kbd>Tab</kbd> to it. Only a resolution the range can be shown at is offered: one the feed keeps far enough back, which makes at least 12 bars and no more than 3,000. A daily bar for today, or a year of 5m bars, is skipped by the arrows, the wheel and typing alike, and a resolution you chose goes back to **auto** when the range changes to one it doesn't fit.
 
@@ -317,7 +317,7 @@ To choose one yourself, <kbd>Tab</kbd> to it. Only a resolution the range can be
 
 ### From and To
 
-<kbd>Tab</kbd> from the resolution goes into **From**, then **To**. <kbd>←</kbd> <kbd>→</kbd> pick the year, the month or the day, and <kbd>↑</kbd> <kbd>↓</kbd>, digits or the first letters of a month set it. The box then shows the range the two dates make, such as `2026/03/21:`.
+<kbd>Tab</kbd> from the resolution goes into **From**, then **To**. Type a day in either the way the box takes one: `2026/03/21`, `23 nov`, `yesterday`, `mon`. A month or a year works too, **From** taking its first day and **To** its last. <kbd>↑</kbd> <kbd>↓</kbd> move the day by one, with <kbd>Shift</kbd> by ten, and the calendar in the corner of each opens the month under the card, with the stretch from **From** to **To** shaded, to pick a day with the pointer. Its title, such as **October 2026**, shows the months of the year instead, and clicked again a dozen years. The box above then shows the range the two dates make, such as `2026/03/21:`, and leaving a date writes it back as a date.
 
 ### While a range holds
 

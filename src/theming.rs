@@ -485,7 +485,40 @@ popover.pick-bare .pick-query entry {
 popover.pick-bare .pick-query entry:focus-within { box-shadow: inset 0 0 0 2px @accent_color; }
 popover.pick-bare .pick-query entry.error { box-shadow: inset 0 0 0 2px @error_color; }
 popover.range-goto .pick-query entry { min-height: 48px; }
+popover.range-goto .pick-query entry.long > text { margin-right: 76px; }
 popover.pick-drop > contents { padding: 0; }
+/* The month under the Go to card, as wide as it: one header between two
+   arrows, From to To shaded, the end being set filled and the other ringed.
+   The band stops under the two ends' squares rather than past them. */
+popover.range-month-pop > contents { padding: 12px 14px 14px 14px; }
+.range-month-title { font-weight: 700; padding: 4px 10px; min-height: 0; border-radius: 7px; }
+.range-month-step { min-width: 30px; min-height: 30px; padding: 0; border-radius: 7px; -gtk-icon-size: 16px; }
+.range-month-pick { min-height: 40px; padding: 0; border-radius: 8px; font-size: 0.9em; font-weight: 400; font-feature-settings: 'tnum'; }
+.range-month-pick.today { box-shadow: inset 0 0 0 1px alpha(currentColor, 0.35); }
+.range-month-pick.setting { background: @accent_color; color: @accent_fg_color; font-weight: 700; }
+.range-month-name { font-size: 0.78em; opacity: 0.55; min-height: 22px; }
+.range-month-cell.between { background: alpha(@accent_color, 0.14); }
+.range-month-cell.start { background-image: linear-gradient(to right, transparent 50%, alpha(@accent_color, 0.14) 50%); }
+.range-month-cell.end { background-image: linear-gradient(to left, transparent 50%, alpha(@accent_color, 0.14) 50%); }
+.range-month-day {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 8px;
+  font-size: 0.9em;
+  font-weight: 400;
+  font-feature-settings: 'tnum';
+}
+.range-month-day.out { opacity: 0.3; }
+.range-month-day.today { box-shadow: inset 0 0 0 1px alpha(currentColor, 0.35); }
+/* The ringed end is filled with the band's own colour, opaque, so the band
+   seems to end under it rather than cut through its middle. */
+.range-month-day.other {
+  background-color: mix(@popover_bg_color, @accent_color, 0.14);
+  box-shadow: inset 0 0 0 1.5px @accent_color;
+  font-weight: 600;
+}
+.range-month-day.setting { background: @accent_color; color: @accent_fg_color; font-weight: 700; }
 
 /* The ⓘ's help, beside the card on its own ground: examples as key caps in
    the accent, what they mean right-aligned. */
@@ -515,21 +548,26 @@ popover.background.pick-help-pop > contents { padding: 14px 16px; }
 .range-cell-name { font-size: 0.78em; opacity: 0.45; }
 .range-today { font-size: 0.78em; color: @success_color; }
 .range-arrow { opacity: 0.4; margin-bottom: 8px; }
-.range-date {
+/* From and To: plain boxes a day is typed into, with GTK's calendar in the
+   corner for the pointer. */
+entry.range-date {
+  min-height: 0;
+  padding: 0 6px 0 9px;
   font-family: monospace;
   font-size: 0.88em;
   font-feature-settings: 'tnum';
-  padding: 7px 9px;
   border-radius: 7px;
   background: alpha(@window_fg_color, 0.05);
   box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.14);
+  outline: none;
 }
-.range-date:focus { box-shadow: inset 0 0 0 2px @accent_color; outline: none; }
-.range-date.idle { color: alpha(@window_fg_color, 0.7); }
-.range-date.error { box-shadow: inset 0 0 0 2px @error_color; }
-.range-slash { opacity: 0.4; }
-.range-part { border-radius: 3px; }
-.range-date:focus .range-part.on { background: @accent_color; color: @accent_fg_color; }
+entry.range-date > text { padding: 7px 0; }
+entry.range-date:focus-within { box-shadow: inset 0 0 0 2px @accent_color; outline: none; }
+entry.range-date.idle { color: alpha(@window_fg_color, 0.7); }
+entry.range-date.error { box-shadow: inset 0 0 0 2px @error_color; }
+entry.range-date.unread { color: @error_color; }
+entry.range-date > image { opacity: 0.45; -gtk-icon-size: 13px; }
+entry.range-date > image:hover { opacity: 0.9; }
 
 /* The resolution, pinned in the range box's bottom-right corner. */
 .range-chip {
@@ -544,6 +582,8 @@ popover.background.pick-help-pop > contents { padding: 14px 16px; }
 }
 .range-chip:focus { box-shadow: inset 0 0 0 2px @accent_color; outline: none; }
 .range-chip:hover { box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.35); }
+/* Nothing typed: just `auto`, faded, with nothing to open and no hover. */
+.range-chip.inert, .range-chip.inert:hover { opacity: 0.5; box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.18); }
 .range-caret { font-size: 0.8em; opacity: 0.5; }
 .range-auto { font-family: sans-serif; font-weight: 400; font-size: 0.9em; opacity: 0.55; }
 

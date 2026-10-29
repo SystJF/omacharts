@@ -18,7 +18,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
-use chrono::{Datelike, Days, Months, NaiveDate};
+use chrono::{Datelike, Days, NaiveDate};
 use gtk::gdk;
 use gtk::glib;
 use omacharts_engine::bars::Unit;
@@ -29,6 +29,10 @@ use crate::ui::pick_frame::{Over, PickFrame};
 
 /// As wide as two dates side by side and no wider.
 const WIDTH: i32 = 320;
+
+/// How far below the card's content the month hangs: the card's shadow
+/// margin, which the content stops short of, and a 6px gap.
+const MONTH_DROP: i32 = 32;
 
 /// What a range comes to at a resolution, for the chip and its list.
 pub struct Plan {
@@ -70,6 +74,7 @@ struct Chip {
     chip: gtk::Box,
     key: gtk::Label,
     auto: gtk::Label,
+    caret: gtk::Label,
 }
 
 impl Chip {
@@ -84,19 +89,33 @@ impl Chip {
         chip.append(&key);
         chip.append(&auto);
         chip.append(&caret);
-        Chip { chip, key, auto }
+        Chip { chip, key, auto, caret }
     }
 
     fn show(&self, plan: &Plan) {
         self.key.set_text(&plan.timeframe.key());
         self.auto.set_visible(plan.auto);
+        self.inert(false);
     }
 
-    /// Nothing typed and nothing chosen: just `auto`, since there is no
-    /// range yet for the window to pick a resolution for.
+    /// Nothing typed and nothing chosen: just `auto`, and nothing to open.
+    /// The range picks the resolution once there is one, so there is
+    /// nothing yet to choose between.
     fn blank(&self) {
         self.key.set_text("auto");
         self.auto.set_visible(false);
+        self.inert(true);
+    }
+
+    fn inert(&self, inert: bool) {
+        set_class(&self.chip, "inert", inert);
+        self.caret.set_visible(!inert);
+        self.chip.set_focusable(!inert);
+        self.chip.set_cursor_from_name(Some(if inert { "default" } else { "pointer" }));
+    }
+
+    fn is_inert(&self) -> bool {
+        self.chip.has_css_class("inert")
     }
 }
 
@@ -236,22 +255,31 @@ fn help(sections: &[(&str, &[(&str, &str)])], keys: &[(&str, &str)]) -> gtk::Wid
     column.upcast()
 }
 
-/// From or To: a day in three parts, year, month and day, `2026/03/21`,
-/// that the arrows and the keys set one part at a time.
+/// From or To: a box that takes a day however it is written, `2026/03/21`,
+/// `23 nov`, `yesterday`, `mon`, `-6m`, and shows it back as a date when
+/// the keyboard leaves it. Up and Down step it a day (Shift, ten), and the
+/// calendar in its corner picks one with the pointer.
 struct DateCell {
     root: gtk::Box,
-    field: gtk::Box,
-    parts: [gtk::Label; 3],
+    field: gtk::Entry,
     today: gtk::Label,
+    /// From takes the first day of what is typed, To the last: `2025` from
+    /// 1 January, to 31 December.
+    is_from: bool,
     date: Cell<NaiveDate>,
-    part: Cell<usize>,
-    typed: RefCell<String>,
+    today_is: Cell<NaiveDate>,
+    /// The card is writing the text, not the keyboard.
+    quiet: Cell<bool>,
     changed: RefCell<Option<OnDay>>,
     entered: RefCell<Option<Rc<dyn Fn()>>>,
+    /// What the month opens under, centred and as wide: the card.
+    anchor: RefCell<Option<gtk::Widget>>,
+    /// From and To as the card has them, for the month to shade.
+    span: Cell<(NaiveDate, NaiveDate)>,
 }
 
 impl DateCell {
-    fn new(name: &str) -> Rc<DateCell> {
+    fn new(name: &str, is_from: bool) -> Rc<DateCell> {
         let label = gtk::Label::new(Some(name));
         label.add_css_class("range-cell-name");
         label.set_xalign(0.0);
@@ -263,20 +291,12 @@ impl DateCell {
         head.append(&label);
         head.append(&today);
 
-        let parts = [gtk::Label::new(None), gtk::Label::new(None), gtk::Label::new(None)];
-        let field = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        let field = gtk::Entry::new();
         field.add_css_class("range-date");
-        field.set_focusable(true);
-        field.set_focus_on_click(true);
-        for (at, part) in parts.iter().enumerate() {
-            if at > 0 {
-                let slash = gtk::Label::new(Some("/"));
-                slash.add_css_class("range-slash");
-                field.append(&slash);
-            }
-            part.add_css_class("range-part");
-            field.append(part);
-        }
+        field.set_width_chars(10);
+        field.set_max_width_chars(10);
+        field.set_secondary_icon_name(Some("x-office-calendar-symbolic"));
+        field.set_secondary_icon_tooltip_text(Some("Pick from the month"));
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 3);
         root.set_hexpand(true);
@@ -286,64 +306,104 @@ impl DateCell {
         let cell = Rc::new(DateCell {
             root,
             field,
-            parts,
             today,
+            is_from,
             date: Cell::new(NaiveDate::default()),
-            part: Cell::new(0),
-            typed: RefCell::new(String::new()),
+            today_is: Cell::new(NaiveDate::default()),
+            quiet: Cell::new(false),
             changed: RefCell::new(None),
             entered: RefCell::new(None),
+            anchor: RefCell::new(None),
+            span: Cell::new((NaiveDate::default(), NaiveDate::default())),
         });
 
-        let keys = gtk::EventControllerKey::new();
+        // Typed: the range follows as soon as the text reads as a day.
         let weak = Rc::downgrade(&cell);
-        keys.connect_key_pressed(move |_, key, _, state| match weak.upgrade() {
-            Some(cell) => cell.key(key, state),
-            None => glib::Propagation::Proceed,
+        cell.field.connect_changed(move |_| {
+            if let Some(cell) = weak.upgrade()
+                && !cell.quiet.get()
+            {
+                cell.typed();
+            }
+        });
+
+        // Up and Down before the text sees them.
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(&cell);
+        keys.connect_key_pressed(move |_, key, _, state| {
+            let Some(cell) = weak.upgrade() else { return glib::Propagation::Proceed };
+            let step = if state.contains(gdk::ModifierType::SHIFT_MASK) { 10 } else { 1 };
+            let date = cell.date.get();
+            let moved = match key {
+                gdk::Key::Up => date.checked_add_days(Days::new(step)),
+                gdk::Key::Down => date.checked_sub_days(Days::new(step)),
+                _ => return glib::Propagation::Proceed,
+            };
+            cell.change(moved);
+            cell.show_date();
+            glib::Propagation::Stop
         });
         cell.field.add_controller(keys);
 
-        // A click lands on the part under it.
-        let click = gtk::GestureClick::new();
         let weak = Rc::downgrade(&cell);
-        click.connect_pressed(move |_, _, x, y| {
-            let Some(cell) = weak.upgrade() else { return };
-            let hit = cell.field.pick(x, y, gtk::PickFlags::DEFAULT);
-            if let Some(at) = cell.parts.iter().position(|part| hit.as_ref().is_some_and(|w| w.is_ancestor(part) || w == part)) {
-                cell.part.set(at);
+        cell.field.connect_icon_release(move |_, _| {
+            if let Some(cell) = weak.upgrade() {
+                cell.open_calendar();
             }
-            cell.typed.borrow_mut().clear();
-            cell.field.grab_focus();
-            cell.mark();
         });
-        cell.field.add_controller(click);
 
         let focus = gtk::EventControllerFocus::new();
         let weak = Rc::downgrade(&cell);
         focus.connect_enter(move |_| {
             let Some(cell) = weak.upgrade() else { return };
-            cell.typed.borrow_mut().clear();
             let entered = cell.entered.borrow().clone();
             if let Some(entered) = entered {
                 entered();
             }
         });
+        // Leaving, the text becomes the date it read as.
+        let weak = Rc::downgrade(&cell);
+        focus.connect_leave(move |_| {
+            if let Some(cell) = weak.upgrade() {
+                cell.show_date();
+            }
+        });
         cell.field.add_controller(focus);
-        cell.mark();
         cell
     }
 
+    /// The day the card has the cell on. The text is left alone while the
+    /// keyboard is in it, so what is being typed is not written over.
     fn set(&self, date: NaiveDate, today: NaiveDate) {
         self.date.set(date);
-        self.parts[0].set_text(&date.year().to_string());
-        self.parts[1].set_text(&format!("{:02}", date.month()));
-        self.parts[2].set_text(&format!("{:02}", date.day()));
+        self.today_is.set(today);
         self.today.set_visible(date == today);
+        if !self.focused() {
+            self.show_date();
+        }
     }
 
-    fn mark(&self) {
-        for (at, part) in self.parts.iter().enumerate() {
-            set_class(part, "on", at == self.part.get());
+    fn show_date(&self) {
+        self.quiet.set(true);
+        self.field.set_text(&self.date.get().format("%Y/%m/%d").to_string());
+        self.quiet.set(false);
+        set_class(&self.field, "unread", false);
+    }
+
+    fn focused(&self) -> bool {
+        let focus = self.field.root().and_then(|root| root.focus());
+        focus.is_some_and(|focus| focus.is_ancestor(&self.field) || focus == *self.field.upcast_ref::<gtk::Widget>())
+    }
+
+    fn typed(&self) {
+        let text = self.field.text();
+        match day_of(&text, self.today_is.get(), self.is_from) {
+            Some(date) => {
+                set_class(&self.field, "unread", false);
+                self.change(Some(date));
+            }
+            None => set_class(&self.field, "unread", !could_become(&text)),
         }
     }
 
@@ -355,100 +415,288 @@ impl DateCell {
         }
     }
 
-    fn key(&self, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
-        let date = self.date.get();
-        let step = if state.contains(gdk::ModifierType::SHIFT_MASK) { 10 } else { 1 };
-        match key {
-            gdk::Key::Left | gdk::Key::Right => {
-                let at = self.part.get();
-                self.part.set(if key == gdk::Key::Left { at.saturating_sub(1) } else { (at + 1).min(2) });
-                self.typed.borrow_mut().clear();
-                self.mark();
-                glib::Propagation::Stop
+    /// The month, under the card and as wide, on the cell's day.
+    fn open_calendar(self: &Rc<Self>) {
+        let anchor = self.anchor.borrow().clone().unwrap_or_else(|| self.field.clone().upcast());
+        let popover = gtk::Popover::new();
+        popover.add_css_class("pick-drop");
+        popover.add_css_class("range-month-pop");
+        popover.set_has_arrow(false);
+        popover.set_position(gtk::PositionType::Bottom);
+        popover.set_parent(&anchor);
+        popover.set_pointing_to(Some(&gdk::Rectangle::new(0, anchor.height(), anchor.width(), 1)));
+        // Clear of the card's own shadow margin, then a 6px gap.
+        popover.set_offset(0, MONTH_DROP);
+        let weak = Rc::downgrade(self);
+        let closing = popover.downgrade();
+        let pick: OnDay = Rc::new(move |day| {
+            let Some(cell) = weak.upgrade() else { return };
+            cell.change(Some(day));
+            cell.show_date();
+            if let Some(popover) = closing.upgrade() {
+                popover.popdown();
             }
-            gdk::Key::Up | gdk::Key::Down => {
-                self.typed.borrow_mut().clear();
-                let up = key == gdk::Key::Up;
-                let moved = match self.part.get() {
-                    2 if up => date.checked_add_days(Days::new(step)),
-                    2 => date.checked_sub_days(Days::new(step)),
-                    at => {
-                        let months = Months::new(step as u32 * if at == 1 { 1 } else { 12 });
-                        if up { date.checked_add_months(months) } else { date.checked_sub_months(months) }
-                    }
-                };
-                self.change(moved);
-                glib::Propagation::Stop
-            }
-            _ if state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) => {
-                glib::Propagation::Proceed
-            }
-            _ => match key.to_unicode().filter(|c| c.is_ascii_alphanumeric()) {
-                Some(c) => {
-                    self.typed.borrow_mut().push(c);
-                    self.type_part();
-                    glib::Propagation::Stop
+        });
+        let month = MonthView::new(self.date.get(), self.span.get(), self.is_from, self.today_is.get(), pick);
+        // As wide as the card: its content is the card less the popover's
+        // padding, which this one has too.
+        month.root.set_size_request(anchor.width(), -1);
+        popover.set_child(Some(&month.root));
+        let field = self.field.downgrade();
+        // The handler holds the view, so it lives as long as the popover: its
+        // arrows and title reach it only weakly.
+        let view = month.clone();
+        popover.connect_closed(move |popover| {
+            let _ = &view;
+            let (popover, field) = (popover.clone(), field.clone());
+            glib::idle_add_local_once(move || {
+                popover.unparent();
+                if let Some(field) = field.upgrade() {
+                    field.grab_focus_without_selecting();
                 }
-                None => glib::Propagation::Proceed,
-            },
+            });
+        });
+        popover.popup();
+        month.focus_day();
+    }
+}
+
+/// What the month view shows: the days of a month, the months of a year,
+/// or a dozen years.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Zoom {
+    Days,
+    Months,
+    Years,
+}
+
+/// A month of days for From or To: `October 2026` between two arrows, and
+/// the stretch between From and To shaded, the end being set filled and the
+/// other ringed. The title zooms out the way calendars do: on the days it
+/// shows the months of the year, on the months a dozen years; picking one
+/// zooms back in. Our own rather than GTK's calendar, which has a header
+/// for the month and another for the year, and no way to shade a range.
+struct MonthView {
+    root: gtk::Box,
+    title: gtk::Button,
+    grid: gtk::Grid,
+    /// The first of the month on show; its year is the one the months and
+    /// the years are drawn around.
+    month: Cell<NaiveDate>,
+    zoom: Cell<Zoom>,
+    span: (NaiveDate, NaiveDate),
+    is_from: bool,
+    today: NaiveDate,
+    pick: OnDay,
+}
+
+impl MonthView {
+    fn new(day: NaiveDate, span: (NaiveDate, NaiveDate), is_from: bool, today: NaiveDate, pick: OnDay) -> Rc<MonthView> {
+        let back = gtk::Button::from_icon_name("pan-start-symbolic");
+        back.set_tooltip_text(Some("Back"));
+        let on = gtk::Button::from_icon_name("pan-end-symbolic");
+        on.set_tooltip_text(Some("On"));
+        for button in [&back, &on] {
+            button.add_css_class("flat");
+            button.add_css_class("range-month-step");
+            button.set_valign(gtk::Align::Center);
+        }
+        let title = gtk::Button::new();
+        title.add_css_class("flat");
+        title.add_css_class("range-month-title");
+        title.set_hexpand(true);
+        title.set_halign(gtk::Align::Center);
+        let head = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        head.append(&back);
+        head.append(&title);
+        head.append(&on);
+        let rule = gtk::Separator::new(gtk::Orientation::Horizontal);
+        let grid = gtk::Grid::new();
+        grid.set_column_homogeneous(true);
+        grid.set_row_spacing(2);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        root.add_css_class("range-month");
+        root.append(&head);
+        root.append(&rule);
+        root.append(&grid);
+        let view = Rc::new(MonthView {
+            root,
+            title,
+            grid,
+            month: Cell::new(day.with_day(1).unwrap_or(day)),
+            zoom: Cell::new(Zoom::Days),
+            span,
+            is_from,
+            today,
+            pick,
+        });
+        for (button, ahead) in [(&back, false), (&on, true)] {
+            let weak = Rc::downgrade(&view);
+            button.connect_clicked(move |_| {
+                if let Some(view) = weak.upgrade() {
+                    view.step(ahead);
+                }
+            });
+        }
+        let weak = Rc::downgrade(&view);
+        view.title.connect_clicked(move |_| {
+            let Some(view) = weak.upgrade() else { return };
+            let out = match view.zoom.get() {
+                Zoom::Days => Zoom::Months,
+                Zoom::Months | Zoom::Years => Zoom::Years,
+            };
+            view.zoom.set(out);
+            view.draw();
+        });
+        view.draw();
+        view
+    }
+
+    /// A month, a year or a dozen years on, as zoomed.
+    fn step(self: &Rc<Self>, ahead: bool) {
+        let months = match self.zoom.get() {
+            Zoom::Days => 1,
+            Zoom::Months => 12,
+            Zoom::Years => 144,
+        };
+        let month = self.month.get();
+        let moved = match ahead {
+            true => month.checked_add_months(chrono::Months::new(months)),
+            false => month.checked_sub_months(chrono::Months::new(months)),
+        };
+        if let Some(moved) = moved.filter(|d| (1800..=2200).contains(&d.year())) {
+            self.month.set(moved);
+            self.draw();
         }
     }
 
-    /// What has been typed into the part with the keyboard so far: four
-    /// digits of a year, a month's number or the start of its name, two
-    /// digits of a day. A part filled moves on to the next.
-    fn type_part(&self) {
-        let date = self.date.get();
-        let typed = self.typed.borrow().clone();
-        let digits = typed.chars().all(|c| c.is_ascii_digit());
-        let next = |cell: &DateCell| {
-            cell.typed.borrow_mut().clear();
-            cell.part.set((cell.part.get() + 1).min(2));
-            cell.mark();
-        };
-        match self.part.get() {
-            2 if digits => {
-                let day: u32 = typed[typed.len().saturating_sub(2)..].parse().unwrap_or(1);
-                let day = day.clamp(1, days_in(date.year(), date.month()));
-                if typed.len() >= 2 || day > 3 {
-                    next(self);
+    /// The keyboard on the day being set, so arrows walk the days and
+    /// Enter picks one.
+    fn focus_day(&self) {
+        let day = if self.is_from { self.span.0 } else { self.span.1 };
+        let mut child = self.grid.first_child();
+        while let Some(widget) = child {
+            if widget.widget_name() == day.to_string() {
+                if let Some(button) = widget.first_child() {
+                    button.grab_focus();
                 }
-                self.change(date.with_day(day));
+                return;
             }
-            1 => {
-                let month = if digits {
-                    let two: u32 = typed[typed.len().saturating_sub(2)..].parse().unwrap_or(0);
-                    let month = if (1..=12).contains(&two) { two } else { typed[typed.len() - 1..].parse().unwrap_or(0) };
-                    if typed.len() >= 2 || month > 1 {
-                        next(self);
-                    }
-                    month
-                } else {
-                    let lower = typed.to_lowercase();
-                    let found = (1..=12u32).find(|&m| {
-                        NaiveDate::from_ymd_opt(2000, m, 1)
-                            .is_some_and(|d| d.format("%B").to_string().to_lowercase().starts_with(&lower))
-                    });
-                    if found.is_none() {
-                        self.typed.borrow_mut().clear();
-                    }
-                    found.unwrap_or(0)
-                };
-                if (1..=12).contains(&month) {
-                    let day = date.day().min(days_in(date.year(), month));
-                    self.change(NaiveDate::from_ymd_opt(date.year(), month, day));
-                }
-            }
-            0 if digits => {
-                if typed.len() >= 4 {
-                    let year: i32 = typed[typed.len() - 4..].parse().unwrap_or(date.year());
-                    next(self);
-                    let day = date.day().min(days_in(year, date.month()));
-                    self.change(NaiveDate::from_ymd_opt(year, date.month(), day));
-                }
-            }
-            _ => self.typed.borrow_mut().clear(),
+            child = widget.next_sibling();
         }
+    }
+
+    fn draw(self: &Rc<Self>) {
+        while let Some(child) = self.grid.first_child() {
+            self.grid.remove(&child);
+        }
+        match self.zoom.get() {
+            Zoom::Days => self.draw_days(),
+            Zoom::Months => self.draw_months(),
+            Zoom::Years => self.draw_years(),
+        }
+    }
+
+    fn draw_days(&self) {
+        let month = self.month.get();
+        self.title.set_label(&month.format("%B %Y").to_string());
+        for (col, name) in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].iter().enumerate() {
+            let label = gtk::Label::new(Some(name));
+            label.add_css_class("range-month-name");
+            self.grid.attach(&label, col as i32, 0, 1, 1);
+        }
+        let (low, high) = match self.span.0 <= self.span.1 {
+            true => self.span,
+            false => (self.span.1, self.span.0),
+        };
+        let setting = if self.is_from { self.span.0 } else { self.span.1 };
+        let lead = u64::from(month.weekday().num_days_from_sunday());
+        let Some(first) = month.checked_sub_days(Days::new(lead)) else { return };
+        for at in 0..42u64 {
+            let Some(day) = first.checked_add_days(Days::new(at)) else { continue };
+            let cell = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            cell.add_css_class("range-month-cell");
+            cell.set_widget_name(&day.to_string());
+            // Only this month's days: the next month's, greyed, carry none.
+            if low < high && day.month() == month.month() {
+                set_class(&cell, "between", day > low && day < high);
+                set_class(&cell, "start", day == low);
+                set_class(&cell, "end", day == high);
+            }
+            let button = gtk::Button::with_label(&day.day().to_string());
+            button.add_css_class("flat");
+            button.add_css_class("range-month-day");
+            button.set_hexpand(true);
+            button.set_halign(gtk::Align::Center);
+            set_class(&button, "out", day.month() != month.month());
+            set_class(&button, "setting", day == setting);
+            set_class(&button, "other", day != setting && (day == low || day == high));
+            set_class(&button, "today", day == self.today);
+            let pick = self.pick.clone();
+            button.connect_clicked(move |_| pick(day));
+            cell.append(&button);
+            self.grid.attach(&cell, (at % 7) as i32, 1 + (at / 7) as i32, 1, 1);
+        }
+    }
+
+    /// The months of the year on show, three rows of four; the one the day
+    /// being set falls in filled.
+    fn draw_months(self: &Rc<Self>) {
+        let shown = self.month.get();
+        self.title.set_label(&shown.year().to_string());
+        let setting = if self.is_from { self.span.0 } else { self.span.1 };
+        for month in 1..=12u32 {
+            let Some(first) = NaiveDate::from_ymd_opt(shown.year(), month, 1) else { continue };
+            let button = self.zoom_button(&first.format("%b").to_string(), first, Zoom::Days);
+            set_class(&button, "setting", setting.year() == shown.year() && setting.month() == month);
+            set_class(&button, "today", self.today.year() == shown.year() && self.today.month() == month);
+            let at = (month - 1) as i32;
+            self.grid.attach(&button, at % 4, at / 4, 1, 1);
+        }
+    }
+
+    /// A dozen years around the one on show, three rows of four.
+    fn draw_years(self: &Rc<Self>) {
+        let shown = self.month.get();
+        let first = shown.year() - shown.year().rem_euclid(12);
+        self.title.set_label(&format!("{first} – {}", first + 11));
+        let setting = if self.is_from { self.span.0 } else { self.span.1 };
+        for at in 0..12 {
+            let year = first + at;
+            let Some(day) = NaiveDate::from_ymd_opt(year, shown.month(), 1) else { continue };
+            let button = self.zoom_button(&year.to_string(), day, Zoom::Months);
+            set_class(&button, "setting", setting.year() == year);
+            set_class(&button, "today", self.today.year() == year);
+            self.grid.attach(&button, at % 4, at / 4, 1, 1);
+        }
+    }
+
+    /// A month or a year to pick, which zooms in on it.
+    fn zoom_button(self: &Rc<Self>, label: &str, to: NaiveDate, zoom: Zoom) -> gtk::Button {
+        let button = gtk::Button::with_label(label);
+        button.add_css_class("flat");
+        button.add_css_class("range-month-pick");
+        button.set_hexpand(true);
+        let weak = Rc::downgrade(self);
+        button.connect_clicked(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.month.set(to);
+                view.zoom.set(zoom);
+                view.draw();
+            }
+        });
+        button
+    }
+}
+
+/// The day From (`is_from`) or To takes from what is typed in it: any one
+/// end a slice takes, `23 nov`, `2025/03`, `-6m`, and From its first day,
+/// To its last.
+fn day_of(text: &str, today: NaiveDate, is_from: bool) -> Option<NaiveDate> {
+    let end = End::parse(text)?;
+    match is_from {
+        true => end.first(today),
+        false => end.last(today),
     }
 }
 
@@ -518,8 +766,8 @@ impl RangeCard {
         chip.chip.set_cursor_from_name(Some("pointer"));
         frame.pin_in_box(&chip.chip);
 
-        let from = DateCell::new("From");
-        let to = DateCell::new("To");
+        let from = DateCell::new("From", true);
+        let to = DateCell::new("To", false);
         let arrow = gtk::Label::new(Some("→"));
         arrow.add_css_class("range-arrow");
         arrow.set_valign(gtk::Align::End);
@@ -544,6 +792,9 @@ impl RangeCard {
             typed_tf: RefCell::new(String::new()),
             touched: Cell::new(false),
         });
+        for cell in [&card.from, &card.to] {
+            *cell.anchor.borrow_mut() = card.frame.popover.child();
+        }
         card.wire();
         card
     }
@@ -676,6 +927,9 @@ impl RangeCard {
 
     /// The resolutions on the strip, and auto, under the chip.
     fn open_resolutions(self: &Rc<Self>) {
+        if self.chip.is_inert() {
+            return;
+        }
         let Some(range) = self.counting.get() else { return };
         let (plan, ladder, current) = match self.context.borrow().as_ref() {
             Some(context) => (context.plan.clone(), context.ladder.clone(), context.current),
@@ -754,6 +1008,9 @@ impl RangeCard {
 
     /// One along the strip, coarser or finer, from what the chip shows.
     fn step_resolution(&self, coarser: bool) {
+        if self.chip.is_inert() {
+            return;
+        }
         let ladder = match self.context.borrow().as_ref() {
             Some(context) => context.ladder.clone(),
             None => return,
@@ -795,12 +1052,16 @@ impl RangeCard {
     }
 
     fn tab(&self, back: bool) {
-        let ring: [gtk::Widget; 4] = [
+        // The chip is passed by while it has nothing to choose.
+        let ring: Vec<gtk::Widget> = [
             self.frame.entry.clone().upcast(),
             self.chip.chip.clone().upcast(),
             self.from.field.clone().upcast(),
             self.to.field.clone().upcast(),
-        ];
+        ]
+        .into_iter()
+        .filter(|stop| !(self.chip.is_inert() && stop == self.chip.chip.upcast_ref::<gtk::Widget>()))
+        .collect();
         let focus = self.frame.entry.root().and_then(|root| root.focus());
         let at = ring
             .iter()
@@ -836,6 +1097,8 @@ impl RangeCard {
 
         let wrong = !text.trim().is_empty() && parsed.is_none() && !could_become(&text);
         set_class(&self.frame.entry, "error", wrong);
+        // Long text keeps clear of the chip in the corner.
+        set_class(&self.frame.entry, "long", text.chars().count() > 12);
 
         let (from, to) = match parsed {
             Some(range) => Self::days(range, context),
@@ -844,6 +1107,9 @@ impl RangeCard {
         };
         self.from.set(from, today);
         self.to.set(to, today);
+        for cell in [&self.from, &self.to] {
+            cell.span.set((from, to));
+        }
         let idle = parsed.is_none() && !touched;
         for cell in [&self.from, &self.to] {
             set_class(&cell.field, "idle", idle);
@@ -903,7 +1169,7 @@ impl RangeCard {
         self.touched.set(true);
         // Keep the text and the cells in step without the cells losing the
         // part they are on: the refresh below reads the new slice back.
-        self.frame.entry.set_text(&slashed(slice(from, to, today)));
+        self.frame.entry.set_text(&spelled(from, to, today));
         self.refresh();
     }
 
@@ -1108,10 +1374,17 @@ fn slice(from: NaiveDate, to: NaiveDate, today: NaiveDate) -> Range {
     Range::Slice(Some(End::Day(from)), (to < today).then_some(End::Day(to)))
 }
 
-/// A slice of days as the card writes it, `2026/03/21:`: the dates the way
-/// From and To show them. Only days, so no dash in it means "ago".
-fn slashed(range: Range) -> String {
-    range.key().replace('-', "/")
+/// The slice From and To make, as the card writes it into the box: the
+/// days the way the cells show them, less the year when it is this one,
+/// `03/21:`, which reads as the same day and keeps the text short of the
+/// chip. Open at the end while To is today, so it stays live.
+fn spelled(from: NaiveDate, to: NaiveDate, today: NaiveDate) -> String {
+    let day = |day: NaiveDate| match day.year() == today.year() {
+        true => day.format("%m/%d").to_string(),
+        false => day.format("%Y/%m/%d").to_string(),
+    };
+    let end = if to < today { day(to) } else { String::new() };
+    format!("{}:{end}", day(from))
 }
 
 /// Text that is not a range yet but could be with more keys: `20` on the
@@ -1146,13 +1419,6 @@ fn could_become(text: &str) -> bool {
     }
     // And the rest is numbers and what goes between them.
     text.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '/' | ':' | '.' | ' ' | ','))
-}
-
-fn days_in(year: i32, month: u32) -> u32 {
-    NaiveDate::from_ymd_opt(year, month, 1)
-        .and_then(|first| first.checked_add_months(Months::new(1)))
-        .and_then(|next| next.pred_opt())
-        .map_or(28, |last| last.day())
 }
 
 fn set_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {
@@ -1250,13 +1516,40 @@ mod tests {
     }
 
     #[test]
+    fn from_takes_the_first_day_of_what_is_typed_and_to_the_last() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap_or_default();
+        let on = |y, m, d| NaiveDate::from_ymd_opt(y, m, d);
+        assert_eq!(day_of("23 nov", today, true), on(2025, 11, 23));
+        assert_eq!(day_of("yesterday", today, false), on(2026, 10, 28));
+        assert_eq!(day_of("2026/03/21", today, true), on(2026, 3, 21));
+        assert_eq!(day_of("2025", today, true), on(2025, 1, 1));
+        assert_eq!(day_of("2025", today, false), on(2025, 12, 31));
+        assert_eq!(day_of("2025/03", today, false), on(2025, 3, 31));
+        assert_eq!(day_of("mon", today, true), on(2026, 10, 26));
+        assert_eq!(day_of("23 n", today, true), None);
+    }
+
+    #[test]
     fn a_slice_set_by_hand_stays_live_to_today() {
         let today = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap_or_default();
         let from = NaiveDate::from_ymd_opt(2026, 3, 21).unwrap_or_default();
         assert_eq!(slice(from, today, today).key(), "2026-03-21:");
         let to = NaiveDate::from_ymd_opt(2026, 9, 30).unwrap_or_default();
         assert_eq!(slice(from, to, today).key(), "2026-03-21:2026-09-30");
-        assert_eq!(slashed(slice(from, to, today)), "2026/03/21:2026/09/30");
-        assert_eq!(Range::parse(&slashed(slice(from, to, today))), Some(slice(from, to, today)));
+    }
+
+    #[test]
+    fn the_box_spells_this_year_without_it() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap_or_default();
+        let on = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap_or_default();
+        assert_eq!(spelled(on(2026, 3, 21), today, today), "03/21:");
+        assert_eq!(spelled(on(2026, 1, 1), on(2026, 9, 30), today), "01/01:09/30");
+        assert_eq!(spelled(on(2025, 11, 3), on(2026, 2, 1), today), "2025/11/03:02/01");
+        // Each reads back as the days it was written from.
+        for (from, to) in [(on(2026, 3, 21), today), (on(2026, 1, 1), on(2026, 9, 30)), (on(2025, 11, 3), on(2026, 2, 1))] {
+            let range = Range::parse(&spelled(from, to, today)).unwrap_or(Range::All);
+            assert_eq!(range.start(today), Some(from));
+            assert_eq!(range.end(today).unwrap_or(today), to);
+        }
     }
 }
